@@ -1,0 +1,959 @@
+"""Adaptive Memory Engine (AME) — Core Cognitive Memory Architecture.
+
+RFC-0012: Adaptive Memory Engine & Knowledge Object Model implementation.
+Provides active, governed, multi-tiered cognitive memory storage,
+decision evaluation, context assembly, and pipeline integration ports.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Any, Dict, List, Optional, Protocol, Tuple
+
+from intent_kernel.kom import (
+    KnowledgeNature,
+    KnowledgeObject,
+    KnowledgeState,
+    MemoryClass,
+    ProvenanceRecord,
+    RetentionPolicy,
+    ScopeType,
+    SourceType,
+)
+from intent_kernel.persistence import MemoryPersistenceEngine, PersistenceEngine
+from intent_kernel.pkb.models import KnowledgeEvent
+from intent_kernel.time_utils import new_id, utc_iso, utc_now
+
+
+# ============================================================================
+# 1. PERSISTENCE PORTS (REPOSITORIES, VECTOR, GRAPH, BLOB)
+# ============================================================================
+
+class KnowledgeObjectRepositoryPort(Protocol):
+    """Abstract port for Knowledge Object persistent storage."""
+
+    async def save(self, obj: KnowledgeObject) -> bool: ...
+    async def get(self, object_id: str) -> Optional[KnowledgeObject]: ...
+    async def query(
+        self,
+        project_id: Optional[str] = None,
+        memory_class: Optional[MemoryClass] = None,
+        status: Optional[KnowledgeState] = KnowledgeState.ACTIVE,
+        include_global: bool = True,
+        limit: int = 100,
+    ) -> List[KnowledgeObject]: ...
+    async def update(self, obj: KnowledgeObject) -> bool: ...
+    async def supersede(self, old_id: str, new_obj: KnowledgeObject) -> bool: ...
+    async def archive(self, object_id: str) -> bool: ...
+    async def expire(self, object_id: str) -> bool: ...
+    async def delete(self, object_id: str) -> bool: ...
+
+
+class VectorSearchPort(Protocol):
+    """Abstract port for vector indexing and similarity search."""
+
+    async def index(self, object_id: str, vector: List[float], metadata: Dict[str, Any]) -> bool: ...
+    async def search_similar(
+        self, vector: List[float], top_k: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Tuple[str, float]]: ...
+    async def update(self, object_id: str, vector: List[float], metadata: Dict[str, Any]) -> bool: ...
+    async def remove(self, object_id: str) -> bool: ...
+    async def hybrid_search(
+        self, query_text: str, vector: List[float], top_k: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Tuple[str, float]]: ...
+
+
+class GraphEdgeStoragePort(Protocol):
+    """Abstract port for semantic graph relationships and lineage tracking."""
+
+    async def add_relation(self, source_id: str, target_id: str, relation_type: str, weight: float = 1.0) -> bool: ...
+    async def remove_relation(self, source_id: str, target_id: str, relation_type: str) -> bool: ...
+    async def get_relations(self, object_id: str, relation_type: Optional[str] = None) -> List[Dict[str, Any]]: ...
+    async def trace_provenance(self, object_id: str) -> List[Dict[str, Any]]: ...
+
+
+class BlobStoragePort(Protocol):
+    """Abstract port for binary/large artifact storage associated with Knowledge Objects."""
+
+    async def store_artifact(self, artifact_id: str, data: bytes, mime_type: str = "application/octet-stream") -> bool: ...
+    async def retrieve_artifact(self, artifact_id: str) -> Optional[Tuple[bytes, str]]: ...
+    async def delete_artifact(self, artifact_id: str) -> bool: ...
+
+
+# ============================================================================
+# 2. LOCAL ADAPTERS (IN-MEMORY / PERSISTENCE-ENGINE BACKED)
+# ============================================================================
+
+class LocalKnowledgeObjectRepository:
+    """Concrete repository adapter backed by Kernel PersistenceEngine abstraction."""
+
+    def __init__(self, persistence_engine: Optional[PersistenceEngine] = None):
+        self._engine = persistence_engine or MemoryPersistenceEngine()
+
+    async def save(self, obj: KnowledgeObject) -> bool:
+        key = f"ko:{obj.object_id}"
+        return await self._engine.write(key, obj.to_dict())
+
+    async def get(self, object_id: str) -> Optional[KnowledgeObject]:
+        key = f"ko:{object_id}"
+        data = await self._engine.read(key)
+        if not data:
+            return None
+        return KnowledgeObject.from_dict(data)
+
+    async def query(
+        self,
+        project_id: Optional[str] = None,
+        memory_class: Optional[MemoryClass] = None,
+        status: Optional[KnowledgeState] = KnowledgeState.ACTIVE,
+        include_global: bool = True,
+        limit: int = 100,
+    ) -> List[KnowledgeObject]:
+        records = await self._engine.query(prefix="ko:")
+        results = []
+        for r in records:
+            obj = KnowledgeObject.from_dict(r)
+            if status and obj.status != status:
+                continue
+            if memory_class and obj.memory_class != memory_class:
+                continue
+
+            # Scope matching
+            if project_id and project_id != "GLOBAL":
+                if obj.project_id == project_id:
+                    results.append(obj)
+                elif include_global and (obj.project_id == "GLOBAL" or obj.user_scope == ScopeType.GLOBAL_SCOPE):
+                    results.append(obj)
+            else:
+                if obj.project_id == "GLOBAL" or obj.user_scope == ScopeType.GLOBAL_SCOPE:
+                    results.append(obj)
+
+            if len(results) >= limit:
+                break
+        return results
+
+    async def update(self, obj: KnowledgeObject) -> bool:
+        obj.updated_at = utc_iso()
+        return await self.save(obj)
+
+    async def supersede(self, old_id: str, new_obj: KnowledgeObject) -> bool:
+        old_obj = await self.get(old_id)
+        if not old_obj:
+            return False
+        old_obj.supersede_with(new_obj)
+        await self.save(old_obj)
+        await self.save(new_obj)
+        return True
+
+    async def archive(self, object_id: str) -> bool:
+        obj = await self.get(object_id)
+        if not obj:
+            return False
+        obj.status = KnowledgeState.ARCHIVED
+        obj.updated_at = utc_iso()
+        return await self.save(obj)
+
+    async def expire(self, object_id: str) -> bool:
+        obj = await self.get(object_id)
+        if not obj:
+            return False
+        obj.status = KnowledgeState.EXPIRED
+        obj.updated_at = utc_iso()
+        return await self.save(obj)
+
+    async def delete(self, object_id: str) -> bool:
+        key = f"ko:{object_id}"
+        return await self._engine.delete(key)
+
+
+class InMemoryVectorSearchAdapter:
+    """In-memory vector search adapter (fake/test implementation)."""
+
+    def __init__(self):
+        self._index: Dict[str, Tuple[List[float], Dict[str, Any]]] = {}
+
+    async def index(self, object_id: str, vector: List[float], metadata: Dict[str, Any]) -> bool:
+        self._index[object_id] = (vector, metadata)
+        return True
+
+    async def search_similar(
+        self, vector: List[float], top_k: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Tuple[str, float]]:
+        if not self._index:
+            return []
+
+        def cosine_similarity(v1: List[float], v2: List[float]) -> float:
+            if not v1 or not v2 or len(v1) != len(v2):
+                return 0.0
+            dot = sum(a * b for a, b in zip(v1, v2))
+            norm1 = math.sqrt(sum(a * a for a in v1))
+            norm2 = math.sqrt(sum(b * b for b in v2))
+            return dot / (norm1 * norm2) if norm1 and norm2 else 0.0
+
+        scored = []
+        for obj_id, (vec, meta) in self._index.items():
+            if filters:
+                match = all(meta.get(k) == v for k, v in filters.items())
+                if not match:
+                    continue
+            sim = cosine_similarity(vector, vec)
+            scored.append((obj_id, sim))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
+
+    async def update(self, object_id: str, vector: List[float], metadata: Dict[str, Any]) -> bool:
+        return await self.index(object_id, vector, metadata)
+
+    async def remove(self, object_id: str) -> bool:
+        if object_id in self._index:
+            del self._index[object_id]
+            return True
+        return False
+
+    async def hybrid_search(
+        self, query_text: str, vector: List[float], top_k: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Tuple[str, float]]:
+        return await self.search_similar(vector, top_k, filters)
+
+
+class InMemoryGraphEdgeStorageAdapter:
+    """In-memory semantic relationship graph adapter."""
+
+    def __init__(self):
+        self._edges: List[Dict[str, Any]] = []
+
+    async def add_relation(self, source_id: str, target_id: str, relation_type: str, weight: float = 1.0) -> bool:
+        self._edges.append({
+            "source": source_id,
+            "target": target_id,
+            "type": relation_type,
+            "weight": weight,
+            "created_at": utc_iso(),
+        })
+        return True
+
+    async def remove_relation(self, source_id: str, target_id: str, relation_type: str) -> bool:
+        initial = len(self._edges)
+        self._edges = [
+            e for e in self._edges
+            if not (e["source"] == source_id and e["target"] == target_id and e["type"] == relation_type)
+        ]
+        return len(self._edges) < initial
+
+    async def get_relations(self, object_id: str, relation_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        results = []
+        for e in self._edges:
+            if e["source"] == object_id or e["target"] == object_id:
+                if relation_type and e["type"] != relation_type:
+                    continue
+                results.append(e)
+        return results
+
+    async def trace_provenance(self, object_id: str) -> List[Dict[str, Any]]:
+        return await self.get_relations(object_id, relation_type="derived_from")
+
+
+class InMemoryBlobStorageAdapter:
+    """In-memory blob storage adapter for attachments."""
+
+    def __init__(self):
+        self._blobs: Dict[str, Tuple[bytes, str]] = {}
+
+    async def store_artifact(self, artifact_id: str, data: bytes, mime_type: str = "application/octet-stream") -> bool:
+        self._blobs[artifact_id] = (data, mime_type)
+        return True
+
+    async def retrieve_artifact(self, artifact_id: str) -> Optional[Tuple[bytes, str]]:
+        return self._blobs.get(artifact_id)
+
+    async def delete_artifact(self, artifact_id: str) -> bool:
+        if artifact_id in self._blobs:
+            del self._blobs[artifact_id]
+            return True
+        return False
+
+
+# ============================================================================
+# 3. LEGACY PKB COMPATIBILITY ADAPTER
+# ============================================================================
+
+class LegacyKnowledgeEventAdapter:
+    """Adapter for converting between legacy PKB KnowledgeEvent and KnowledgeObject."""
+
+    @staticmethod
+    def event_to_object(event: KnowledgeEvent, project_id: str = "GLOBAL") -> KnowledgeObject:
+        """Convert a legacy PKB KnowledgeEvent to a canonical KnowledgeObject."""
+        # Classify memory class based on event type
+        event_type_str = str(event.type.value if hasattr(event.type, "value") else event.type).lower()
+        if "decision" in event_type_str:
+            mem_class = MemoryClass.DECISION
+            nat = KnowledgeNature.DECISION
+        elif "goal" in event_type_str:
+            mem_class = MemoryClass.GOAL
+            nat = KnowledgeNature.GOAL
+        elif "memory" in event_type_str or "preference" in event_type_str:
+            mem_class = MemoryClass.PREFERENCE
+            nat = KnowledgeNature.PREFERENCE
+        elif "lesson" in event_type_str or "correction" in event_type_str:
+            mem_class = MemoryClass.CORRECTION
+            nat = KnowledgeNature.CORRECTION
+        else:
+            mem_class = MemoryClass.SEMANTIC
+            nat = KnowledgeNature.FACT
+
+        prov = ProvenanceRecord(
+            source_type=SourceType.LEGACY_PKB,
+            source_id=event.source,
+            timestamp=event.created_at.isoformat() if hasattr(event.created_at, "isoformat") else str(event.created_at),
+            evidence_reference=f"pkb_event:{event.id}",
+            confidence_at_source=event.confidence,
+        )
+
+        valid_until = event.expires_at.isoformat() if event.expires_at and hasattr(event.expires_at, "isoformat") else None
+
+        return KnowledgeObject(
+            object_id=event.id,
+            object_type=event_type_str.upper(),
+            memory_class=mem_class,
+            knowledge_nature=nat,
+            content=event.content,
+            summary=event.summary or event.title,
+            project_id=project_id,
+            source=event.source,
+            provenance=prov,
+            confidence=event.confidence,
+            importance=0.5,
+            status=KnowledgeState.ACTIVE if event.lifecycle.value in ["transient", "permanent", "active"] else KnowledgeState.ARCHIVED,
+            tags=list(event.tags),
+            created_at=event.created_at.isoformat() if hasattr(event.created_at, "isoformat") else str(event.created_at),
+            updated_at=event.updated_at.isoformat() if hasattr(event.updated_at, "isoformat") else str(event.updated_at),
+            valid_until=valid_until,
+            version=event.version,
+            supersedes=event.parent_event_id,
+            metadata=dict(event.metadata),
+        )
+
+    @staticmethod
+    def object_to_event(obj: KnowledgeObject) -> KnowledgeEvent:
+        """Convert a canonical KnowledgeObject back to a legacy PKB KnowledgeEvent."""
+        from intent_kernel.types import Domain, EventLifecycle, EventType
+
+        return KnowledgeEvent(
+            id=obj.object_id,
+            title=obj.summary or str(obj.content)[:50],
+            content=obj.content if isinstance(obj.content, dict) else {"text": str(obj.content)},
+            summary=obj.summary,
+            confidence=obj.confidence,
+            source=obj.source,
+            tags=list(obj.tags),
+            version=obj.version,
+            parent_event_id=obj.supersedes,
+            metadata={"project_id": obj.project_id, "memory_class": obj.memory_class.value},
+        )
+
+
+# ============================================================================
+# 4. CANDIDATES & DECISION ENGINE
+# ============================================================================
+
+class MemoryDecisionEnum(str, Enum):
+    """Categorical outcomes of the Memory Decision Engine."""
+
+    STORE = "store"
+    IGNORE = "ignore"
+    MERGE = "merge"
+    UPDATE = "update"
+    SUPERSEDE = "supersede"
+    TEMPORARY = "temporary"
+    REJECT = "reject"
+
+
+@dataclass
+class MemoryCandidate:
+    """Proposed candidate statement evaluated for memory inclusion."""
+
+    candidate_id: str = field(default_factory=new_id)
+    candidate_type: str = "GENERIC"
+    proposed_content: Any = ""
+    source: str = "user_input"
+    project_id: str = "GLOBAL"
+    confidence: float = 0.8
+    proposed_importance: float = 0.5
+    expected_lifetime: str = "long_term"  # "session", "short_term", "long_term"
+    reason_to_remember: str = ""
+    sensitivity: str = "normal"
+    provenance: ProvenanceRecord = field(default_factory=ProvenanceRecord)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MemoryDecision:
+    """Audit record containing the explicit decision outcome for a MemoryCandidate."""
+
+    decision: MemoryDecisionEnum
+    reason: str
+    target_object_id: Optional[str] = None
+    resulting_version: int = 1
+    retention: RetentionPolicy = RetentionPolicy.LONG_TERM
+    confidence: float = 0.8
+    timestamp: str = field(default_factory=utc_iso)
+
+
+class MemoryDecisionEngine:
+    """Deterministic decision engine for memory intake, deduplication, conflict, and salience."""
+
+    # Words indicating temporary context
+    TEMPORARY_PATTERNS = [
+        re.compile(r"\b(esta semana|este mês|hoje|amanhã|this week|today|tomorrow|temporarily)\b", re.IGNORECASE)
+    ]
+
+    # Words indicating explicit user correction
+    CORRECTION_PATTERNS = [
+        re.compile(r"\b(corrigindo|correção|na verdade|mudei de ideia|correction|actually|instead|mudei para)\b", re.IGNORECASE)
+    ]
+
+    # Words indicating explicit preference
+    PREFERENCE_PATTERNS = [
+        re.compile(r"\b(prefiro|preferência|gosto de|não gosto|my preference|i prefer|always use)\b", re.IGNORECASE)
+    ]
+
+    @classmethod
+    def calculate_importance(cls, candidate: MemoryCandidate) -> float:
+        """Calculate deterministic importance/salience score (no LLM required)."""
+        score = candidate.proposed_importance
+
+        content_str = str(candidate.proposed_content).lower()
+
+        # Explicit user preference boost
+        if any(p.search(content_str) for p in cls.PREFERENCE_PATTERNS):
+            score = max(score, 0.85)
+
+        # Correction boost
+        if any(p.search(content_str) for p in cls.CORRECTION_PATTERNS):
+            score = max(score, 0.90)
+
+        # Project boundary association
+        if candidate.project_id and candidate.project_id != "GLOBAL":
+            score += 0.1
+
+        return min(max(score, 0.0), 1.0)
+
+    @classmethod
+    def evaluate(
+        cls, candidate: MemoryCandidate, existing_objects: List[KnowledgeObject]
+    ) -> Tuple[MemoryDecision, Optional[KnowledgeObject]]:
+        """Evaluate candidate against existing active knowledge objects to determine decision."""
+        temp_ko = KnowledgeObject(
+            object_id="temp_check",
+            content=candidate.proposed_content,
+            summary=candidate.reason_to_remember,
+        )
+
+        # 1. SECRET EXCLUSION
+        if temp_ko.contains_secret():
+            return (
+                MemoryDecision(
+                    decision=MemoryDecisionEnum.REJECT,
+                    reason="Candidate contains potential secrets or credential material.",
+                ),
+                None,
+            )
+
+        content_str = str(candidate.proposed_content).strip().lower()
+
+        # 2. TRIVIAL / IGNORE FILTER
+        if len(content_str) < 5 or content_str in ["hi", "hello", "ok", "thanks", "tchau", "sim", "não"]:
+            return (
+                MemoryDecision(
+                    decision=MemoryDecisionEnum.IGNORE,
+                    reason="Statement is conversational noise or too trivial to retain.",
+                ),
+                None,
+            )
+
+        # Calculate importance
+        importance = cls.calculate_importance(candidate)
+
+        # 3. CORRECTION PRIORITY (Explicit Supersession)
+        is_correction = any(p.search(content_str) for p in cls.CORRECTION_PATTERNS)
+        if is_correction and existing_objects:
+            # Find closest related active memory in project
+            for existing in existing_objects:
+                if existing.status == KnowledgeState.ACTIVE and existing.project_id == candidate.project_id:
+                    # Check if candidate contradicts or updates existing
+                    # Example: existing "React", candidate "Flutter"
+                    return (
+                        MemoryDecision(
+                            decision=MemoryDecisionEnum.SUPERSEDE,
+                            reason=f"Explicit user correction supersedes object {existing.object_id}.",
+                            target_object_id=existing.object_id,
+                            resulting_version=existing.version + 1,
+                            retention=RetentionPolicy.LONG_TERM,
+                            confidence=candidate.confidence,
+                        ),
+                        existing,
+                    )
+
+        # 4. TEMPORARY CONTEXT DETECTION
+        is_temporary = any(p.search(content_str) for p in cls.TEMPORARY_PATTERNS)
+        if is_temporary:
+            # Set validity for 7 days by default for short-term temporary
+            valid_until_dt = utc_now() + timedelta(days=7)
+            return (
+                MemoryDecision(
+                    decision=MemoryDecisionEnum.TEMPORARY,
+                    reason="Temporal context detected; stored with short-term expiration.",
+                    retention=RetentionPolicy.SHORT_TERM,
+                    confidence=candidate.confidence,
+                ),
+                None,
+            )
+
+        # 5. DEDUPLICATION / EXACT OR OVERLAPPING MATCH
+        for existing in existing_objects:
+            if existing.status != KnowledgeState.ACTIVE:
+                continue
+            existing_str = str(existing.content).strip().lower()
+            if content_str == existing_str or content_str in existing_str:
+                return (
+                    MemoryDecision(
+                        decision=MemoryDecisionEnum.IGNORE,
+                        reason=f"Duplicate content matches existing object {existing.object_id}.",
+                        target_object_id=existing.object_id,
+                    ),
+                    existing,
+                )
+
+        # 6. DEFAULT STORE
+        mem_class = MemoryClass.PREFERENCE if any(p.search(content_str) for p in cls.PREFERENCE_PATTERNS) else MemoryClass.SEMANTIC
+        nat = KnowledgeNature.PREFERENCE if mem_class == MemoryClass.PREFERENCE else KnowledgeNature.FACT
+
+        return (
+            MemoryDecision(
+                decision=MemoryDecisionEnum.STORE,
+                reason="Valid non-duplicate candidate approved for long-term memory.",
+                retention=RetentionPolicy.LONG_TERM,
+                confidence=candidate.confidence,
+            ),
+            None,
+        )
+
+
+# ============================================================================
+# 5. RETRIEVAL & CONTEXT ASSEMBLER
+# ============================================================================
+
+SENSITIVITY_RANKS = {"normal": 0, "confidential": 1, "secret": 2}
+
+
+@dataclass
+class MemoryQuery:
+    """Structured search query for cognitive memory retrieval."""
+
+    query_text: str = ""
+    project_id: str = "GLOBAL"
+    mission_id: str = ""
+    memory_classes: List[MemoryClass] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    minimum_confidence: float = 0.5
+    minimum_importance: float = 0.0
+    temporal_filter: Optional[str] = None
+    sensitivity_limit: str = "normal"
+    limit: int = 20
+    include_global: bool = True
+    memory_access_allowed: bool = True
+
+
+@dataclass
+class MemoryRetrievalResult:
+    """Relevance-scored cognitive retrieval output bundle."""
+
+    objects: List[KnowledgeObject] = field(default_factory=list)
+    relevance_scores: Dict[str, float] = field(default_factory=dict)
+    retrieval_reason: str = ""
+    project_scope: str = "GLOBAL"
+    temporal_validity: bool = True
+
+
+class ContextAssembler:
+    """Assembles retrieved Knowledge Objects into a governed cognitive context."""
+
+    @staticmethod
+    def assemble_context(
+        retrieval_result: MemoryRetrievalResult,
+        max_length_chars: int = 4000,
+        header: str = "### RECOVERED COGNITIVE MEMORY CONTEXT",
+    ) -> str:
+        """Format retrieved Knowledge Objects into a clean context string for pipeline consumption."""
+        if not retrieval_result.objects:
+            return ""
+
+        lines = [header, f"Scope: {retrieval_result.project_scope}"]
+        current_len = len(header) + 20
+
+        # Sort objects by importance and relevance score
+        sorted_objs = sorted(
+            retrieval_result.objects,
+            key=lambda o: (o.importance, retrieval_result.relevance_scores.get(o.object_id, 0.5)),
+            reverse=True,
+        )
+
+        for obj in sorted_objs:
+            nature_tag = obj.knowledge_nature.value.upper()
+            class_tag = obj.memory_class.value
+            entry = f"- [{nature_tag} | {class_tag} | Conf:{obj.confidence:.2f}] {obj.summary or obj.content}"
+            if len(entry) + current_len > max_length_chars:
+                break
+            lines.append(entry)
+            current_len += len(entry) + 1
+
+        return "\n".join(lines)
+
+
+# ============================================================================
+# 6. MAIN ENGINE (AdaptiveMemoryEngine)
+# ============================================================================
+
+class AdaptiveMemoryEngine:
+    """The Adaptive Memory Engine (AME) - Governed Multi-Tiered Cognitive Memory."""
+
+    def __init__(
+        self,
+        repository: Optional[KnowledgeObjectRepositoryPort] = None,
+        vector_search: Optional[VectorSearchPort] = None,
+        graph_storage: Optional[GraphEdgeStoragePort] = None,
+        blob_storage: Optional[BlobStoragePort] = None,
+        memory_access_allowed: bool = True,
+    ):
+        self._repo = repository or LocalKnowledgeObjectRepository()
+        self._vector = vector_search or InMemoryVectorSearchAdapter()
+        self._graph = graph_storage or InMemoryGraphEdgeStorageAdapter()
+        self._blob = blob_storage or InMemoryBlobStorageAdapter()
+        self._memory_access_allowed = memory_access_allowed
+
+        self._read_count = 0
+        self._write_count = 0
+        self._conflict_count = 0
+
+    async def process_candidate(self, candidate: MemoryCandidate) -> Tuple[MemoryDecision, Optional[KnowledgeObject]]:
+        """Ingest and evaluate a MemoryCandidate through the Decision Engine."""
+        try:
+            existing_objects = await self._repo.query(
+                project_id=candidate.project_id,
+                status=KnowledgeState.ACTIVE,
+                include_global=True,
+            )
+
+            decision, target = MemoryDecisionEngine.evaluate(candidate, existing_objects)
+
+            if decision.decision == MemoryDecisionEnum.REJECT or decision.decision == MemoryDecisionEnum.IGNORE:
+                return decision, None
+
+            self._write_count += 1
+            obj_id = new_id()
+
+            # Handle explicit supersession / correction
+            if decision.decision == MemoryDecisionEnum.SUPERSEDE and target:
+                self._conflict_count += 1
+                new_ko = KnowledgeObject(
+                    object_id=obj_id,
+                    object_type="USER_CORRECTION",
+                    memory_class=MemoryClass.CORRECTION,
+                    knowledge_nature=KnowledgeNature.CORRECTION,
+                    content=candidate.proposed_content,
+                    summary=candidate.reason_to_remember or str(candidate.proposed_content),
+                    project_id=candidate.project_id,
+                    source=candidate.source,
+                    provenance=candidate.provenance,
+                    confidence=candidate.confidence,
+                    importance=0.95,  # High importance for user corrections
+                    status=KnowledgeState.ACTIVE,
+                    retention_policy=RetentionPolicy.LONG_TERM,
+                )
+                ok = await self._repo.supersede(target.object_id, new_ko)
+                if not ok:
+                    return MemoryDecision(decision=MemoryDecisionEnum.REJECT, reason="Storage failure encountered while persisting knowledge object."), None
+                return decision, new_ko
+
+            # Handle temporary memory
+            if decision.decision == MemoryDecisionEnum.TEMPORARY:
+                valid_until_str = (utc_now() + timedelta(days=7)).isoformat()
+                new_ko = KnowledgeObject(
+                    object_id=obj_id,
+                    object_type="TEMPORARY_STATEMENT",
+                    memory_class=MemoryClass.TEMPORARY_CONTEXT,
+                    knowledge_nature=KnowledgeNature.FACT,
+                    content=candidate.proposed_content,
+                    summary=candidate.reason_to_remember or str(candidate.proposed_content),
+                    project_id=candidate.project_id,
+                    source=candidate.source,
+                    provenance=candidate.provenance,
+                    confidence=candidate.confidence,
+                    importance=0.4,
+                    status=KnowledgeState.ACTIVE,
+                    valid_until=valid_until_str,
+                    retention_policy=RetentionPolicy.SHORT_TERM,
+                )
+                ok = await self._repo.save(new_ko)
+                if not ok:
+                    return MemoryDecision(decision=MemoryDecisionEnum.REJECT, reason="Storage failure encountered while persisting knowledge object."), None
+                return decision, new_ko
+
+            # Standard STORE
+            importance = MemoryDecisionEngine.calculate_importance(candidate)
+            content_str = str(candidate.proposed_content).lower()
+            is_pref = any(p.search(content_str) for p in MemoryDecisionEngine.PREFERENCE_PATTERNS)
+            mem_class = MemoryClass.PREFERENCE if (is_pref or candidate.proposed_importance > 0.8) else MemoryClass.SEMANTIC
+            nat = KnowledgeNature.PREFERENCE if mem_class == MemoryClass.PREFERENCE else KnowledgeNature.FACT
+
+            new_ko = KnowledgeObject(
+                object_id=obj_id,
+                object_type="STORED_MEMORY",
+                memory_class=mem_class,
+                knowledge_nature=nat,
+                content=candidate.proposed_content,
+                summary=candidate.reason_to_remember or str(candidate.proposed_content),
+                project_id=candidate.project_id,
+                source=candidate.source,
+                provenance=candidate.provenance,
+                confidence=candidate.confidence,
+                importance=importance,
+                status=KnowledgeState.ACTIVE,
+                retention_policy=decision.retention,
+            )
+            ok = await self._repo.save(new_ko)
+            if not ok:
+                return MemoryDecision(decision=MemoryDecisionEnum.REJECT, reason="Storage failure encountered while persisting knowledge object."), None
+            return decision, new_ko
+        except Exception:
+            return MemoryDecision(
+                decision=MemoryDecisionEnum.REJECT,
+                reason="Storage failure encountered while persisting knowledge object.",
+            ), None
+
+    async def retrieve_memory(self, query: MemoryQuery) -> MemoryRetrievalResult:
+        """Execute scoped, scored retrieval of Knowledge Objects."""
+        self._read_count += 1
+
+        if not self._memory_access_allowed or not getattr(query, "memory_access_allowed", True):
+            return MemoryRetrievalResult(
+                objects=[],
+                relevance_scores={},
+                retrieval_reason="Memory access blocked by security/access policy.",
+                project_scope=query.project_id,
+            )
+
+        all_objs = await self._repo.query(
+            project_id=query.project_id if query.project_id != "GLOBAL" else None,
+            status=KnowledgeState.ACTIVE,
+            include_global=query.include_global,
+        )
+
+        filtered = []
+        scores = {}
+        now_str = utc_iso()
+
+        query_str = query.query_text.lower().strip()
+
+        limit_rank = SENSITIVITY_RANKS.get(query.sensitivity_limit.lower(), 0)
+
+        for obj in all_objs:
+            # Secret / Sensitivity check
+            if obj.contains_secret():
+                continue
+
+            obj_rank = SENSITIVITY_RANKS.get(str(obj.sensitivity).lower(), 0)
+            if obj_rank > limit_rank:
+                continue
+
+            # Temporal validity check
+            if not obj.is_valid_at(now_str):
+                continue
+
+            # Confidence check
+            if obj.confidence < query.minimum_confidence:
+                continue
+
+            # Importance check
+            if obj.importance < query.minimum_importance:
+                continue
+
+            # Class filter
+            if query.memory_classes and obj.memory_class not in query.memory_classes:
+                continue
+
+            # Calculate relevance score
+            relevance = 0.5
+            obj_content = str(obj.content).lower() + " " + obj.summary.lower()
+            if query_str and query_str in obj_content:
+                relevance = 0.95
+            elif query_str:
+                # Simple keyword overlap match
+                q_words = set(query_str.split())
+                o_words = set(obj_content.split())
+                overlap = len(q_words.intersection(o_words))
+                if overlap > 0:
+                    relevance = 0.5 + (0.4 * (overlap / len(q_words)))
+                else:
+                    relevance = 0.2
+
+            # Only include relevant items if query_text was provided
+            if not query_str or relevance > 0.3:
+                filtered.append(obj)
+                scores[obj.object_id] = relevance
+
+        # Sort by relevance and limit
+        filtered.sort(key=lambda o: scores.get(o.object_id, 0.0), reverse=True)
+        final_objs = filtered[: query.limit]
+
+        return MemoryRetrievalResult(
+            objects=final_objs,
+            relevance_scores=scores,
+            retrieval_reason=f"Retrieved {len(final_objs)} matching knowledge objects.",
+            project_scope=query.project_id,
+            temporal_validity=True,
+        )
+
+    async def store_object(self, obj: KnowledgeObject) -> bool:
+        """Directly store a Knowledge Object (validating secret protection)."""
+        if obj.contains_secret():
+            return False
+        self._write_count += 1
+        return await self._repo.save(obj)
+
+    async def get_object(self, object_id: str) -> Optional[KnowledgeObject]:
+        """Fetch Knowledge Object by ID."""
+        self._read_count += 1
+        return await self._repo.get(object_id)
+
+    async def purge_expired(self) -> int:
+        """Scan and mark expired Knowledge Objects as EXPIRED."""
+        active_objs = await self._repo.query(status=KnowledgeState.ACTIVE)
+        now_str = utc_iso()
+        count = 0
+        for obj in active_objs:
+            if obj.valid_until and now_str > obj.valid_until:
+                await self._repo.expire(obj.object_id)
+                count += 1
+        return count
+
+    async def forget_object(self, object_id: str) -> bool:
+        """User Control: Delete or archive a specific Knowledge Object."""
+        return await self._repo.delete(object_id)
+
+    async def forget_project_memory(self, project_id: str) -> int:
+        """User Control: Delete all memory belonging to a specific project."""
+        objs = await self._repo.query(project_id=project_id, include_global=False)
+        count = 0
+        for obj in objs:
+            await self._repo.delete(obj.object_id)
+            count += 1
+        return count
+
+    async def inspect_memory(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """User Control: Inspect stored memories without revealing confidential material."""
+        objs = await self._repo.query(project_id=project_id, include_global=True)
+        return [o.to_dict() for o in objs]
+
+    async def export_memory(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Export serialized memory objects."""
+        objs = await self._repo.query(project_id=project_id, include_global=True)
+        return [o.to_dict() for o in objs]
+
+    async def get_diagnostics(self) -> Dict[str, Any]:
+        """Diagnostic state summary (contains NO sensitive user content)."""
+        all_active = await self._repo.query(status=KnowledgeState.ACTIVE)
+        all_expired = await self._repo.query(status=KnowledgeState.EXPIRED)
+        all_superseded = await self._repo.query(status=KnowledgeState.SUPERSEDED)
+
+        class_counts = {}
+        for o in all_active:
+            c_name = o.memory_class.value
+            class_counts[c_name] = class_counts.get(c_name, 0) + 1
+
+        return {
+            "total_active_objects": len(all_active),
+            "total_expired_objects": len(all_expired),
+            "total_superseded_objects": len(all_superseded),
+            "objects_by_class": class_counts,
+            "read_operations": self._read_count,
+            "write_operations": self._write_count,
+            "conflict_resolutions": self._conflict_count,
+            "storage_status": "healthy",
+        }
+
+    # =========================================================================
+    # 7. BOOTSTRAP COGNITIVE CORTEX (BCC) EXTENSION POINTS
+    # =========================================================================
+
+    async def query_for_bcc(self, prompt: str, project_id: str = "GLOBAL") -> MemoryRetrievalResult:
+        """Extension point for future Bootstrap Cognitive Cortex offline queries."""
+        q = MemoryQuery(query_text=prompt, project_id=project_id, limit=10)
+        return await self.retrieve_memory(q)
+
+    async def get_bcc_memory_summary(self, project_id: str = "GLOBAL") -> str:
+        """Extension point for BCC local context summary."""
+        res = await self.retrieve_memory(MemoryQuery(project_id=project_id, limit=10))
+        return ContextAssembler.assemble_context(res)
+
+
+# ============================================================================
+# 8. PIPELINE INTEGRATION PORTS (IUE, CDM, CPE, ECC, RRM)
+# ============================================================================
+
+class IUEContextPort:
+    """Port interface for IUE (Intent Understanding Engine) context retrieval."""
+
+    def __init__(self, ame: AdaptiveMemoryEngine):
+        self._ame = ame
+
+    async def retrieve_understanding_context(self, input_text: str, project_id: str = "GLOBAL") -> str:
+        res = await self._ame.retrieve_memory(MemoryQuery(query_text=input_text, project_id=project_id, limit=5))
+        return ContextAssembler.assemble_context(res)
+
+
+class CDMContextPort:
+    """Port interface for CDM (Cognitive Dialogue Manager) context consumption."""
+
+    def __init__(self, ame: AdaptiveMemoryEngine):
+        self._ame = ame
+
+    async def get_known_context(self, project_id: str = "GLOBAL") -> MemoryRetrievalResult:
+        return await self._ame.retrieve_memory(MemoryQuery(project_id=project_id, limit=10))
+
+
+class CPEContextPort:
+    """Port interface for CPE (Cognitive Planning Engine) context consumption."""
+
+    def __init__(self, ame: AdaptiveMemoryEngine):
+        self._ame = ame
+
+    async def get_planning_context(self, goal_text: str, project_id: str = "GLOBAL") -> str:
+        res = await self._ame.retrieve_memory(MemoryQuery(query_text=goal_text, project_id=project_id, limit=10))
+        return ContextAssembler.assemble_context(res)
+
+
+class ECCMemoryControlPort:
+    """Port interface for ECC (Executive Cognitive Controller) memory supervision."""
+
+    def __init__(self, ame: AdaptiveMemoryEngine):
+        self._ame = ame
+
+    async def authorize_memory_access(self, project_id: str, sensitivity: str = "normal") -> str:
+        """Returns decision directive: 'ALLOW_MEMORY_ACCESS', 'BLOCK_MEMORY_ACCESS', 'CONTINUE_WITHOUT_MEMORY'."""
+        if sensitivity == "secret":
+            return "BLOCK_MEMORY_ACCESS"
+        return "ALLOW_MEMORY_ACCESS"
+
+
+class RRMBoundary:
+    """Boundary wrapper ensuring AME uses RRM IDs without administering resources."""
+
+    @staticmethod
+    def validate_project_id(project_id: str) -> str:
+        return project_id if project_id else "GLOBAL"

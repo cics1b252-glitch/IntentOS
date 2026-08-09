@@ -1,0 +1,8 @@
+{
+  "product": "Intent OS",
+  "version": "0.4.4-alpha",
+  "channel": "alpha",
+  "architecture": "win-x64",
+  "dataPolicy": "preserve-by-default",
+  "updateStrategy": "future-in-place"
+}

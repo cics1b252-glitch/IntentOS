@@ -1,0 +1,23 @@
+.ids-display {
+  font-size: var(--ids-font-size-display);
+  font-weight: var(--ids-font-weight-bold);
+  line-height: var(--ids-line-height-tight);
+}
+.ids-heading {
+  font-size: var(--ids-font-size-heading);
+  font-weight: var(--ids-font-weight-bold);
+  line-height: var(--ids-line-height-tight);
+}
+.ids-title {
+  font-size: var(--ids-font-size-title);
+  font-weight: var(--ids-font-weight-medium);
+  line-height: var(--ids-line-height-tight);
+}
+.ids-body { font-size: var(--ids-font-size-body); line-height: var(--ids-line-height-body); }
+.ids-label {
+  font-size: var(--ids-font-size-label);
+  font-weight: var(--ids-font-weight-medium);
+  letter-spacing: var(--ids-letter-spacing-label);
+}
+.ids-caption { font-size: var(--ids-font-size-caption); color: var(--ids-color-text-muted); }
+.ids-code { font-family: var(--ids-font-code); font-size: var(--ids-font-size-label); }

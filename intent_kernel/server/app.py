@@ -1,0 +1,304 @@
+"""Intent OS — FastAPI Server.
+
+REST API layer for the Intent OS Kernel.
+The Kernel remains independent — this is just an interface.
+
+Usage:
+    # Development
+    uvicorn intent_kernel.server.app:app --reload
+
+    # Production
+    intent-os-server
+"""
+
+from __future__ import annotations
+
+import os
+from contextlib import asynccontextmanager
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from intent_kernel.application import ApplicationFactory, KernelBuilder
+from intent_kernel.kernel import Kernel
+from intent_kernel.types import Mode
+
+
+# ---------------------------------------------------------------------------
+# Lifespan — Kernel initialization
+# ---------------------------------------------------------------------------
+
+_kernel: Kernel | None = None
+_factory: ApplicationFactory | None = None
+
+
+def configure_factory(factory: ApplicationFactory) -> None:
+    """Inject the shared Composition Root before server startup."""
+    global _factory, _kernel
+    _factory = factory
+    _kernel = None
+
+
+def get_kernel() -> Kernel:
+    """Get the singleton Kernel instance."""
+    global _kernel, _factory
+    if _kernel is None:
+        pkb_path = os.environ.get("INTENT_OS_PKB_PATH", "~/.intent-os/pkb")
+        _factory = _factory or ApplicationFactory(
+            KernelBuilder()
+            .with_pkb_path(pkb_path)
+            .with_environment(dict(os.environ))
+        )
+        _kernel = _factory.get_kernel()
+
+    return _kernel
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """App lifespan — initialize Kernel on startup."""
+    kernel = get_kernel()
+    print(f"🧠 Intent OS Kernel v{kernel.version} started")
+    print(f"   Constitution: v{kernel.constitution.version}")
+    print(f"   Providers: {kernel.providers.available}")
+    print(f"   Modules: {kernel.router.registered_modules}")
+    yield
+    print("🧠 Intent OS Kernel shut down")
+
+
+# ---------------------------------------------------------------------------
+# FastAPI App
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="Intent OS API",
+    description="Cognitive Operating System — REST API",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Request/Response Models
+# ---------------------------------------------------------------------------
+
+class ProcessRequest(BaseModel):
+    """Request to process an intent."""
+    text: str = Field(..., description="User intent text")
+    context: dict[str, Any] = Field(default_factory=dict, description="Additional context")
+    mode: str = Field(default="auto", description="Processing mode: auto|quick|basic|detail|expert|architect")
+
+
+class ProcessResponse(BaseModel):
+    """Response from processing an intent."""
+    text: str
+    mode: str
+    domain: str
+    confidence: float
+    epistemic_status: str
+    alternatives: list[str] = []
+    next_steps: list[str] = []
+    events: list[dict[str, Any]] = []
+
+
+class QueryResponse(BaseModel):
+    """Response from PKB query."""
+    events: list[dict[str, Any]]
+    total: int
+
+
+class StatusResponse(BaseModel):
+    """Kernel status."""
+    version: str
+    constitution_version: str
+    providers: list[str]
+    modules: list[str]
+    pkb_path: str
+
+
+class EventResponse(BaseModel):
+    """Single PKB event."""
+    id: str
+    type: str
+    domain: str
+    title: str
+    summary: str
+    confidence: float
+    lifecycle: str
+    version: int
+    created_at: str
+
+
+# ---------------------------------------------------------------------------
+# Auth middleware
+# ---------------------------------------------------------------------------
+
+API_KEY = os.environ.get("INTENT_OS_API_KEY")
+
+
+async def verify_api_key(authorization: str | None = Header(None)):
+    """Verify API key if configured."""
+    if API_KEY is None:
+        return True  # No auth configured — open access
+
+    if authorization is None:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+
+    token = authorization.replace("Bearer ", "")
+    if token != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/status", response_model=StatusResponse)
+async def status():
+    """Get Kernel status."""
+    kernel = get_kernel()
+    s = kernel.status()
+    return StatusResponse(**s)
+
+
+@app.post("/api/v1/process", response_model=ProcessResponse)
+async def process_intent(req: ProcessRequest, _: bool = Depends(verify_api_key)):
+    """Process a user intent."""
+    kernel = get_kernel()
+
+    # Determine mode
+    mode = None
+    if req.mode != "auto":
+        try:
+            mode = Mode(req.mode.lower())
+        except ValueError:
+            raise HTTPException(400, f"Invalid mode: {req.mode}")
+
+    result = await kernel.process(req.text, context=req.context)
+
+    # Override mode if specified
+    if mode:
+        result.mode = mode
+
+    return ProcessResponse(
+        text=result.text,
+        mode=result.mode.value,
+        domain=result.domain.value,
+        confidence=result.confidence,
+        epistemic_status=result.epistemic_status.value,
+        alternatives=result.alternatives,
+        next_steps=result.next_steps,
+        events=[
+            {
+                "id": e.id,
+                "type": e.type.value,
+                "title": e.title,
+            }
+            for e in result.events
+        ],
+    )
+
+
+@app.get("/api/v1/query", response_model=QueryResponse)
+async def query_pkb(q: str = "", _: bool = Depends(verify_api_key)):
+    """Query the PKB."""
+    kernel = get_kernel()
+    events = await kernel.query(q)
+    return QueryResponse(
+        events=[
+            {
+                "id": e.id,
+                "type": e.type.value,
+                "domain": e.domain.value,
+                "title": e.title,
+                "summary": e.summary,
+                "confidence": e.confidence,
+                "lifecycle": e.lifecycle.value,
+                "version": e.version,
+                "created_at": e.created_at.isoformat(),
+            }
+            for e in events
+        ],
+        total=len(events),
+    )
+
+
+@app.get("/api/v1/pkb/events", response_model=list[EventResponse])
+async def list_events(
+    limit: int = 50,
+    domain: str | None = None,
+    _: bool = Depends(verify_api_key),
+):
+    """List PKB events."""
+    from intent_kernel.types import Domain, EventLifecycle, EventType, QueryFilters
+
+    kernel = get_kernel()
+    filters = QueryFilters(limit=limit)
+    if domain:
+        try:
+            filters.domain = Domain(domain)
+        except ValueError:
+            pass
+
+    events = await kernel.query("")
+    return [
+        EventResponse(
+            id=e.id,
+            type=e.type.value,
+            domain=e.domain.value,
+            title=e.title,
+            summary=e.summary,
+            confidence=e.confidence,
+            lifecycle=e.lifecycle.value,
+            version=e.version,
+            created_at=e.created_at.isoformat(),
+        )
+        for e in events[:limit]
+    ]
+
+
+@app.delete("/api/v1/pkb/events/{event_id}")
+async def delete_event(event_id: str, _: bool = Depends(verify_api_key)):
+    """Delete a PKB event (Soberania)."""
+    kernel = get_kernel()
+    deleted = await kernel.knowledge.store.delete(event_id)
+    if not deleted:
+        raise HTTPException(404, "Event not found")
+    return {"deleted": True, "id": event_id}
+
+
+@app.delete("/api/v1/pkb")
+async def clear_pkb(_: bool = Depends(verify_api_key)):
+    """Clear all PKB data (Soberania)."""
+    kernel = get_kernel()
+    await kernel.knowledge.delete_all()
+    return {"cleared": True}
+
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+def run():
+    """Entry point for the server."""
+    import uvicorn
+    port = int(os.environ.get("INTENT_OS_PORT", "8000"))
+    host = os.environ.get("INTENT_OS_HOST", "0.0.0.0")
+    uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    run()

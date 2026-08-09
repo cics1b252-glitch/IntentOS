@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intent OS — Sistema Operacional Cognitivo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #0f0f13;
+            --surface: #1a1a24;
+            --surface2: #242433;
+            --text: #e8e8f0;
+            --text-dim: #8888aa;
+            --accent: #6366f1;
+            --accent-dim: #4f46e5;
+            --green: #22c55e;
+            --yellow: #eab308;
+            --red: #ef4444;
+            --border: #2a2a3a;
+            --radius: 12px;
+        }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+        header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
+        header h1 { font-size: 18px; font-weight: 600; }
+        header .status { font-size: 12px; color: var(--green); display: flex; align-items: center; gap: 6px; }
+        header .status.online::before { content: ''; width: 8px; height: 8px; background: var(--green); border-radius: 50%; }
+        header .status.offline { color: var(--yellow); }
+        header .status.offline::before { content: ''; width: 8px; height: 8px; background: var(--yellow); border-radius: 50%; }
+        .container { display: flex; flex: 1; overflow: hidden; }
+        nav { width: 220px; background: var(--surface); border-right: 1px solid var(--border); padding: 16px 0; }
+        nav a { display: flex; align-items: center; gap: 10px; padding: 10px 20px; color: var(--text-dim); text-decoration: none; font-size: 14px; transition: all 0.15s; }
+        nav a:hover, nav a.active { background: var(--surface2); color: var(--text); }
+        nav a.active { border-right: 2px solid var(--accent); }
+        main { flex: 1; padding: 24px; overflow-y: auto; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+        .card h2 { font-size: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+        .stat { background: var(--surface2); border-radius: 8px; padding: 16px; }
+        .stat .label { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+        .stat .value { font-size: 20px; font-weight: 700; }
+        .stat .value.green { color: var(--green); }
+        .stat .value.yellow { color: var(--yellow); }
+        .stat .value.red { color: var(--red); }
+        .chat { display: flex; flex-direction: column; height: 100%; }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 16px 0; }
+        .chat-input { display: flex; gap: 8px; padding: 16px 0 0; }
+        .chat-input input { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; color: var(--text); font-size: 14px; outline: none; }
+        .chat-input input:focus { border-color: var(--accent); }
+        .chat-input button { background: var(--accent); border: none; border-radius: 8px; padding: 12px 20px; color: white; font-weight: 600; cursor: pointer; }
+        .chat-input button:hover { background: var(--accent-dim); }
+        .message { padding: 12px 0; border-bottom: 1px solid var(--border); }
+        .message.user { color: var(--accent); font-weight: 600; }
+        .message.system { color: var(--text); }
+        .iue-badge { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+        .iue-badge .title { font-weight: 600; color: var(--accent); margin-bottom: 4px; }
+        .iue-badge .list { margin-left: 16px; }
+        .guardians { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+        .guardian { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--surface2); border-radius: 8px; font-size: 13px; }
+        .guardian .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+        .capabilities { display: flex; flex-wrap: wrap; gap: 6px; }
+        .cap-tag { background: var(--surface2); padding: 4px 10px; border-radius: 12px; font-size: 12px; color: var(--text-dim); }
+        .empty { text-align: center; padding: 40px; color: var(--text-dim); }
+        .banner-warning { background: rgba(234, 179, 8, 0.15); border: 1px solid var(--yellow); border-radius: var(--radius); padding: 14px 18px; color: var(--yellow); font-size: 14px; margin-bottom: 16px; display: none; }
+        .progress-bar { background: var(--surface2); border-radius: 4px; height: 8px; overflow: hidden; margin-top: 4px; }
+        .progress-fill { background: var(--accent); height: 100%; width: 0%; transition: width 0.3s; }
+        .progress-fill.high { background: var(--green); }
+        .progress-fill.medium { background: var(--yellow); }
+        .progress-fill.low { background: var(--red); }
+        #page-dashboard, #page-chat, #page-iue, #page-guardians, #page-capabilities, #page-settings { display: none; }
+        #page-dashboard.active, #page-chat.active, #page-iue.active, #page-guardians.active, #page-capabilities.active, #page-settings.active { display: block; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🧠 Intent OS</h1>
+        <div class="status online" id="header-status">Conectando...</div>
+        <div style="flex:1"></div>
+        <span style="font-size:12px;color:var(--text-dim)" id="header-version">v0.4.4-alpha</span>
+    </header>
+    <div class="container">
+        <nav>
+            <a href="#" class="active" onclick="showPage('dashboard', event)">📊 Dashboard</a>
+            <a href="#" onclick="showPage('chat', event)">💬 Chat</a>
+            <a href="#" onclick="showPage('iue', event)">🎯 IUE Inspector</a>
+            <a href="#" onclick="showPage('guardians', event)">🛡️ Guardians</a>
+            <a href="#" onclick="showPage('capabilities', event)">⚡ Capabilities</a>
+            <a href="#" onclick="showPage('settings', event)">⚙️ Configurações</a>
+        </nav>
+        <main>
+            <div id="banner-mode-b" class="banner-warning">
+                ⚠️ <strong>Kernel externo indisponível neste ambiente.</strong> A interface funciona em modo adaptado e aguarda a conexão com o núcleo canônico.
+            </div>
+            <div id="page-dashboard" class="active">
+                <div class="grid" id="stats-grid"></div>
+                <div class="card">
+                    <h2>🛡️ Guardians</h2>
+                    <div class="guardians" id="guardians-list"></div>
+                </div>
+                <div class="card">
+                    <h2>⚡ Capabilities & Core Apps</h2>
+                    <div class="capabilities" id="capabilities-list"></div>
+                </div>
+            </div>
+            <div id="page-chat" class="chat">
+                <div class="chat-messages" id="chat-messages">
+                    <div class="empty">Digite uma intenção para começar...</div>
+                </div>
+                <div class="chat-input">
+                    <input type="text" id="chat-input" placeholder="Digite sua intenção (ex: Quero investir 23.500)..." onkeydown="if(event.key==='Enter')sendIntent()">
+                    <button onclick="sendIntent()">Enviar</button>
+                </div>
+            </div>
+            <div id="page-iue">
+                <div class="card">
+                    <h2>🎯 Intent Understanding Engine (RFC-0007)</h2>
+                    <p style="color:var(--text-dim);font-size:13px;margin-bottom:16px;">
+                        Análise de intenção sem presunções ou alucinações. Avalie o Intent Quality Index (IQI) antes da execução.
+                    </p>
+                    <div style="display:flex;gap:8px;margin-bottom:16px;">
+                        <input type="text" id="iue-input" placeholder="Digite uma frase (ex: Quero investir 23.500)" value="Quero investir 23.500" style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;color:var(--text);font-size:14px;">
+                        <button onclick="runIueInspector()" style="background:var(--accent);border:none;border-radius:8px;padding:12px 20px;color:white;font-weight:600;cursor:pointer;">Analisar Intenção</button>
+                    </div>
+                    <div id="iue-results">
+                        <div class="empty">Clique em "Analisar Intenção" para ver o desdobramento da compreensão estruturada.</div>
+                    </div>
+                </div>
+            </div>
+            <div id="page-guardians">
+                <div class="card"><h2>🛡️ Constitution Guardians</h2><div class="guardians" id="guardians-detail"></div></div>
+            </div>
+            <div id="page-capabilities">
+                <div class="card"><h2>⚡ Core Apps / Módulos</h2><div id="capabilities-detail"></div></div>
+            </div>
+            <div id="page-settings">
+                <div class="card"><h2>⚙️ Configurações do Gateway</h2><div id="settings-detail"></div></div>
+            </div>
+        </main>
+    </div>
+    <script>
+        function showPage(name, evt) {
+            if (evt) evt.preventDefault();
+            document.querySelectorAll('[id^="page-"]').forEach(p => p.classList.remove('active'));
+            const target = document.getElementById('page-' + name);
+            if (target) target.classList.add('active');
+            document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+            if (evt && evt.target) evt.target.classList.add('active');
+        }
+
+        async function loadDashboard() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                
+                const headerStatus = document.getElementById('header-status');
+                const bannerModeB = document.getElementById('banner-mode-b');
+
+                if (data.mode === 'connected' && data.ok) {
+                    headerStatus.className = 'status online';
+                    headerStatus.textContent = 'Online';
+                    bannerModeB.style.display = 'none';
+
+                    document.getElementById('header-version').textContent = 'v' + (data.app_version || '0.4.4-alpha');
+
+                    const [constRes, provRes, coreRes] = await Promise.all([
+                        fetch('/api/constitution').then(r => r.json()).catch(() => ({ guardians: [], version: data.constitution_version })),
+                        fetch('/api/providers').then(r => r.json()).catch(() => ({ available: data.providers || [] })),
+                        fetch('/api/core-apps').then(r => r.json()).catch(() => ({ modules: data.modules || [] }))
+                    ]);
+
+                    const providersList = provRes.available || data.providers || [];
+                    const modulesList = coreRes.modules || data.modules || [];
+                    const guardiansList = constRes.guardians || [];
+                    const constVersion = constRes.version || data.constitution_version || '1.0.0';
+
+                    document.getElementById('stats-grid').innerHTML = `
+                        <div class="stat"><div class="label">Kernel</div><div class="value green">Online</div></div>
+                        <div class="stat"><div class="label">Constitution</div><div class="value green">v${constVersion}</div></div>
+                        <div class="stat"><div class="label">Providers</div><div class="value">${providersList.length} (${providersList.join(', ') || 'Nenhum'})</div></div>
+                        <div class="stat"><div class="label">Core Apps / Módulos</div><div class="value">${modulesList.length}</div></div>
+                    `;
+
+                    if (guardiansList.length > 0) {
+                        document.getElementById('guardians-list').innerHTML = guardiansList.map(g =>
+                            `<div class="guardian"><div class="dot"></div>${g}</div>`
+                        ).join('');
+                        document.getElementById('guardians-detail').innerHTML = guardiansList.map(g =>
+                            `<div class="guardian"><div class="dot"></div>${g} — Ativo</div>`
+                        ).join('');
+                    } else {
+                        document.getElementById('guardians-list').innerHTML = '<div class="empty">Constituição ativa (Guardiões padrão do Kernel)</div>';
+                        document.getElementById('guardians-detail').innerHTML = '<div class="empty">Guardiões padrão carregados diretamente pelo Kernel Python.</div>';
+                    }
+
+                    document.getElementById('capabilities-list').innerHTML = modulesList.map(m =>
+                        `<span class="cap-tag">${m}</span>`
+                    ).join('');
+
+                    document.getElementById('capabilities-detail').innerHTML = modulesList.map(m =>
+                        `<div class="guardian"><div class="dot"></div>Módulo: ${m}</div>`
+                    ).join('');
+
+                    document.getElementById('settings-detail').innerHTML = `
+                        <p style="color:var(--text-dim)">Gateway Transport: <strong>LocalProcessTransport (Online)</strong></p>
+                        <p style="color:var(--text-dim)">Provedores Detectados: <strong>${providersList.join(', ')}</strong></p>
+                        <p style="color:var(--text-dim)">Engine: <strong>Intent Understanding Engine (IUE RFC-0007)</strong></p>
+                    `;
+                } else {
+                    // MODE B — Gateway Unavailable
+                    headerStatus.className = 'status offline';
+                    headerStatus.textContent = 'Indisponível';
+                    bannerModeB.style.display = 'block';
+
+                    document.getElementById('stats-grid').innerHTML = `
+                        <div class="stat"><div class="label">Kernel</div><div class="value yellow">Indisponível</div></div>
+                        <div class="stat"><div class="label">Constitution</div><div class="value yellow">Indisponível</div></div>
+                        <div class="stat"><div class="label">Providers</div><div class="value yellow">Indisponível</div></div>
+                        <div class="stat"><div class="label">Core Apps</div><div class="value yellow">Indisponível</div></div>
+                    `;
+
+                    document.getElementById('guardians-list').innerHTML = '<div class="empty">Kernel externo indisponível neste ambiente.</div>';
+                    document.getElementById('guardians-detail').innerHTML = '<div class="empty">Kernel externo indisponível neste ambiente.</div>';
+                    document.getElementById('capabilities-list').innerHTML = '<div class="empty">Kernel externo indisponível neste ambiente.</div>';
+                    document.getElementById('capabilities-detail').innerHTML = '<div class="empty">Kernel externo indisponível neste ambiente.</div>';
+                    document.getElementById('settings-detail').innerHTML = `
+                        <p style="color:var(--yellow)">Kernel externo indisponível neste ambiente.</p>
+                        <p style="color:var(--text-dim)">O AI Studio atua como cliente/gateway. Verifique a execução do ProductBridge/Kernel Python.</p>
+                    `;
+                }
+            } catch (e) {
+                document.getElementById('header-status').className = 'status offline';
+                document.getElementById('header-status').textContent = 'Indisponível';
+                document.getElementById('banner-mode-b').style.display = 'block';
+            }
+        }
+
+        async function runIueInspector() {
+            const input = document.getElementById('iue-input').value.trim();
+            const results = document.getElementById('iue-results');
+            if (!input) return;
+
+            results.innerHTML = '<div class="empty">Supervisionando e orquestrando pipeline cognitivo via ECC...</div>';
+
+            try {
+                const res = await fetch('/api/ecc', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ message: input, text: input })
+                });
+                const data = await res.json();
+
+                if (data.ok && (data.structured_intent || data.ecc_result)) {
+                    const eccRes = data.ecc_result || {};
+                    const currentState = data.current_state || eccRes.current_state || 'UNKNOWN';
+                    const finalAction = data.final_action || eccRes.final_action || 'CONTINUE';
+                    const trace = data.executive_trace || eccRes.executive_trace || {};
+                    const steps = trace.steps || [];
+                    const metrics = data.executive_metrics || eccRes.metrics || {};
+
+                    const si = data.structured_intent || (eccRes.structured_intent ? eccRes.structured_intent : {});
+                    const iqi = si.intent_quality_index || {};
+                    const score = Math.round((iqi.overall_score || 0) * 100);
+                    const colorClass = score >= 75 ? 'high' : score >= 50 ? 'medium' : 'low';
+
+                    const cdm = data.dialogue_decision || eccRes.dialogue_decision || {};
+                    const cpe = data.execution_plan || eccRes.execution_plan || {};
+                    const pqi = cpe.plan_quality_index || {};
+                    const pqiScore = Math.round((pqi.overall_score || 0) * 100);
+                    const pqiColor = pqiScore >= 75 ? 'high' : pqiScore >= 50 ? 'medium' : 'low';
+
+                    const cor = data.execution_graph || eccRes.execution_graph || {};
+                    const assignments = cor.assignments || {};
+
+                    results.innerHTML = `
+                        <!-- ECC Banner -->
+                        <div style="background:linear-gradient(135deg, rgba(59,130,246,0.15), rgba(168,85,247,0.15));border:1px solid rgba(59,130,246,0.4);padding:16px;border-radius:8px;margin-bottom:12px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <strong style="font-size:16px;color:#60a5fa;">🛡️ ECC Executive Supervisor (RFC-0011)</strong>
+                                <div style="display:flex;gap:8px;">
+                                    <span class="cap-tag" style="background:${currentState === 'READY_FOR_EXECUTION' ? 'var(--green)' : currentState === 'WAITING_CONTEXT' ? 'var(--yellow)' : 'var(--red)'};color:black;font-weight:700;">
+                                        Estado: ${currentState}
+                                    </span>
+                                    <span class="cap-tag" style="background:var(--accent);color:white;font-weight:700;">
+                                        Ação: ${finalAction}
+                                    </span>
+                                </div>
+                            </div>
+                            <div style="font-size:12px;color:var(--text-dim);margin-top:8px;display:flex;gap:16px;">
+                                <span>Tempo Total: <strong>${(metrics.total_duration_ms || 0).toFixed(1)}ms</strong></span>
+                                <span>Iterações Planejamento: <strong>${metrics.planning_iterations || 1}</strong></span>
+                                <span>Conclusão: <strong>${Math.round((metrics.pipeline_completion || 0) * 100)}%</strong></span>
+                            </div>
+                        </div>
+
+                        <!-- IUE Section -->
+                        <div style="background:var(--surface2);padding:16px;border-radius:8px;margin-bottom:12px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <strong style="font-size:16px;">1. IUE (Intent Quality Index): ${score}%</strong>
+                                <span class="cap-tag" style="color:white;background:var(--accent)">Domínio: ${si.domain || 'general'}</span>
+                            </div>
+                            <div class="progress-bar"><div class="progress-fill ${colorClass}" style="width:${score}%"></div></div>
+                            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;font-size:12px;color:var(--text-dim);">
+                                <div>Clareza: <strong>${Math.round((iqi.clarity||0)*100)}%</strong></div>
+                                <div>Completude: <strong>${Math.round((iqi.completeness||0)*100)}%</strong></div>
+                                <div>Contexto: <strong>${Math.round((iqi.context_richness||0)*100)}%</strong></div>
+                                <div>Acionabilidade: <strong>${Math.round((iqi.actionability||0)*100)}%</strong></div>
+                            </div>
+                        </div>
+
+                        <!-- CDM Section -->
+                        <div style="background:var(--surface2);padding:16px;border-radius:8px;margin-bottom:12px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <strong style="font-size:15px;color:var(--yellow);">2. CDM (Cognitive Dialogue State)</strong>
+                                <span class="cap-tag" style="background:${cdm.can_proceed ? 'var(--green)' : 'var(--yellow)'};color:black;">
+                                    ${cdm.state || 'N/A'}
+                                </span>
+                            </div>
+                            ${cdm.selected_question ? `
+                                <div style="background:rgba(234,179,8,0.12);border:1px solid var(--yellow);padding:12px;border-radius:8px;color:var(--yellow);font-size:13px;margin-top:8px;">
+                                    ❓ <strong>Pergunta Selecionada:</strong><br>${cdm.selected_question.question}
+                                </div>
+                            ` : '<div style="font-size:13px;color:var(--green);">✅ Nenhuma pergunta necessária. Pronto para execução.</div>'}
+                        </div>
+
+                        <!-- CPE Section -->
+                        <div style="background:var(--surface2);padding:16px;border-radius:8px;margin-bottom:12px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <strong style="font-size:15px;color:var(--accent);">3. CPE Execution Plan (PQI: ${pqiScore}%)</strong>
+                                <span class="cap-tag" style="background:${cpe.status === 'ready' ? 'var(--green)' : 'var(--red)'};color:white;">
+                                    Status: ${(cpe.status || 'draft').toUpperCase()}
+                                </span>
+                            </div>
+                            <div class="progress-bar"><div class="progress-fill ${pqiColor}" style="width:${pqiScore}%"></div></div>
+                            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px;font-size:12px;color:var(--text-dim);">
+                                <div>Alinhamento: <strong>${Math.round((pqi.goal_alignment||0)*100)}%</strong></div>
+                                <div>Exequibilidade: <strong>${Math.round((pqi.feasibility||0)*100)}%</strong></div>
+                                <div>Integridade DAG: <strong>${Math.round((pqi.dependency_integrity||0)*100)}%</strong></div>
+                            </div>
+
+                            ${cpe.steps && cpe.steps.length ? `
+                                <div style="margin-top:12px;">
+                                    <strong style="font-size:13px;">Etapas do Plano (${cpe.steps.length}):</strong>
+                                    <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                                        ${cpe.steps.map((step, idx) => `
+                                            <div style="background:var(--surface);border:1px solid var(--border);padding:10px;border-radius:6px;font-size:12px;">
+                                                <div style="display:flex;justify-content:space-between;font-weight:600;margin-bottom:4px;">
+                                                    <span>${idx + 1}. ${step.objective}</span>
+                                                    <span style="color:var(--text-dim)">[${step.action_type}]</span>
+                                                </div>
+                                                <div style="color:var(--text-dim);">
+                                                    Dependências: ${step.dependencies && step.dependencies.length ? step.dependencies.join(', ') : 'Nenhuma (Paralelo)'} | 
+                                                    Risco: <strong style="color:${step.risk_level === 'critical' || step.risk_level === 'high' ? 'var(--red)' : 'var(--green)'}">${step.risk_level}</strong> | 
+                                                    Confirmação: <strong>${step.requires_confirmation ? 'SIM ⚠️' : 'Não'}</strong>
+                                                </div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : '<div style="font-size:12px;color:var(--text-dim);margin-top:8px;">Nenhuma etapa gerada (plano bloqueado aguardando diálogo).</div>'}
+                        </div>
+
+                        <!-- COR Section (Capability Orchestrator) -->
+                        <div style="background:var(--surface2);padding:16px;border-radius:8px;margin-bottom:12px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <strong style="font-size:15px;color:#a855f7;">4. COR Execution Graph (Orchestration)</strong>
+                                <span class="cap-tag" style="background:${cor.status === 'ready' ? 'var(--green)' : 'var(--yellow)'};color:white;">
+                                    Status: ${(cor.status || 'draft').toUpperCase()}
+                                </span>
+                            </div>
+                            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;font-size:12px;color:var(--text-dim);">
+                                <div>Paralelismo Estimado: <strong>${cor.estimated_parallelism || 1}x</strong></div>
+                                <div>Custo Estimado: <strong>$${(cor.estimated_cost || 0).toFixed(4)}</strong></div>
+                                <div>Latência Est. por Estágio: <strong>${cor.estimated_latency || 0}s</strong></div>
+                            </div>
+
+                            ${cor.execution_groups && cor.execution_groups.length ? `
+                                <div style="margin-top:12px;">
+                                    <strong style="font-size:13px;">Estágios de Execução Paralela (${cor.execution_groups.length}):</strong>
+                                    <div style="margin-top:6px;display:flex;flex-direction:column;gap:8px;">
+                                        ${cor.execution_groups.map((group, gIdx) => `
+                                            <div style="background:var(--surface);border:1px solid var(--border);padding:10px;border-radius:6px;font-size:12px;">
+                                                <div style="font-weight:600;color:var(--accent);margin-bottom:6px;">
+                                                    Estágio ${gIdx + 1} (${group.length} etapa(s) paralela(s)):
+                                                </div>
+                                                ${group.map(stepId => {
+                                                    const assign = assignments[stepId] || {};
+                                                    return `
+                                                        <div style="background:var(--surface2);padding:8px;border-radius:4px;margin-bottom:4px;border:1px solid rgba(255,255,255,0.05);">
+                                                            <div style="display:flex;justify-content:space-between;font-weight:500;">
+                                                                <span>📌 ${stepId}</span>
+                                                                <span style="color:#a855f7;font-size:11px;">Capacidade: ${assign.capability || 'N/A'}</span>
+                                                            </div>
+                                                            <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
+                                                                🤖 <strong>Agente:</strong> ${assign.agent_name || 'N/A'} (Score: ${assign.agent_score || 0}) | 
+                                                                ⚡ <strong>Provider:</strong> ${assign.provider_name || 'N/A'} | 
+                                                                🔑 <strong>Conta:</strong> ${assign.account_name || 'N/A'}
+                                                            </div>
+                                                        </div>
+                                                    `;
+                                                }).join('')}
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : '<div style="font-size:12px;color:var(--text-dim);margin-top:8px;">Nenhum grafo de execução gerado.</div>'}
+                        </div>
+
+                        <!-- ECC Audit Trace Steps -->
+                        ${steps && steps.length ? `
+                            <div style="background:var(--surface2);padding:16px;border-radius:8px;margin-bottom:12px;">
+                                <strong style="font-size:14px;color:#60a5fa;">📜 Executive Audit Trace (${steps.length} passos)</strong>
+                                <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                                    ${steps.map(s => `
+                                        <div style="background:var(--surface);border:1px solid var(--border);padding:8px 12px;border-radius:6px;font-size:12px;">
+                                            <div style="display:flex;justify-content:space-between;font-weight:600;">
+                                                <span>Passo ${s.step_index}: [${s.module}] ➔ ${s.action}</span>
+                                                <span style="color:var(--text-dim);">${(s.duration_ms||0).toFixed(1)}ms</span>
+                                            </div>
+                                            <div style="color:var(--text-dim);margin-top:4px;">${s.reason}</div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+
+                        <div class="grid">
+                            <div class="card" style="margin:0;">
+                                <h3 style="font-size:14px;margin-bottom:8px;color:var(--green)">✅ Contexto Conhecido</h3>
+                                <ul style="font-size:13px;color:var(--text-dim);padding-left:16px;">
+                                    ${si.known_context.length ? si.known_context.map(c=>`<li>${c}</li>`).join('') : '<li>Nenhum contexto prévio detectado</li>'}
+                                </ul>
+                            </div>
+                            <div class="card" style="margin:0;">
+                                <h3 style="font-size:14px;margin-bottom:8px;color:var(--yellow)">⚠️ Dados Ausentes (Missing Context)</h3>
+                                <ul style="font-size:13px;color:var(--text-dim);padding-left:16px;">
+                                    ${si.missing_context.length ? si.missing_context.map(m=>`<li>${m}</li>`).join('') : '<li>Nenhum dado crítico ausente</li>'}
+                                </ul>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    results.innerHTML = `<div class="empty" style="color:var(--yellow)">⚠️ ${data.message || data.error || 'Erro na análise IUE'}</div>`;
+                }
+            } catch (e) {
+                results.innerHTML = '<div class="empty" style="color:var(--red)">Erro ao comunicar com o Intent Understanding Engine.</div>';
+            }
+        }
+
+        async function sendIntent() {
+            const input = document.getElementById('chat-input');
+            const message = input.value.trim();
+            if (!message) return;
+            input.value = '';
+
+            const messages = document.getElementById('chat-messages');
+            if (messages.querySelector('.empty')) messages.innerHTML = '';
+            messages.innerHTML += `<div class="message user">🔹 ${message}</div>`;
+
+            try {
+                const res = await fetch('/api/intent', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ message, text: message })
+                });
+                const data = await res.json();
+                if (data.ok && data.text) {
+                    messages.innerHTML += `<div class="message system">${data.text.replace(/\n/g, '<br>')}</div>`;
+
+                    if (data.structured_intent) {
+                        const si = data.structured_intent;
+                        const score = Math.round((si.intent_quality_index?.overall_score || 0) * 100);
+                        messages.innerHTML += `
+                            <div class="iue-badge">
+                                <div class="title">🎯 IUE Analysis — Domínio: ${si.domain.toUpperCase()} (IQI: ${score}%)</div>
+                                <div><strong>Objetivo:</strong> ${si.goal}</div>
+                                ${si.missing_context && si.missing_context.length ? `
+                                    <div style="margin-top:4px;color:var(--yellow)"><strong>Dados Ausentes:</strong>
+                                        <ul class="list">${si.missing_context.map(m=>`<li>${m}</li>`).join('')}</ul>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        `;
+                    }
+                } else {
+                    const errText = data.error || data.message || 'Kernel externo indisponível neste ambiente.';
+                    messages.innerHTML += `<div class="message system" style="color:var(--yellow)">⚠️ ${errText}</div>`;
+                }
+            } catch (e) {
+                messages.innerHTML += `<div class="message system" style="color:var(--red)">Erro ao comunicar com o Intent Gateway.</div>`;
+            }
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        loadDashboard();
+    </script>
+</body>
+</html>

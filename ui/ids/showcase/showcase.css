@@ -1,0 +1,19 @@
+body { min-height: 100vh; background: var(--ids-color-background); }
+.showcase-header { padding-block: var(--ids-space-12); background: var(--ids-color-ambient); }
+.showcase-main { padding-block: var(--ids-space-8); }
+.showcase-section { margin-block-end: var(--ids-space-12); }
+.showcase-tokens {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--ids-control-height), 1fr));
+  gap: var(--ids-space-3);
+}
+.showcase-swatch {
+  min-height: calc(var(--ids-control-height) * 2);
+  border: var(--ids-border-thin) solid var(--ids-color-border);
+  border-radius: var(--ids-radius-md);
+}
+.showcase-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--ids-space-4);
+}

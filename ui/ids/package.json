@@ -1,0 +1,10 @@
+{
+  "name": "@intent-os/ids",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "coverage": "node --experimental-test-coverage --test tests/*.test.js"
+  }
+}

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Intent Design System — Showcase</title>
+  <link rel="stylesheet" href="../styles/base.css">
+  <link rel="stylesheet" href="./showcase.css">
+  <script type="module" src="./showcase.js"></script>
+</head>
+<body>
+  <header class="showcase-header">
+    <div class="ids-container ids-stack">
+      <p class="ids-label">Ferramenta interna de validação</p>
+      <h1 class="ids-display">Intent Design System</h1>
+      <p class="ids-body">Componentes genéricos, tokens, estados e eixos independentes.</p>
+      <div class="showcase-controls" aria-label="Theme axes">
+        <ids-select label="Appearance"><select id="appearance"><option>system</option><option>light</option><option>dark</option></select></ids-select>
+        <ids-select label="Ambient"><select id="ambient"><option>neutral</option><option>lavender</option><option>steel</option><option>cream</option><option>atlas</option></select></ids-select>
+        <ids-select label="Density"><select id="density"><option>comfortable</option><option>compact</option></select></ids-select>
+        <ids-select label="Motion"><select id="motion"><option>full</option><option>reduced</option></select></ids-select>
+      </div>
+    </div>
+  </header>
+  <main class="ids-container showcase-main">
+    <section class="showcase-section ids-stack" aria-labelledby="type-title">
+      <h2 id="type-title" class="ids-heading">Typography</h2>
+      <p class="ids-display">Display</p><p class="ids-heading">Heading</p>
+      <p class="ids-title">Title</p><p class="ids-body">Body — conteúdo confortável para leitura contínua.</p>
+      <p class="ids-label">Label</p><p class="ids-caption">Caption</p><code class="ids-code">const identity = "continuous";</code>
+    </section>
+    <section class="showcase-section ids-stack" aria-labelledby="color-title">
+      <h2 id="color-title" class="ids-heading">Colors</h2>
+      <div id="swatches" class="showcase-tokens"></div>
+      <div class="ids-cluster">
+        <ids-status-indicator data-tone="success">✓ Success</ids-status-indicator>
+        <ids-status-indicator data-tone="warning">⚠ Warning</ids-status-indicator>
+        <ids-status-indicator data-tone="error">× Error</ids-status-indicator>
+        <ids-status-indicator data-tone="info">i Info</ids-status-indicator>
+      </div>
+    </section>
+    <section class="showcase-section ids-stack" aria-labelledby="component-title">
+      <h2 id="component-title" class="ids-heading">Components and states</h2>
+      <ids-toolbar aria-label="Example actions">
+        <ids-button>Primary</ids-button><ids-button><button disabled>Disabled</button></ids-button>
+        <ids-icon-button label="Search">⌕</ids-icon-button>
+        <ids-chip>Chip</ids-chip><ids-tag>Tag</ids-tag><ids-badge>Badge</ids-badge>
+        <ids-button><button id="open-modal">Open modal</button></ids-button>
+        <ids-button><button id="open-drawer">Open drawer</button></ids-button>
+        <ids-button><button id="open-toast">Show toast</button></ids-button>
+      </ids-toolbar>
+      <ids-divider></ids-divider>
+      <div id="icons" class="ids-cluster" aria-label="Icon variants and sizes"></div>
+      <div class="ids-grid">
+        <ids-card class="ids-span-4"><h3 class="ids-title">Card</h3><p>Grouped content.</p></ids-card>
+        <ids-panel class="ids-span-4" aria-label="Panel example"><h3 class="ids-title">Panel</h3><p>Elevated region.</p></ids-panel>
+        <ids-metric-card class="ids-span-4" aria-label="Metric example"><p class="ids-caption">Metric</p><strong class="ids-heading">84%</strong></ids-metric-card>
+      </div>
+      <ids-progress value="64" label="Example progress"></ids-progress>
+      <ids-search-field label="Search"><input type="search"></ids-search-field>
+      <ids-text-field label="Text"><input type="text"></ids-text-field>
+      <div class="ids-cluster">
+        <ids-checkbox><label><input type="checkbox">Checkbox</label></ids-checkbox>
+        <ids-radio><label><input type="radio" name="sample">Radio</label></ids-radio>
+        <ids-switch><label><input type="checkbox" role="switch">Switch</label></ids-switch>
+      </div>
+      <ids-accordion><details><summary>Accordion</summary><p>Progressive disclosure content.</p></details></ids-accordion>
+      <ids-tabs>
+        <div role="tablist" aria-label="Example tabs"><button role="tab" aria-selected="true" aria-controls="one">One</button><button role="tab" aria-selected="false" aria-controls="two">Two</button></div>
+        <div id="one" role="tabpanel">First panel</div><div id="two" role="tabpanel" hidden>Second panel</div>
+      </ids-tabs>
+      <ids-empty-state><h3 class="ids-title">Empty state</h3><p>There is nothing here yet.</p></ids-empty-state>
+      <ids-tooltip><button aria-describedby="tip">Tooltip target</button><span id="tip" role="tooltip">Helpful text</span></ids-tooltip>
+      <ids-skeleton aria-label="Loading content"></ids-skeleton>
+      <div class="ids-cluster"><ids-spinner aria-label="Loading"></ids-spinner><span class="ids-cognitive-pulse">Processing — textual equivalent</span></div>
+    </section>
+    <section class="showcase-section ids-stack" aria-labelledby="cognitive-title">
+      <h2 id="cognitive-title" class="ids-heading">Cognitive Components</h2>
+      <p>Observable, public presentation states. This catalog does not represent private processing or domain behavior.</p>
+      <h3 class="ids-title">Cognitive Pulse — every state</h3>
+      <div id="pulse-states" class="ids-cluster"></div>
+      <h3 class="ids-title">Mission composition</h3>
+      <ids-mission-card id="mission-composition"></ids-mission-card>
+      <ids-execution-indicator id="execution-sample"></ids-execution-indicator>
+      <div class="ids-grid">
+        <ids-context-card id="context-sample" class="ids-span-6"></ids-context-card>
+        <ids-provenance-card id="provenance-sample" class="ids-span-6"></ids-provenance-card>
+        <ids-agent-status id="agent-sample" class="ids-span-6"></ids-agent-status>
+        <ids-knowledge-relationship-card id="relationship-sample" class="ids-span-6"></ids-knowledge-relationship-card>
+      </div>
+      <h3 class="ids-title">Capability Badge — every state</h3>
+      <div id="capability-states" class="ids-cluster"><ids-capability-badge data-json='{"name":"Fallback capability","description":"Static no-framework example","state":"available"}'></ids-capability-badge></div>
+      <h3 class="ids-title">Decision timeline and confidence</h3>
+      <ids-decision-timeline id="timeline-sample"></ids-decision-timeline>
+      <ids-confidence-indicator id="confidence-sample"></ids-confidence-indicator>
+      <h3 class="ids-title">Fallbacks, long data, errors and translatable content</h3>
+      <div class="ids-grid">
+        <ids-context-card class="ids-span-4"></ids-context-card>
+        <ids-confidence-indicator class="ids-span-4"></ids-confidence-indicator>
+        <ids-agent-status class="ids-span-4" data-json='{"state":"failed","name":"Componente de software indisponível","description":"Não foi possível concluir a operação observável."}'></ids-agent-status>
+        <ids-knowledge-relationship-card class="ids-span-12" data-json='{"source":"Um item de conhecimento com um título deliberadamente extenso para validar quebra de linha e zoom","relationship":"related-to","target":"Outro item com conteúdo traduzível e sem largura fixa","notes":"A composição deve permanecer legível em painéis estreitos."}'></ids-knowledge-relationship-card>
+      </div>
+      <p class="ids-caption">Use os controles do tema para validar Light/Dark, todos os Ambients, Compact/Comfortable e Full/Reduced Motion. Forced Colors é coberto pelo estilo dedicado e pela validação suportada pelo navegador.</p>
+    </section>
+  </main>
+  <ids-modal id="sample-modal" hidden label="Modal example"><div role="dialog"><h2 class="ids-title">Modal</h2><p>Focused temporary content.</p><button data-close>Close</button></div></ids-modal>
+  <ids-drawer id="sample-drawer" hidden label="Drawer example"><div role="dialog"><h2 class="ids-title">Drawer</h2><p>Context without leaving the current task.</p><button data-close>Close</button></div></ids-drawer>
+  <ids-toast id="sample-toast" hidden>Saved — confirmation is not communicated by color alone.</ids-toast>
+</body>
+</html>

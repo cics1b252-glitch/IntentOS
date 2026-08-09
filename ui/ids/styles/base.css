@@ -1,0 +1,24 @@
+@import url("../typography/typography.css");
+@import url("../layout/layout.css");
+@import url("../motion/motion.css");
+@import url("../components/components.css");
+@import url("../accessibility/accessibility.css");
+@import url("../cognitive/cognitive.css");
+
+:root {
+  font-family: var(--ids-font-body);
+  font-size: var(--ids-font-size-body);
+  line-height: var(--ids-line-height-body);
+  color: var(--ids-color-text);
+  background: var(--ids-color-background);
+  accent-color: var(--ids-color-action);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: var(--ids-space-0, 0); }
+button, input, select, textarea { font: inherit; }
+a { color: var(--ids-color-action); }
+::selection {
+  color: var(--ids-color-text);
+  background: var(--ids-color-ambient);
+}

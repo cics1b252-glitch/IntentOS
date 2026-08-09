@@ -1,0 +1,27 @@
+.ids-motion {
+  transition:
+    color var(--ids-motion-fast) var(--ids-easing-standard),
+    background-color var(--ids-motion-fast) var(--ids-easing-standard),
+    border-color var(--ids-motion-fast) var(--ids-easing-standard),
+    opacity var(--ids-motion-normal) var(--ids-easing-standard),
+    transform var(--ids-motion-normal) var(--ids-easing-standard);
+}
+.ids-expand { animation: ids-expand var(--ids-motion-normal) var(--ids-easing-standard); }
+.ids-collapse { animation: ids-collapse var(--ids-motion-fast) var(--ids-easing-standard); }
+.ids-cognitive-pulse { animation: ids-pulse var(--ids-motion-slow) var(--ids-easing-standard) infinite alternate; }
+@keyframes ids-expand { from { opacity: var(--ids-opacity-muted); transform: translateY(calc(var(--ids-space-1) * -1)); } }
+@keyframes ids-collapse { to { opacity: var(--ids-opacity-muted); } }
+@keyframes ids-pulse { to { opacity: var(--ids-opacity-muted); } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: var(--ids-motion-fast) !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+[data-ids-motion="reduced"] *, [data-ids-motion="reduced"] *::before,
+[data-ids-motion="reduced"] *::after {
+  animation-duration: var(--ids-motion-fast) !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+}

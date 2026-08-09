@@ -1,0 +1,53 @@
+name: Sprint 0 test baseline
+
+on:
+  push:
+    branches:
+      - feat/openai-integration
+  pull_request:
+
+jobs:
+  baseline:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test and server dependencies
+        run: python -m pip install -e ".[dev,server]"
+
+      - name: Compile Python sources
+        run: python -m compileall -q intent_kernel intent_os_desktop
+
+      - name: Run tests and coverage
+        id: tests
+        shell: pwsh
+        run: |
+          python -m pytest -ra --tb=short `
+            --junitxml=pytest-report.xml `
+            --cov=intent_kernel `
+            --cov=intent_os_desktop `
+            --cov-report=term-missing `
+            --cov-report=xml:coverage.xml
+          $pytestExit = $LASTEXITCODE
+          "### Sprint 0 baseline" >> $env:GITHUB_STEP_SUMMARY
+          "Pytest exit code: $pytestExit" >> $env:GITHUB_STEP_SUMMARY
+          exit $pytestExit
+
+      - name: Publish failure and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint-0-test-reports
+          path: |
+            pytest-report.xml
+            coverage.xml
+          if-no-files-found: warn

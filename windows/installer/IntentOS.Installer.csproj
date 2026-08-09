@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>IntentOS-Alpha-Windows-Setup</AssemblyName>
+    <RootNamespace>IntentOS.Installer</RootNamespace>
+    <Version>0.4.4-alpha</Version>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationIcon>..\assets\intent-provisional.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('Payload.zip')">
+    <EmbeddedResource Include="Payload.zip" LogicalName="IntentOS.Payload.zip" />
+  </ItemGroup>
+</Project>

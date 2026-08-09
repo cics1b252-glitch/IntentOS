@@ -1,0 +1,6 @@
+{
+  "name": "Intent OS",
+  "description": "Cognitive Operating System — Product Alpha & Intent Understanding Engine (RFC-0007)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

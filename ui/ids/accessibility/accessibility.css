@@ -1,0 +1,21 @@
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: var(--ids-focus-width) solid var(--ids-color-focus);
+  outline-offset: var(--ids-focus-offset);
+}
+.ids-sr-only {
+  position: absolute;
+  width: var(--ids-border-thin);
+  height: var(--ids-border-thin);
+  padding: var(--ids-space-0, 0);
+  margin: calc(var(--ids-border-thin) * -1);
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: var(--ids-space-0, 0);
+}
+[disabled], [aria-disabled="true"] { opacity: var(--ids-opacity-disabled); cursor: not-allowed; }
+@media (forced-colors: active) {
+  :where(button, a, input, select, textarea, [tabindex]):focus-visible {
+    outline-color: Highlight;
+  }
+}

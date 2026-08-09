@@ -1,0 +1,229 @@
+:where(
+  ids-cognitive-pulse, ids-mission-card, ids-context-card,
+  ids-capability-badge, ids-decision-timeline, ids-confidence-indicator,
+  ids-execution-indicator, ids-provenance-card, ids-agent-status,
+  ids-knowledge-relationship-card
+) {
+  min-inline-size: 0;
+  color: var(--ids-color-text);
+}
+
+ids-mission-card,
+ids-context-card,
+ids-decision-timeline,
+ids-execution-indicator,
+ids-provenance-card,
+ids-agent-status,
+ids-knowledge-relationship-card {
+  display: block;
+  max-inline-size: 100%;
+}
+
+.ids-cognitive-card,
+.ids-decision-timeline {
+  min-inline-size: 0;
+  padding: var(--ids-panel-padding);
+  overflow-wrap: anywhere;
+  background: var(--ids-color-surface);
+  border: var(--ids-border-thin) solid var(--ids-color-border);
+  border-radius: var(--ids-radius-lg);
+  box-shadow: var(--ids-shadow-soft);
+}
+
+.ids-cognitive-card__header,
+.ids-cognitive-meta-row,
+.ids-cognitive-badges,
+.ids-cognitive-actions,
+.ids-relationship-flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ids-space-2);
+  align-items: center;
+}
+
+.ids-cognitive-card__header {
+  justify-content: space-between;
+}
+
+.ids-cognitive-card__header > * {
+  min-inline-size: 0;
+}
+
+.ids-cognitive-meta-row {
+  margin-block: var(--ids-space-2);
+  color: var(--ids-color-text-muted);
+}
+
+.ids-cognitive-meta,
+.ids-cognitive-state {
+  display: inline-flex;
+  gap: var(--ids-space-1);
+  align-items: center;
+}
+
+.ids-cognitive-state,
+.ids-capability-badge {
+  padding: var(--ids-space-1) var(--ids-space-2);
+  border: var(--ids-border-thin) solid var(--ids-color-border);
+  border-radius: var(--ids-radius-pill);
+  background: var(--ids-color-surface-subtle);
+}
+
+.ids-cognitive-state[data-tone="success"] { border-color: var(--ids-color-success); }
+.ids-cognitive-state[data-tone="warning"] { border-color: var(--ids-color-warning); }
+.ids-cognitive-state[data-tone="error"] { border-color: var(--ids-color-error); }
+.ids-cognitive-state[data-tone="info"] { border-color: var(--ids-color-info); }
+
+.ids-cognitive-pulse {
+  display: inline-flex;
+  gap: var(--ids-space-2);
+  align-items: center;
+  max-inline-size: 100%;
+}
+
+.ids-cognitive-pulse__mark {
+  inline-size: var(--ids-space-4);
+  block-size: var(--ids-space-4);
+  flex: none;
+  border: var(--ids-border-strong) solid var(--ids-color-border-strong);
+  border-radius: var(--ids-radius-pill);
+  background: var(--ids-color-surface);
+}
+
+.ids-cognitive-pulse[data-state="processing"] .ids-cognitive-pulse__mark,
+.ids-cognitive-pulse[data-state="executing"] .ids-cognitive-pulse__mark,
+.ids-cognitive-pulse[data-state="preparing"] .ids-cognitive-pulse__mark {
+  border-color: var(--ids-color-action);
+  border-inline-end-color: transparent;
+  animation: ids-spin var(--ids-motion-slow) linear infinite;
+}
+
+.ids-cognitive-pulse[data-state="completed"] .ids-cognitive-pulse__mark {
+  background: var(--ids-color-success);
+}
+
+.ids-cognitive-pulse[data-state="warning"] .ids-cognitive-pulse__mark {
+  background: var(--ids-color-warning);
+}
+
+.ids-cognitive-pulse[data-state="failed"] .ids-cognitive-pulse__mark {
+  background: var(--ids-color-error);
+}
+
+.ids-mission-card[data-selected="true"] {
+  outline: var(--ids-border-strong) solid var(--ids-color-focus);
+  outline-offset: var(--ids-space-1);
+}
+
+.ids-mission-card:focus-visible {
+  outline: var(--ids-border-strong) solid var(--ids-color-focus);
+  outline-offset: var(--ids-space-1);
+}
+
+.ids-cognitive-progress {
+  display: grid;
+  gap: var(--ids-space-1);
+  margin-block: var(--ids-space-2);
+}
+
+.ids-cognitive-progress progress,
+.ids-confidence-indicator progress {
+  inline-size: 100%;
+}
+
+.ids-capability-badge {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--ids-space-1);
+  align-items: center;
+  max-inline-size: 100%;
+  font-size: var(--ids-font-size-caption);
+}
+
+.ids-capability-badge[data-state="failed"],
+.ids-capability-badge[data-state="restricted"] {
+  border-color: var(--ids-color-error);
+}
+
+.ids-capability-badge[data-state="completed"] {
+  border-color: var(--ids-color-success);
+}
+
+.ids-cognitive-disclosure,
+.ids-cognitive-actions button {
+  min-block-size: var(--ids-control-height);
+  margin-block-start: var(--ids-space-2);
+}
+
+.ids-cognitive-details[hidden] {
+  display: none;
+}
+
+.ids-cognitive-details dl {
+  display: grid;
+  grid-template-columns: minmax(min-content, max-content) minmax(0, 1fr);
+  gap: var(--ids-space-1) var(--ids-space-2);
+}
+
+.ids-cognitive-details dd {
+  margin: 0;
+}
+
+.ids-decision-timeline ol {
+  display: grid;
+  gap: var(--ids-space-4);
+  padding-inline-start: var(--ids-space-8);
+}
+
+.ids-decision-timeline li {
+  padding-inline-start: var(--ids-space-1);
+}
+
+.ids-decision-timeline li[data-relevant="true"] {
+  border-inline-start: var(--ids-border-strong) solid var(--ids-color-action);
+}
+
+.ids-decision-timeline summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.ids-confidence-indicator {
+  display: grid;
+  gap: var(--ids-space-1);
+  max-inline-size: 100%;
+}
+
+.ids-relationship-flow > * {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 40rem) {
+  .ids-cognitive-card__header,
+  .ids-relationship-flow {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ids-cognitive-pulse__mark {
+    animation: none !important;
+  }
+}
+
+[data-ids-motion="reduced"] .ids-cognitive-pulse__mark {
+  animation: none !important;
+}
+
+@media (forced-colors: active) {
+  .ids-cognitive-state,
+  .ids-capability-badge,
+  .ids-cognitive-pulse__mark,
+  .ids-cognitive-card,
+  .ids-decision-timeline {
+    border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+}

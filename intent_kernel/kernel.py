@@ -355,21 +355,10 @@ class Kernel:
                      if key != "flow_event"},
         )
         output_str = str(outcome.result.output or "")
-        needs_clarification = (
-            "investimento único ou para um aporte mensal" in output_str
-            or "qual é o seu objetivo" in output_str.lower()
+        await self.mission_engine.complete(
+            mission.id,
+            output=output_str,
         )
-        if needs_clarification:
-            from intent_kernel.contracts import MissionStatus
-            await self.mission_engine.pause(
-                mission.id,
-                status=MissionStatus.WAITING_FOR_INFORMATION,
-            )
-        else:
-            await self.mission_engine.complete(
-                mission.id,
-                output=output_str,
-            )
         if self.migration_telemetry is not None:
             self.migration_telemetry.record_canonical(parsed.domain.value)
         return outcome.result

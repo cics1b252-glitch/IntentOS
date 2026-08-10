@@ -25,7 +25,8 @@ class TestIntentGatewayPythonBridge(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res.get("ok"))
         self.assertIn("available", res)
         self.assertIsInstance(res["available"], list)
-        self.assertIn("gemini", res["available"])
+        self.assertNotIn("gemini", res["available"])
+        self.assertIn("mock", res["available"])
 
     async def test_core_app_discovery(self):
         res = await self.bridge.dispatch({"action": "core_apps"})

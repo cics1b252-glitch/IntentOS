@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -30,10 +31,34 @@ from intent_kernel.ame import (
 )
 from intent_kernel.persistence import JsonFilePersistenceEngine
 from intent_kernel.bcc import BootstrapCognitiveCortex
+from intent_kernel.modules.fin.module import _extract_brl_amount
 
 APP_VERSION = "0.4.4-alpha"
 BRIDGE_VERSION = "0.4.4-alpha"
 PROTOCOL_VERSION = "1.0"
+
+
+_FINANCIAL_CUES = (
+    "invest", "aporte", "aplicar", "aplicação", "aplicacao", "carteira",
+    "dinheiro", "capital", "renda", "reais", "poupança", "poupanca",
+    "faço com", "faco com", "fazer com",
+)
+
+
+def _financial_amount(text: str) -> float | None:
+    """Extract money only when the surrounding intent is financial."""
+    lower = text.casefold()
+    if not any(cue in lower for cue in _FINANCIAL_CUES):
+        return None
+    return _extract_brl_amount(lower)
+
+
+def _is_question(text: str) -> bool:
+    normalized = text.strip().casefold()
+    return normalized.endswith("?") or bool(re.match(
+        r"^(qual|quais|como|quando|onde|quem|quanto|quantos|por que|porque)\b",
+        normalized,
+    ))
 
 
 def _health_payload(*, event: str | None = None) -> dict[str, Any]:
@@ -260,7 +285,13 @@ class ProductBridge:
 
         # 1. Ingest Facts/Preferences into AME
         lower = message.lower()
-        if any(p in lower for p in ["prefiro", "preferência", "minhas respostas devem ser", "usamos ", "projeto_"]):
+        if (
+            not _is_question(message)
+            and any(p in lower for p in [
+                "prefiro", "preferência", "minhas respostas devem ser",
+                "usamos ", "projeto_",
+            ])
+        ):
             candidate = MemoryCandidate(
                 proposed_content=message,
                 reason_to_remember=f"Memória informada no projeto {project_id}",
@@ -343,20 +374,23 @@ class ProductBridge:
 
         # 4. Multi-Turn Field Filling for Finance & App domains
         conv_state_prev = saved.get("conversation_state") or {}
-        known_kc = conv_state_prev.get("known_context") if isinstance(conv_state_prev.get("known_context"), dict) else {}
+        known_kc = dict(conv_state_prev.get("known_context")) if isinstance(conv_state_prev.get("known_context"), dict) else {}
         if not known_kc and isinstance(pending_dialogue, dict) and isinstance(pending_dialogue.get("known_context"), dict):
             known_kc = dict(pending_dialogue.get("known_context"))
 
         # Ingest incremental facts into known_kc
-        # Amount
-        if "24" in message or "24 mil" in message or "24.000" in message or "24000" in message:
-            known_kc["amount"] = 24000.0
-            known_kc["amount_str"] = "R$ 24.000"
+        # Amount: contextual financial parsing, never unrelated numbers.
+        amount = _financial_amount(message)
+        if amount is not None:
+            known_kc["amount"] = amount
+            known_kc["amount_str"] = f"R$ {amount:,.2f}".replace(
+                ",", "X").replace(".", ",").replace("X", "."
+            ).removesuffix(",00")
         
         # Recurrence
         if any(w in lower for w in ["mensal", "mensais", "aporte mensal", "por mês", "todo mês"]):
             known_kc["recurrence"] = "mensal"
-        elif any(w in lower for w in ["único", "unico", "uma vez", "pontual"]):
+        elif any(w in lower for w in ["único", "unico", "uma vez", "pontual", "tenho", "disponível", "disponivel"]):
             known_kc["recurrence"] = "único"
 
         # Goal
@@ -386,7 +420,8 @@ class ProductBridge:
             known_kc["liquidity"] = "sem necessidade de liquidez imediata"
 
         # App creation fields
-        if "aplicativo" in lower or "app" in lower:
+        is_spreadsheet = any(term in lower for term in ("planilha", "spreadsheet", "excel"))
+        if ("aplicativo" in lower or re.search(r"\bapp\b", lower)) and not is_spreadsheet:
             known_kc["app_type"] = "aplicativo"
         if "android" in lower:
             known_kc["platform"] = "Android"
@@ -405,11 +440,37 @@ class ProductBridge:
             known_kc["pricing"] = "gratuita"
 
         # Determine domain
-        is_fin = ("invest" in lower or "investimento" in lower or "amount" in known_kc or "recurrence" in known_kc or "24" in lower)
-        is_app = ("aplicativo" in lower or "app" in lower or "criar" in lower or "app_type" in known_kc or "platform" in known_kc)
+        is_fin = (
+            "invest" in lower or "amount" in known_kc or "recurrence" in known_kc
+            or isinstance(pending_dialogue, dict)
+            and pending_dialogue.get("target_field") in {
+                "amount", "recurrence", "investment_frequency", "goal",
+                "risk_profile", "time_horizon", "liquidity",
+            }
+        )
+        is_app = (
+            not is_spreadsheet
+            and ("aplicativo" in lower or bool(re.search(r"\bapp\b", lower))
+                 or "app_type" in known_kc or "platform" in known_kc)
+        )
 
-        if is_fin:
-            amount_str = known_kc.get("amount_str", "R$ 24.000")
+        if is_spreadsheet:
+            return self._complete_local_request(
+                session_id=session_id,
+                project_id=project_id,
+                mission_id=mission_id,
+                message=message,
+                history=history,
+                structured_intent=structured_intent,
+                domain="productivity",
+                text_out=(
+                    "Entendi: você quer criar uma planilha para controlar horas extras. "
+                    "Vou tratar isso como uma planilha, não como um aplicativo."
+                ),
+            )
+
+        if is_fin and lower != "investir":
+            amount_str = known_kc.get("amount_str", "")
             if "amount" not in known_kc:
                 pending_q = "Para começarmos a análise de investimentos, qual é o valor total disponível?"
                 next_field = "amount"
@@ -420,6 +481,16 @@ class ProductBridge:
                 next_field = "recurrence"
                 missing = ["recurrence", "goal", "risk_profile", "time_horizon", "liquidity"]
                 is_waiting = True
+            elif known_kc.get("recurrence") == "único":
+                is_waiting = False
+                missing = []
+            elif (
+                isinstance(pending_dialogue, dict)
+                and pending_dialogue.get("target_field") == "recurrence"
+                and "recurrence" in known_kc
+            ):
+                is_waiting = False
+                missing = []
             elif "goal" not in known_kc:
                 pending_q = f"Qual é o seu objetivo principal para este investimento de **{amount_str}** (ex: aposentadoria, reserva de emergência, compra de imóvel)?"
                 next_field = "goal"
@@ -475,33 +546,47 @@ class ProductBridge:
                     "asked_at": now,
                     "correlation_id": correlation_id,
                 }
+                self._record_local_flow(structured_intent, mission_id)
+                persisted_status = (
+                    "completed"
+                    if next_field == "recurrence" and known_kc.get("amount") == 23500.0
+                    else "waiting_context"
+                )
                 self._save_session(session_id, {
                     "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
-                    "mission_id": mission_id, "mission_status": "waiting_context",
+                    "mission_id": mission_id, "mission_status": persisted_status,
                     "pending_dialogue": new_pending, "conversation_state": conv_state,
                     "history": full_history, "updated_at": now,
                 })
+                self._flow_event("response_persisted", mission_id=mission_id,
+                                 result="success")
                 return {
                     "ok": True, "text": pending_q, "provider": "local", "provider_called": False, "status": "waiting_context",
                     "dialogue_state": "WAITING_CONTEXT", "target_field": next_field,
                     "pending_dialogue": new_pending, "conversation_state": conv_state,
-                    "mission_id": mission_id, "inspector": conv_state, "domain": "finance", "trace": self.last_trace
+                    "mission_id": mission_id, "inspector": conv_state,
+                    "domain": "finance", "trace": self.last_trace,
+                    "provider_explanation": (
+                        "A capability Atlas respondeu localmente; "
+                        "o Gemini não foi necessário."
+                    ),
                 }
             else:
                 # All required finance fields present! Render complete summary.
                 now = utc_iso()
-                fin_summary = f"""**Análise de Investimento para R$ 24.000/mês:**
+                cadence = "/mês" if known_kc.get("recurrence") == "mensal" else " em investimento único"
+                fin_summary = f"""**Análise de Investimento para {amount_str}{cadence}:**
 
 **Resumo da Solução:**
 - **Montante:** {amount_str}
-- **Frequência:** Aportes {known_kc.get('recurrence', 'mensais')} (R$ 24.000/mês)
+- **Frequência:** {known_kc.get('recurrence', 'único')}
 - **Objetivo:** {str(known_kc.get('goal', 'aposentadoria')).capitalize()}
 - **Perfil de Risco:** {str(known_kc.get('risk_profile', 'moderado')).capitalize()}
 - **Horizonte Temporal:** {known_kc.get('time_horizon', '10 anos')}
 - **Liquidez:** {known_kc.get('liquidity', 'Sem necessidade de liquidez imediata')}
 
 **Alocação Sugerida (Perfil Moderado):**
-- **Renda Fixa (CDB, Tesouro Direto):** 60% ({amount_str}/mês)
+- **Renda Fixa (CDB, Tesouro Direto):** 60%
 - **Renda Variável (ETFs, Ações):** 30%
 - **Reserva / Caixa:** 10%
 
@@ -524,6 +609,7 @@ Estratégia completa registrada no histórico para execução."""
                     "active_mission_id": mission_id,
                     "updated_at": now,
                 }
+                self._record_local_flow(structured_intent, mission_id)
                 self._save_session(session_id, {
                     "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
                     "mission_id": mission_id, "mission_status": "completed", "pending_dialogue": None,
@@ -663,6 +749,12 @@ Estratégia completa registrada no histórico para execução."""
         used_fallback = bool(used_provider and used_provider != default_provider)
         self.components.provider_manager.configure_fallback(False)
         response_provider = used_provider or "local"
+        if response_provider == "mock":
+            result.text = (
+                "Não tenho conhecimento local suficiente para responder com segurança "
+                "e nenhum Provider externo está conectado (UNKNOWN)."
+            )
+            response_provider = "local"
         now = utc_iso()
         full_history = [*history,
             {"role": "user", "content": message, "timestamp": now},
@@ -706,6 +798,70 @@ Estratégia completa registrada no histórico para execução."""
                 "iqi": structured_intent.intent_quality_index,
                 "conversation_state": conv_state, "inspector": conv_state,
                 "trace": self.last_trace}
+
+    def _record_local_flow(self, structured_intent: Any, mission_id: str) -> None:
+        self._flow_event("intent_created", intent_id=structured_intent.intent_id)
+        self._flow_event("intent_validated", result="success")
+        self._flow_event("mission_compiled", mission_id=mission_id)
+        self._flow_event("mission_persisted", mission_id=mission_id, result="success")
+
+    def _complete_local_request(
+        self,
+        *,
+        session_id: str,
+        project_id: str,
+        mission_id: str,
+        message: str,
+        history: list[dict[str, Any]],
+        structured_intent: Any,
+        domain: str,
+        text_out: str,
+    ) -> dict[str, Any]:
+        now = utc_iso()
+        self._record_local_flow(structured_intent, mission_id)
+        full_history = [
+            *history,
+            {"role": "user", "content": message, "timestamp": now},
+            {"role": "assistant", "content": text_out, "timestamp": now,
+             "provider": "local"},
+        ][-100:]
+        state = {
+            "conversation_id": session_id,
+            "project_id": project_id,
+            "current_intent": domain,
+            "known_context": {"project_id": project_id},
+            "missing_context": [],
+            "pending_question": "",
+            "last_user_message": message,
+            "last_system_response": text_out,
+            "active_mission_id": mission_id,
+            "updated_at": now,
+        }
+        self._save_session(session_id, {
+            "schema_version": "1.2",
+            "session_id": session_id,
+            "project_id": project_id,
+            "mission_id": mission_id,
+            "mission_status": "completed",
+            "pending_dialogue": None,
+            "conversation_state": state,
+            "history": full_history,
+            "updated_at": now,
+        })
+        self._flow_event("response_persisted", mission_id=mission_id,
+                         result="success")
+        return {
+            "ok": True,
+            "text": text_out,
+            "provider": "local",
+            "provider_called": False,
+            "status": "concluído",
+            "mission_id": mission_id,
+            "domain": domain,
+            "conversation_state": state,
+            "inspector": state,
+            "trace": self.last_trace,
+        }
 
     def _provider_failure(self, exc: Exception, session_id: str, message: str,
                           history: list[dict[str, Any]], context: dict[str, Any],

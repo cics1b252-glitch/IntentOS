@@ -125,6 +125,20 @@ class CapabilityRequirementDiscovery:
         (("japones",), "content.explain", "Explain learning content"),
         (("aprender",), "assessment.plan", "Plan assessments"),
         (("lembr",), "memory.retrieve", "Retrieve relevant memory"),
+        (("ordens", "servico"), "service_order.management", "Manage service orders"),
+        (("pecas",), "inventory.parts", "Track parts inventory"),
+        (("clientes",), "customer.records", "Maintain customer records"),
+        (("historico", "manutencao"), "maintenance.history", "Track maintenance history"),
+        (("notas", "fiscais"), "document.read", "Read incoming documents"),
+        (("notas", "fiscais"), "document.extract_structured_data", "Extract structured document data"),
+        (("organizar", "dados"), "data.normalize", "Normalize structured data"),
+        (("resumo", "mensal"), "report.aggregate", "Aggregate a periodic report"),
+        (("resumo",), "report.explain", "Explain a report"),
+        (("abra", "programa"), "application.launch", "Launch an installed application"),
+        (("tarefa", "nele"), "application.control", "Control an application"),
+        (("enviar",), "external.communication", "Send an external communication"),
+        (("modificar", "arquivos"), "filesystem.modify", "Modify files"),
+        (("prefiro",), "memory.write", "Store a user preference"),
     )
 
     @staticmethod
@@ -132,7 +146,15 @@ class CapabilityRequirementDiscovery:
         normalized = unicodedata.normalize("NFKD", text.lower())
         return "".join(ch for ch in normalized if not unicodedata.combining(ch))
 
-    def discover(self, text: str) -> list[CapabilityRequirement]:
+    def discover(
+        self,
+        text: str,
+        *,
+        structured_intent: Any | None = None,
+        ame_context: dict[str, Any] | None = None,
+        project_context: dict[str, Any] | None = None,
+        persistent_constraints: Iterable[str] = (),
+    ) -> list[CapabilityRequirement]:
         normalized = self._normalize(text)
         requirements: dict[str, CapabilityRequirement] = {}
         for tokens, capability_id, description in self._RULES:
@@ -165,6 +187,54 @@ class CapabilityRequirementDiscovery:
                 allows_external_reasoning=True,
                 provenance=("unknown_intent_fallback",),
             )
+        context_provenance = tuple(
+            item
+            for item, present in (
+                ("IUE", structured_intent is not None),
+                ("AME", bool(ame_context)),
+                ("project_context", bool(project_context)),
+            )
+            if present
+        )
+        if context_provenance:
+            requirements = {
+                key: CapabilityRequirement(
+                    capability_id=value.capability_id,
+                    description=value.description,
+                    required_inputs=value.required_inputs,
+                    expected_outputs=value.expected_outputs,
+                    constraints=value.constraints,
+                    risk_level=value.risk_level,
+                    side_effect_level=value.side_effect_level,
+                    privacy_requirements=value.privacy_requirements,
+                    environment_requirements=value.environment_requirements,
+                    verification_requirements=value.verification_requirements,
+                    preferred_execution_mode=value.preferred_execution_mode,
+                    allows_external_reasoning=value.allows_external_reasoning,
+                    provenance=value.provenance + context_provenance,
+                )
+                for key, value in requirements.items()
+            }
+        constraints = tuple(str(item) for item in persistent_constraints)
+        if constraints:
+            requirements = {
+                key: CapabilityRequirement(
+                    capability_id=value.capability_id,
+                    description=value.description,
+                    required_inputs=value.required_inputs,
+                    expected_outputs=value.expected_outputs,
+                    constraints=tuple(sorted(set(value.constraints + constraints))),
+                    risk_level=value.risk_level,
+                    side_effect_level=value.side_effect_level,
+                    privacy_requirements=value.privacy_requirements,
+                    environment_requirements=value.environment_requirements,
+                    verification_requirements=value.verification_requirements,
+                    preferred_execution_mode=value.preferred_execution_mode,
+                    allows_external_reasoning=value.allows_external_reasoning,
+                    provenance=value.provenance + ("persistent_constraints",),
+                )
+                for key, value in requirements.items()
+            }
         return list(requirements.values())
 
 

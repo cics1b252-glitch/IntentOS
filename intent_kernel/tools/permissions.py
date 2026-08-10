@@ -50,13 +50,15 @@ class PermissionManager:
         permission: str,
         project_id: str = "GLOBAL",
         reason: str = "Permission revoked by user or system",
+        scope: PermissionScope | None = None,
     ) -> PermissionDecision:
         """Revoke a previously granted permission."""
+        existing = self._grants.get((tool_id, permission, project_id))
         decision = PermissionDecision(
             tool_id=tool_id,
             permission=permission,
             state=PermissionDecisionState.REVOKED,
-            scope=PermissionScope.PROJECT,
+            scope=scope or (existing.scope if existing else PermissionScope.PROJECT),
             project_id=project_id,
             reason=reason,
         )

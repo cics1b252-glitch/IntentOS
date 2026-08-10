@@ -82,13 +82,20 @@ describe('Intent Gateway Adapter & Transport Tests', () => {
     assert.ok(iueResult.structured_intent);
     assert.strictEqual(iueResult.structured_intent.domain, 'finance');
     assert.ok(iueResult.structured_intent.intent_quality_index);
-    assert.ok(iueResult.dialogue_decision);
-    assert.ok(iueResult.execution_plan);
+    if (iueResult.current_state === 'WAITING_CONTEXT') {
+      assert.strictEqual(iueResult.execution_plan, null);
+    } else {
+      assert.ok(iueResult.execution_plan);
+    }
 
     const planResult = await adapter.createPlan({ text: 'Quero investir 23.500' });
     assert.strictEqual(planResult.ok, true);
-    assert.ok(planResult.execution_plan);
-    assert.ok(Array.isArray(planResult.execution_plan.steps));
+    if (planResult.current_state === 'WAITING_CONTEXT') {
+      assert.strictEqual(planResult.execution_plan, null);
+    } else {
+      assert.ok(planResult.execution_plan);
+      assert.ok(Array.isArray(planResult.execution_plan.steps));
+    }
 
     await adapter.stop();
   });

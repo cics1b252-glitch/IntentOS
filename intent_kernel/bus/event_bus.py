@@ -16,6 +16,7 @@ class EventBus:
     def __init__(self):
         self._handlers: dict[str, list[Callable]] = defaultdict(list)
         self._history: list[dict] = []
+        self._failures: list[dict[str, Any]] = []
 
     def subscribe(self, event_type: str, handler: Callable) -> None:
         """Subscribe a handler to an event type."""
@@ -38,9 +39,16 @@ class EventBus:
         handlers = self._handlers.get(event_type, [])
         for handler in handlers:
             if hasattr(handler, "__call__"):
-                result = handler(data)
-                if hasattr(result, "__await__"):
-                    await result
+                try:
+                    result = handler(data)
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception as exc:
+                    self._failures.append({
+                        "event_type": event_type,
+                        "handler": getattr(handler, "__name__", type(handler).__name__),
+                        "error_type": type(exc).__name__,
+                    })
 
     def get_history(self, event_type: str | None = None) -> list[dict]:
         """Get event history, optionally filtered by type."""
@@ -51,6 +59,12 @@ class EventBus:
     def clear_history(self) -> None:
         """Clear event history."""
         self._history.clear()
+
+    def get_failures(self, event_type: str | None = None) -> list[dict[str, Any]]:
+        """Return redacted handler failures without interrupting other handlers."""
+        if event_type is None:
+            return list(self._failures)
+        return [item for item in self._failures if item["event_type"] == event_type]
 
     @property
     def subscriber_count(self) -> int:

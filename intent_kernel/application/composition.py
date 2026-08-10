@@ -30,6 +30,11 @@ from intent_kernel.constitution import (
     create_default_constitution,
 )
 from intent_kernel.contracts import CapabilityExecutor, ConstitutionEngine
+from intent_kernel.cognition import (
+    CapabilityFirstResolver,
+    CapabilityRequirementDiscovery,
+    CognitiveCapabilityRuntime,
+)
 from intent_kernel.core_apps import (
     AtlasCoreApp,
     CapabilityRouter,
@@ -47,6 +52,8 @@ from intent_kernel.orchestration import (
 from intent_kernel.pkb import JsonFileStore
 from intent_kernel.providers import ManagedProvider, MockProvider, ProviderManager
 from intent_kernel.router import ModuleRouter
+from intent_kernel.rrm.projection import RuntimeResourceProjection
+from intent_kernel.rrm.service import RegistryResourceManager
 
 LEGACY_ADAPTERS = (
     "ModuleRouter",
@@ -79,6 +86,8 @@ class ApplicationComponents:
     mission_engine: MissionEngine
     provider_manager: ProviderManager
     knowledge_pipeline: Any
+    resource_manager: RegistryResourceManager
+    cognitive_capability_runtime: CognitiveCapabilityRuntime
     migration_telemetry: MigrationTelemetry
     bootstrap_mode: str = "canonical"
     legacy_adapters: tuple[str, ...] = LEGACY_ADAPTERS
@@ -236,14 +245,25 @@ class KernelBuilder:
                 LegacyAgentAdapter(legacy_agent)
             )
         capability_registry = CanonicalCapabilityRegistry()
+        resource_manager = RegistryResourceManager(populate_defaults=False)
+        projection = RuntimeResourceProjection(resource_manager)
         for app in core_apps:
             capability_registry.register_core_app(app)
+            projection.project_core_app(app)
         for agent in agent_orchestrator.agents:
             capability_registry.register_agent(agent)
+            projection.project_agent(agent)
         for provider_name in providers.available:
-            capability_registry.register_provider(
-                providers.get(provider_name)
-            )
+            provider = providers.get(provider_name)
+            capability_registry.register_provider(provider)
+            projection.project_provider(provider)
+        cognitive_capability_runtime = CognitiveCapabilityRuntime(
+            discovery=CapabilityRequirementDiscovery(),
+            resolver=CapabilityFirstResolver(
+                rrm=resource_manager,
+                constitution=constitution_engine,
+            ),
+        )
         capability_execution_service = CapabilityExecutionService(
             mission_engine=mission_engine,
             constitution=constitution_engine,
@@ -262,6 +282,7 @@ class KernelBuilder:
             telemetry=migration_telemetry,
         )
         kernel.attach_canonical_execution(capability_execution_service)
+        kernel.attach_cognitive_capability_runtime(cognitive_capability_runtime)
         kernel.set_runtime_description(
             {
                 "bootstrap_mode": "canonical",
@@ -269,6 +290,8 @@ class KernelBuilder:
                 "constitution": "canonical",
                 "capability_router": "canonical",
                 "capability_registry": "canonical",
+                "resource_authority": "RRM",
+                "capability_resolution": "canonical_non_executing",
                 "agent_orchestrator": "canonical",
                 "provider_manager": tuple(providers.available),
                 "core_apps": tuple(app.app_id for app in core_apps),
@@ -301,6 +324,8 @@ class KernelBuilder:
             mission_engine=mission_engine,
             provider_manager=providers,
             knowledge_pipeline=kernel.knowledge.pipeline,
+            resource_manager=resource_manager,
+            cognitive_capability_runtime=cognitive_capability_runtime,
             migration_telemetry=migration_telemetry,
         )
 

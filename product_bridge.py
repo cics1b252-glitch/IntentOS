@@ -135,6 +135,7 @@ class ProductBridge:
         self.ame_repo = LocalKnowledgeObjectRepository(persistence_engine=persistence_engine)
         self.ame = AdaptiveMemoryEngine(repository=self.ame_repo)
         self.bcc = BootstrapCognitiveCortex(ame=self.ame)
+        self.last_capability_analysis: dict[str, Any] | None = None
 
     async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         action = request.get("action")
@@ -219,6 +220,7 @@ class ProductBridge:
             return {
                 "ok": True,
                 "trace": self.last_trace,
+                "capability_analysis": self.last_capability_analysis,
                 "data_migration_status": self.data_migration_status,
                 "app_version": APP_VERSION,
                 "bridge_version": BRIDGE_VERSION,
@@ -282,6 +284,16 @@ class ProductBridge:
             "resume_mission_id": resume_mission_id,
             "flow_event": self._flow_event,
         }
+        capability_decision = await self.components.cognitive_capability_runtime.analyze(
+            message,
+            structured_intent=structured_intent,
+            ame_context={"conversation_context": conversation_context},
+            project_context={"project_id": project_id},
+            persistent_constraints=request.get("persistent_constraints", ()),
+            authorized_permissions=request.get("authorized_permissions", ()),
+        )
+        self.last_capability_analysis = capability_decision.to_dict()
+        context["capability_analysis"] = self.last_capability_analysis
 
         # 1. Ingest Facts/Preferences into AME
         lower = message.lower()

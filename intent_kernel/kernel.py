@@ -109,6 +109,7 @@ class Kernel:
         self.bootstrap_mode = bootstrap_mode
         self.migration_telemetry = migration_telemetry
         self._canonical_execution_service: Any | None = None
+        self._cognitive_capability_runtime: Any | None = None
         self._runtime_description: dict[str, Any] = {
             "bootstrap_mode": bootstrap_mode,
             "legacy_adapters": (
@@ -225,6 +226,22 @@ class Kernel:
 
         # 2. Parse intent
         parsed = await self.intent_engine.parse(user_input, serializable_context)
+        if self._cognitive_capability_runtime is not None:
+            analysis = serializable_context.get("capability_analysis")
+            if analysis is None:
+                decision = await self._cognitive_capability_runtime.analyze(
+                    user_input,
+                    structured_intent=parsed,
+                    project_context=serializable_context,
+                    persistent_constraints=serializable_context.get(
+                        "persistent_constraints", ()
+                    ),
+                    authorized_permissions=serializable_context.get(
+                        "authorized_permissions", ()
+                    ),
+                )
+                analysis = decision.to_dict()
+            runtime_context["capability_analysis"] = analysis
         flow_event = (context or {}).get("flow_event")
         if callable(flow_event):
             flow_event("intent_created", domain=parsed.domain.value,
@@ -392,6 +409,10 @@ class Kernel:
     def attach_canonical_execution(self, service: Any) -> None:
         """Bind the already-composed execution service at the composition root."""
         self._canonical_execution_service = service
+
+    def attach_cognitive_capability_runtime(self, runtime: Any) -> None:
+        """Attach non-executing capability analysis to the canonical input path."""
+        self._cognitive_capability_runtime = runtime
 
     def set_runtime_description(self, description: dict[str, Any]) -> None:
         """Expose non-sensitive composition health to interfaces and Monitor."""

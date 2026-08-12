@@ -77,7 +77,7 @@ async def test_migrated_domain_preserves_legacy_visible_response(
 
 
 @pytest.mark.asyncio
-async def test_migrated_domains_never_invoke_module_router(tmp_path):
+async def test_direct_kernel_calls_use_instrumented_compatibility_fallback(tmp_path):
     components = _factory(tmp_path).get_components()
 
     await components.kernel.process("pesquise integração de sistemas")

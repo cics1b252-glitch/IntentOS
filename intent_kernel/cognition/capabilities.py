@@ -167,6 +167,60 @@ class CapabilityRequirementDiscovery:
         normalized = unicodedata.normalize("NFKD", text.lower())
         return "".join(ch for ch in normalized if not unicodedata.combining(ch))
 
+    @classmethod
+    def pending_continuation_capability(
+        cls,
+        text: str,
+        pending_dialogue: dict[str, Any] | None,
+    ) -> str | None:
+        """Return the capability only when text answers the pending field."""
+        if not isinstance(pending_dialogue, dict):
+            return None
+        target = str(pending_dialogue.get("target_field") or "")
+        normalized = cls._normalize(text)
+        if not normalized.strip() or "?" in text:
+            return None
+
+        def has_marker(markers: tuple[str, ...]) -> bool:
+            return any(
+                re.search(rf"\b{re.escape(marker)}\b", normalized)
+                for marker in markers
+            )
+
+        finance_markers = {
+            "recurrence": ("mensal", "mensais", "por mes", "todo mes", "unico", "uma vez", "pontual"),
+            "investment_frequency": ("mensal", "mensais", "por mes", "todo mes", "unico", "uma vez", "pontual"),
+            "goal": ("aposentadoria", "reserva", "emergencia", "imovel", "casa"),
+            "risk_profile": ("moderado", "conservador", "seguro", "arrojado", "agressivo"),
+            "time_horizon": ("ano", "anos", "mes", "meses", "longo prazo", "curto prazo"),
+            "liquidity": ("liquidez", "resgate", "imediata", "nao preciso", "sem necessidade"),
+        }
+        if target == "amount":
+            if re.search(r"[a-z]+-\d+", normalized):
+                return None
+            explicit_money = re.search(
+                r"(?:r\$\s*\d|\b\d+(?:[.,]\d+)?\s*(?:mil|k|reais?)\b)",
+                normalized,
+            )
+            numeric_only = re.fullmatch(
+                r"\s*\d+(?:[.,]\d+)?\s*", normalized
+            )
+            if explicit_money or numeric_only:
+                return "finance.intent"
+            return None
+        if target in finance_markers and has_marker(finance_markers[target]):
+            return "finance.intent"
+
+        application_markers = {
+            "platform": ("android", "ios", "web", "windows", "desktop", "macos"),
+            "purpose": ("estoque", "vendas", "clientes", "manutencao", "producao", "servicos"),
+            "connectivity": ("offline", "online"),
+            "pricing": ("gratuita", "gratuito", "gratis", "paga", "pago", "assinatura"),
+        }
+        if target in application_markers and has_marker(application_markers[target]):
+            return "engineering.intent"
+        return None
+
     def discover(
         self,
         text: str,
@@ -202,6 +256,21 @@ class CapabilityRequirementDiscovery:
                         provenance=("bootstrap_semantic_decomposition",),
                     ),
                 )
+        pending_capability = self.pending_continuation_capability(
+            text,
+            (project_context or {}).get("pending_dialogue"),
+        )
+        if pending_capability is not None:
+            requirements.setdefault(
+                pending_capability,
+                CapabilityRequirement(
+                    capability_id=pending_capability,
+                    description="Continue the semantically matched pending dialogue",
+                    expected_outputs=("structured_result",),
+                    verification_requirements=("pending_field_answer_matches",),
+                    provenance=("pending_dialogue_semantic_match",),
+                ),
+            )
         if not requirements:
             requirements["intent.analyze"] = CapabilityRequirement(
                 capability_id="intent.analyze",

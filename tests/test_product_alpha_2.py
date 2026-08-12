@@ -5,6 +5,10 @@ import asyncio
 import json
 import inspect
 
+from intent_kernel.cognition.runtime import (
+    CognitiveExecutionDecision,
+    CognitiveExecutionMode,
+)
 from intent_kernel.kernel import Kernel
 from product_bridge import ProductBridge
 
@@ -14,9 +18,20 @@ class _Result:
     domain = type("DomainValue", (), {"value": "other"})()
 
 
+def _enable_nonterminal_compatibility(bridge):
+    async def analyze(*_args, **_kwargs):
+        return CognitiveExecutionDecision(
+            mode=CognitiveExecutionMode.CONVERSATION,
+            reason="test nonterminal compatibility precondition",
+        )
+
+    bridge.components.cognitive_capability_runtime.analyze = analyze
+
+
 def test_first_intent_uses_kernel_and_persists_session(monkeypatch, tmp_path):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
     bridge = ProductBridge()
+    _enable_nonterminal_compatibility(bridge)
 
     async def process(text, context):
         context["mission_id"] = "11111111-1111-4111-8111-111111111111"
@@ -51,6 +66,7 @@ def test_session_restores_after_bridge_restart(monkeypatch, tmp_path):
 def test_provider_quota_error_is_clear_and_recoverable(monkeypatch, tmp_path):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
     bridge = ProductBridge()
+    _enable_nonterminal_compatibility(bridge)
 
     class RateLimitError(Exception):
         pass

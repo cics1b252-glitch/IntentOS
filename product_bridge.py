@@ -292,9 +292,18 @@ class ProductBridge:
             f"{('Usuário' if item.get('role') == 'user' else 'Intent OS')}: {item.get('content', '')}"
             for item in recent if isinstance(item, dict)
         )
-        pending_dialogue = saved.get("pending_dialogue")
-        resume_mission_id = request.get("resume_mission_id") or saved.get("mission_id")
-        mission_id = str(resume_mission_id or saved.get("mission_id") or uuid4())
+        stored_pending_dialogue = saved.get("pending_dialogue")
+        pending_capability = (
+            self.components.cognitive_capability_runtime.discovery
+            .pending_continuation_capability(message, stored_pending_dialogue)
+        )
+        pending_dialogue = (
+            stored_pending_dialogue if pending_capability is not None else None
+        )
+        resume_mission_id = request.get("resume_mission_id") or (
+            saved.get("mission_id") if pending_dialogue is not None else None
+        )
+        mission_id = str(resume_mission_id or uuid4())
 
         # IUE Analysis
         session_ctx_iue = {
@@ -321,25 +330,25 @@ class ProductBridge:
             message,
             structured_intent=structured_intent,
             ame_context={"conversation_context": conversation_context},
-            project_context={"project_id": project_id},
+            project_context={
+                "project_id": project_id,
+                "pending_dialogue": pending_dialogue,
+            },
             persistent_constraints=request.get("persistent_constraints", ()),
             authorized_permissions=request.get("authorized_permissions", ()),
         )
         self.last_capability_analysis = capability_decision.to_dict()
         context["capability_analysis"] = self.last_capability_analysis
 
-        # The cognitive decision is authoritative. Compatibility continuations are
-        # explicit and may not override terminal canonical states.
-        compatibility_continuation = isinstance(pending_dialogue, dict)
-        explicit_compatibility = request.get("allow_compatibility_fallback") is True
-        if not compatibility_continuation and not explicit_compatibility:
-            terminal = self._terminal_cognitive_response(capability_decision)
-            if terminal is not None:
-                return terminal
-            if capability_decision.mode is CognitiveExecutionMode.MISSION:
-                return await self._run_controlled_mission(
-                    message, capability_decision, context
-                )
+        # Terminal and Mission decisions are authoritative over every
+        # compatibility path, including pending dialogue and explicit fallback.
+        terminal = self._terminal_cognitive_response(capability_decision)
+        if terminal is not None:
+            return terminal
+        if capability_decision.mode is CognitiveExecutionMode.MISSION:
+            return await self._run_controlled_mission(
+                message, capability_decision, context
+            )
 
         # 1. Ingest Facts/Preferences into AME
         lower = message.lower()
@@ -553,13 +562,6 @@ class ProductBridge:
                 missing = ["recurrence", "goal", "risk_profile", "time_horizon", "liquidity"]
                 is_waiting = True
             elif known_kc.get("recurrence") == "único":
-                is_waiting = False
-                missing = []
-            elif (
-                isinstance(pending_dialogue, dict)
-                and pending_dialogue.get("target_field") == "recurrence"
-                and "recurrence" in known_kc
-            ):
                 is_waiting = False
                 missing = []
             elif "goal" not in known_kc:

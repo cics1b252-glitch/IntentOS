@@ -47,10 +47,10 @@ def test_multi_turn_finance_advances_and_preserves_mission(monkeypatch, tmp_path
     }))
 
     assert first["target_field"] == "recurrence"
-    assert second["status"] == "COMPLETED"
+    assert second["status"] == "WAITING_CONTEXT"
     assert second["mission_id"] == first["mission_id"]
     restored = bridge._load_session("finance")
-    assert restored["pending_dialogue"] is None
+    assert restored["pending_dialogue"]["target_field"] == "goal"
     assert restored["conversation_state"]["known_context"]["recurrence"] == "mensal"
 
 

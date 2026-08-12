@@ -7,6 +7,10 @@ import json
 import sys
 from pathlib import Path
 
+from intent_kernel.cognition.runtime import (
+    CognitiveExecutionDecision,
+    CognitiveExecutionMode,
+)
 from intent_kernel.pkb.json_store import JsonFileStore
 from intent_kernel.pkb.models import KnowledgeEvent
 from product_bridge import ProductBridge, _protocol_write
@@ -33,6 +37,14 @@ def test_u1f4ca_protocol_survives_cp1252_stdout(monkeypatch):
 def test_bridge_and_session_round_trip_unicode(monkeypatch, tmp_path):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path / "Dados com acentuação"))
     bridge = ProductBridge()
+
+    async def nonterminal(*_args, **_kwargs):
+        return CognitiveExecutionDecision(
+            mode=CognitiveExecutionMode.CONVERSATION,
+            reason="test nonterminal compatibility precondition",
+        )
+
+    bridge.components.cognitive_capability_runtime.analyze = nonterminal
 
     class Result:
         text = f"## Resposta Gemini\n\n{UNICODE_SAMPLE}"

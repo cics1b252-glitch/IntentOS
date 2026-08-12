@@ -58,15 +58,18 @@ class TestConversationalContinuity(unittest.TestCase):
         res2 = asyncio.run(self.bridge.dispatch(req2))
 
         self.assertTrue(res2.get("ok"))
-        self.assertEqual(res2.get("status"), "COMPLETED")
+        self.assertEqual(res2.get("status"), "WAITING_CONTEXT")
         self.assertEqual(res2.get("mission_id"), mission_id)  # Mission ID preserved!
-        self.assertIn("Análise de Investimento", res2.get("text", ""))
-        self.assertIn("24.000/mês", res2.get("text", ""))
+        self.assertEqual(res2.get("target_field"), "goal")
+        self.assertIn("objetivo principal", res2.get("text", ""))
 
-        # Verify session file after turn 2 completion
-        completed_session = self.bridge._load_session(session_id)
-        self.assertEqual(completed_session.get("mission_status"), "completed")
-        self.assertIsNone(completed_session.get("pending_dialogue"))
+        # Verify session remains pending for the next required field.
+        continued_session = self.bridge._load_session(session_id)
+        self.assertEqual(continued_session.get("mission_status"), "waiting_context")
+        self.assertEqual(
+            continued_session.get("pending_dialogue", {}).get("target_field"),
+            "goal",
+        )
 
     def test_process_restart_continuity_resilience(self):
         """Test continuity resilience across bridge process restarts."""
@@ -94,9 +97,9 @@ class TestConversationalContinuity(unittest.TestCase):
         res2 = asyncio.run(new_bridge.dispatch(req2))
 
         self.assertTrue(res2.get("ok"))
-        self.assertEqual(res2.get("status"), "COMPLETED")
+        self.assertEqual(res2.get("status"), "WAITING_CONTEXT")
         self.assertEqual(res2.get("mission_id"), mission_id)  # Auto-resumed from disk session!
-        self.assertIn("24.000/mês", res2.get("text", ""))
+        self.assertEqual(res2.get("target_field"), "goal")
 
 
 if __name__ == "__main__":

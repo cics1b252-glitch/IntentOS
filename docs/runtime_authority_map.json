@@ -1,0 +1,732 @@
+{
+  "schema_version": "1.0.0",
+  "document": "RFC-0018 Movement 11.1 Runtime Authority Map",
+  "snapshot": {
+    "repository": "cics1b252-glitch/IntentOS",
+    "branch": "architecture/runtime-authority-convergence",
+    "head_sha": "245c40b5ac640f7b38066f5586a8ad0da7756eef",
+    "base_branch": "architecture/capability-resolution-runtime",
+    "base_sha": "245c40b5ac640f7b38066f5586a8ad0da7756eef",
+    "map_kind": "observed_current_state",
+    "runtime_behavior_changed": false
+  },
+  "authority_dimensions": [
+    "interpretation",
+    "context",
+    "memory",
+    "capability_discovery",
+    "resource_truth",
+    "capability_selection",
+    "provider_selection",
+    "agent_selection",
+    "mission_lifecycle",
+    "authorization",
+    "execution",
+    "verification",
+    "response_construction",
+    "persistence"
+  ],
+  "classifications": [
+    "CANONICAL_AUTHORITY",
+    "EXECUTION_BINDING",
+    "COMPATIBILITY_ONLY",
+    "PROJECTION",
+    "TRANSPORT_ONLY",
+    "PERSISTENCE_ONLY",
+    "DIAGNOSTIC_ONLY",
+    "DEAD_OR_UNREACHABLE",
+    "AUTHORITY_CONFLICT"
+  ],
+  "authority_encoding": {
+    "rule": "Every component.authorities key is an authority dimension. Omitted dimensions mean no current decision authority for that component.",
+    "reachability_is_not_authority": true,
+    "called_is_not_authoritative": true
+  },
+  "observed_product_path": [
+    "ProductBridge.dispatch(chat)",
+    "CanonicalConstitutionEngine(product.input)",
+    "IntentUnderstandingEngine.analyze",
+    "CognitiveDialogueManager.match_pending_response",
+    "CognitiveCapabilityRuntime.analyze",
+    "CapabilityRequirementDiscovery.discover",
+    "CapabilityFirstResolver.compose over RRM",
+    "CognitiveExecutionDecision terminal or Mission precedence",
+    "ProductBridge non-terminal compatibility services when eligible",
+    "Kernel.process fallback when eligible",
+    "CognitiveResponseAssembler.assemble",
+    "CanonicalConstitutionEngine(response.output)",
+    "ProductBridge JSON serialization"
+  ],
+  "components": [
+    {
+      "component": "ProductBridge",
+      "implementation": ["product_bridge.py:ProductBridge"],
+      "reachability": "ACTIVE_PRODUCT_ENTRY",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "interpretation": "AUTHORITY_CONFLICT",
+        "context": "AUTHORITY_CONFLICT",
+        "memory": "AUTHORITY_CONFLICT",
+        "capability_selection": "AUTHORITY_CONFLICT",
+        "provider_selection": "AUTHORITY_CONFLICT",
+        "mission_lifecycle": "AUTHORITY_CONFLICT",
+        "authorization": "AUTHORITY_CONFLICT",
+        "execution": "AUTHORITY_CONFLICT",
+        "response_construction": "AUTHORITY_CONFLICT",
+        "persistence": "AUTHORITY_CONFLICT"
+      },
+      "evidence": [
+        "ProductBridge._chat orders IUE, CDM, cognitive capability analysis, memory, BCC, compatibility parsing, Kernel fallback and session writes.",
+        "ProductBridge._run_controlled_mission constructs the tool candidate, ToolAuthorizationGate, RuntimeNode and MissionRuntime invocation.",
+        "ProductBridge._govern_response creates the CognitiveResponse before final assembly."
+      ],
+      "intended_disposition": "INTERFACE_AND_SESSION_TRANSPORT_ADAPTER"
+    },
+    {
+      "component": "Kernel",
+      "implementation": ["intent_kernel/kernel.py:Kernel"],
+      "reachability": "ACTIVE_PRODUCT_FALLBACK_AND_DIRECT_API",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "interpretation": "COMPATIBILITY_ONLY",
+        "memory": "AUTHORITY_CONFLICT",
+        "capability_selection": "AUTHORITY_CONFLICT",
+        "provider_selection": "AUTHORITY_CONFLICT",
+        "mission_lifecycle": "AUTHORITY_CONFLICT",
+        "execution": "AUTHORITY_CONFLICT",
+        "response_construction": "COMPATIBILITY_ONLY"
+      },
+      "evidence": [
+        "Kernel.process parses with IntentEngine, calls ProviderManager.route, invokes _execute_canonical_route and PipelineDAG, then ingests PKB events.",
+        "Kernel._execute_canonical_route consumes capability_analysis but calls MissionEngine.complete directly."
+      ],
+      "intended_disposition": "CANONICAL_HOST_THAT_CONSUMES_DECISIONS_WITHOUT_REDECIDING"
+    },
+    {
+      "component": "IntentEngine",
+      "implementation": ["intent_kernel/engine/intent_engine.py:IntentEngine"],
+      "reachability": "ACTIVE_INSIDE_KERNEL_FALLBACK",
+      "primary_classification": "COMPATIBILITY_ONLY",
+      "authorities": {
+        "interpretation": "COMPATIBILITY_ONLY",
+        "context": "COMPATIBILITY_ONLY"
+      },
+      "evidence": ["Kernel.process always calls IntentEngine.parse before its provider/pipeline path."],
+      "intended_disposition": "EXPLICIT_COMPATIBILITY_PARSER_ONLY"
+    },
+    {
+      "component": "IUE",
+      "implementation": ["intent_kernel/iue.py:IntentUnderstandingEngine"],
+      "reachability": "ACTIVE_PRODUCT_PATH",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "interpretation": "CANONICAL_AUTHORITY",
+        "context": "PROJECTION",
+        "capability_discovery": "PROJECTION"
+      },
+      "evidence": [
+        "ProductBridge._chat analyzes independent input before pending-dialogue matching.",
+        "IUE returns structured intent, domain hint, context and recommended capabilities but does not execute."
+      ],
+      "intended_disposition": "SINGLE_STRUCTURED_INTERPRETATION_OWNER"
+    },
+    {
+      "component": "CDM",
+      "implementation": ["intent_kernel/cdm.py:CognitiveDialogueManager"],
+      "reachability": "ACTIVE_PENDING_MATCH_AND_DIAGNOSTIC_EVALUATION",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "context": "CANONICAL_AUTHORITY"
+      },
+      "evidence": [
+        "match_pending_response returns typed VALID_CONTINUATION, NOT_A_CONTINUATION or AMBIGUOUS evidence.",
+        "ProductBridge, not CDM, currently persists and resumes the resulting dialogue state."
+      ],
+      "intended_disposition": "DIALOGUE_DECISION_OWNER_BEHIND_CONVERSATION_SERVICE"
+    },
+    {
+      "component": "AME",
+      "implementation": ["intent_kernel/ame.py:AdaptiveMemoryEngine", "intent_kernel/ame.py:LocalKnowledgeObjectRepository"],
+      "reachability": "ACTIVE_PRODUCT_MEMORY_PATH",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "memory": "CANONICAL_AUTHORITY",
+        "persistence": "CANONICAL_AUTHORITY"
+      },
+      "evidence": [
+        "ProductBridge writes MemoryCandidate and queries AME by project_id.",
+        "AME repository persists KnowledgeObject state, supersession, sensitivity and temporal validity."
+      ],
+      "intended_disposition": "PERSISTENT_COGNITIVE_MEMORY_OWNER"
+    },
+    {
+      "component": "KOM",
+      "implementation": ["intent_kernel/kom.py:KnowledgeObject"],
+      "reachability": "ACTIVE_DATA_CONTRACT",
+      "primary_classification": "PROJECTION",
+      "authorities": {
+        "memory": "PROJECTION"
+      },
+      "evidence": ["KnowledgeObject models provenance, project scope, sensitivity, validity, supersession and retention; it performs no orchestration."],
+      "intended_disposition": "CANONICAL_MEMORY_DATA_CONTRACT"
+    },
+    {
+      "component": "ProductBridge Session Store",
+      "implementation": ["product_bridge.py:ProductBridge._load_session", "product_bridge.py:ProductBridge._save_session"],
+      "reachability": "ACTIVE_PRODUCT_PATH",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "context": "AUTHORITY_CONFLICT",
+        "memory": "AUTHORITY_CONFLICT",
+        "mission_lifecycle": "AUTHORITY_CONFLICT",
+        "persistence": "PERSISTENCE_ONLY"
+      },
+      "evidence": ["Session JSON stores pending_dialogue, known_context, mission_id and mission_status and is read as input to later semantic decisions."],
+      "intended_disposition": "TRANSIENT_DIALOGUE_AND_RUNTIME_PROJECTION_ONLY"
+    },
+    {
+      "component": "PKB / KnowledgeManager",
+      "implementation": ["intent_kernel/pkb/knowledge_manager.py:KnowledgeManager"],
+      "reachability": "ACTIVE_KERNEL_FALLBACK",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "memory": "AUTHORITY_CONFLICT",
+        "persistence": "PERSISTENCE_ONLY"
+      },
+      "evidence": ["Kernel.process ingests PipelineDAG events through KnowledgeManager while ProductBridge separately persists user facts in AME."],
+      "intended_disposition": "GOVERNED_KNOWLEDGE_CURATION_AND_READ_THROUGH"
+    },
+    {
+      "component": "KnowledgePipeline",
+      "implementation": ["intent_kernel/pkb/knowledge_pipeline.py:KnowledgePipeline"],
+      "reachability": "ACTIVE_KERNEL_AND_CAPABILITY_EXECUTION",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "memory": "PROJECTION",
+        "persistence": "CANONICAL_AUTHORITY"
+      },
+      "evidence": ["KnowledgePipeline applies Constitution, curator, scoring/conflict decisions, store and audit to KnowledgeEvents."],
+      "intended_disposition": "KNOWLEDGE_GOVERNANCE_NOT_PARALLEL_USER_MEMORY"
+    },
+    {
+      "component": "CapabilityRequirementDiscovery",
+      "implementation": ["intent_kernel/cognition/capabilities.py:CapabilityRequirementDiscovery"],
+      "reachability": "ACTIVE_PRODUCT_PATH",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "interpretation": "PROJECTION",
+        "capability_discovery": "CANONICAL_AUTHORITY"
+      },
+      "evidence": ["CognitiveCapabilityRuntime calls discover for every ProductBridge chat turn before terminal/Mission routing."],
+      "intended_disposition": "SINGLE_CAPABILITY_REQUIREMENT_DISCOVERY_CONTRACT"
+    },
+    {
+      "component": "CapabilityFirstResolver",
+      "implementation": ["intent_kernel/cognition/capabilities.py:CapabilityFirstResolver"],
+      "reachability": "ACTIVE_PRODUCT_PATH",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "resource_truth": "PROJECTION",
+        "capability_selection": "CANONICAL_AUTHORITY",
+        "authorization": "PROJECTION"
+      },
+      "evidence": [
+        "Resolver evaluates capability.resolve governance and queries RRM for eligible resources.",
+        "Optional ToolRegistry participation exists in the class but is not wired by KernelBuilder."
+      ],
+      "intended_disposition": "SINGLE_CAPABILITY_RESOLUTION_AND_COMPOSITION_OWNER"
+    },
+    {
+      "component": "CognitiveCapabilityRuntime",
+      "implementation": ["intent_kernel/cognition/runtime.py:CognitiveCapabilityRuntime"],
+      "reachability": "ACTIVE_PRODUCT_PATH",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "context": "PROJECTION",
+        "capability_discovery": "CANONICAL_AUTHORITY",
+        "capability_selection": "CANONICAL_AUTHORITY",
+        "authorization": "CANONICAL_AUTHORITY"
+      },
+      "evidence": ["Its CognitiveExecutionDecision is checked for terminal states and Mission before ProductBridge compatibility logic."],
+      "intended_disposition": "SINGLE_COGNITIVE_ROUTE_DECISION_OWNER"
+    },
+    {
+      "component": "CPE",
+      "implementation": ["intent_kernel/cpe.py:CognitivePlanningEngine"],
+      "reachability": "ACTIVE_AS_ECC_PLANNING_EVIDENCE",
+      "primary_classification": "DIAGNOSTIC_ONLY",
+      "authorities": {
+        "capability_discovery": "DIAGNOSTIC_ONLY",
+        "capability_selection": "DIAGNOSTIC_ONLY",
+        "agent_selection": "DIAGNOSTIC_ONLY"
+      },
+      "evidence": ["ProductBridge calls ECC during controlled Mission planning but uses the result only as an execution_graph identifier; CPE retains domain/keyword plan branches."],
+      "intended_disposition": "CANONICAL_MISSION_PLANNER_AFTER_PARITY_AND_CAPABILITY_ALIGNMENT"
+    },
+    {
+      "component": "COR",
+      "implementation": ["intent_kernel/cor.py:CapabilityOrchestrator", "intent_kernel/cor.py:RegistryCatalog"],
+      "reachability": "ACTIVE_AS_ECC_PLANNING_EVIDENCE",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "resource_truth": "AUTHORITY_CONFLICT",
+        "capability_selection": "DIAGNOSTIC_ONLY",
+        "provider_selection": "DIAGNOSTIC_ONLY",
+        "agent_selection": "DIAGNOSTIC_ONLY"
+      },
+      "evidence": ["COR defaults to RegistryCatalog(populate_defaults=True), ranks agents/providers/environments, and is not fed the composed RRM in ProductBridge."],
+      "intended_disposition": "MISSION_ORCHESTRATION_OVER_RRM_PROJECTION"
+    },
+    {
+      "component": "ECC",
+      "implementation": ["intent_kernel/ecc.py:ExecutiveCognitiveController"],
+      "reachability": "DIAGNOSTIC_ENDPOINT_AND_MISSION_PLANNING_EVIDENCE",
+      "primary_classification": "DIAGNOSTIC_ONLY",
+      "authorities": {
+        "interpretation": "DIAGNOSTIC_ONLY",
+        "context": "DIAGNOSTIC_ONLY",
+        "capability_selection": "DIAGNOSTIC_ONLY",
+        "provider_selection": "DIAGNOSTIC_ONLY",
+        "agent_selection": "DIAGNOSTIC_ONLY"
+      },
+      "evidence": ["ProductBridge.dispatch exposes ECC results diagnostically; _run_controlled_mission does not use its assignments to select the synthetic action or tool."],
+      "intended_disposition": "SINGLE_MISSION_SUPERVISION_BOUNDARY_AFTER_11_3"
+    },
+    {
+      "component": "BCC",
+      "implementation": ["intent_kernel/bcc.py:BootstrapCognitiveCortex"],
+      "reachability": "ACTIVE_LOCAL_RESPONSE_PATH",
+      "primary_classification": "COMPATIBILITY_ONLY",
+      "authorities": {
+        "memory": "PROJECTION",
+        "response_construction": "COMPATIBILITY_ONLY"
+      },
+      "evidence": ["ProductBridge regexes BCC FIRST_RUN_PATTERNS and directly uses BCC summary text before final response assembly."],
+      "intended_disposition": "LOCAL_GUIDANCE_CONTENT_SERVICE_BEHIND_CONVERSATION_AUTHORITY"
+    },
+    {
+      "component": "RRM",
+      "implementation": ["intent_kernel/rrm/service.py:RegistryResourceManager"],
+      "reachability": "ACTIVE_CAPABILITY_RESOLUTION_AND_ACTION_GATE",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "resource_truth": "CANONICAL_AUTHORITY",
+        "persistence": "PERSISTENCE_ONLY"
+      },
+      "evidence": [
+        "KernelBuilder projects Core Apps, agents and providers into one RRM and passes it to CapabilityFirstResolver and MissionRuntime ActionGate.",
+        "RRM is in-memory at this snapshot and is not consulted by every binding selector."
+      ],
+      "intended_disposition": "SINGLE_RESOURCE_EXISTENCE_ELIGIBILITY_HEALTH_AUTHORITY"
+    },
+    {
+      "component": "ProviderManager",
+      "implementation": ["intent_kernel/providers/manager.py:ProviderManager", "intent_kernel/providers/manager.py:ManagedProvider"],
+      "reachability": "ACTIVE_KERNEL_AND_CORE_APP_BINDING",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "resource_truth": "AUTHORITY_CONFLICT",
+        "provider_selection": "AUTHORITY_CONFLICT",
+        "execution": "EXECUTION_BINDING"
+      },
+      "evidence": ["ProviderManager owns registered/default/fallback providers; route currently returns the default without consulting RRM or the selected capability composition."],
+      "intended_disposition": "SELECTED_PROVIDER_INVOCATION_BINDING_ONLY"
+    },
+    {
+      "component": "CanonicalCapabilityRegistry",
+      "implementation": ["intent_kernel/orchestration/registry.py:CanonicalCapabilityRegistry"],
+      "reachability": "ACTIVE_DIRECT_KERNEL_MISSION_ROUTE",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "resource_truth": "AUTHORITY_CONFLICT",
+        "capability_selection": "EXECUTION_BINDING"
+      },
+      "evidence": ["CapabilityExecutionService calls registry.select and registry.available independently of RRM; select returns the first registration."],
+      "intended_disposition": "EXECUTION_BINDING_LOOKUP_CONSTRAINED_BY_RRM"
+    },
+    {
+      "component": "Core App CapabilityRouter",
+      "implementation": ["intent_kernel/core_apps/router.py:CapabilityRouter"],
+      "reachability": "ACTIVE_DIRECT_KERNEL_MISSION_ROUTE",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "capability_selection": "AUTHORITY_CONFLICT",
+        "execution": "EXECUTION_BINDING"
+      },
+      "evidence": ["Explicit capabilities map to Core App bindings, but _DOMAIN_DEFAULTS still selects a capability when callers omit it."],
+      "intended_disposition": "EXPLICIT_CAPABILITY_TO_CORE_APP_BINDING_ONLY"
+    },
+    {
+      "component": "Tool CapabilityRouter",
+      "implementation": ["intent_kernel/tools/router.py:CapabilityRouter"],
+      "reachability": "NOT_COMPOSED_IN_PRODUCT_GRAPH",
+      "primary_classification": "DEAD_OR_UNREACHABLE",
+      "authorities": {
+        "resource_truth": "AUTHORITY_CONFLICT",
+        "capability_selection": "AUTHORITY_CONFLICT",
+        "authorization": "PROJECTION"
+      },
+      "evidence": ["The class creates its own InMemoryToolRegistry, permission manager and health adapter; KernelBuilder does not construct it."],
+      "intended_disposition": "RRM_PROJECTED_TOOL_BINDING_SELECTOR_BEFORE_ACTIVATION"
+    },
+    {
+      "component": "CanonicalAgentOrchestrator",
+      "implementation": ["intent_kernel/orchestration/agents.py:CanonicalAgentOrchestrator"],
+      "reachability": "ACTIVE_DIRECT_KERNEL_MISSION_ROUTE",
+      "primary_classification": "AUTHORITY_CONFLICT",
+      "authorities": {
+        "resource_truth": "AUTHORITY_CONFLICT",
+        "agent_selection": "EXECUTION_BINDING",
+        "execution": "EXECUTION_BINDING"
+      },
+      "evidence": ["Orchestrator owns an agent registry and first-compatible selection independently of RRM, then invokes with bounded limits."],
+      "intended_disposition": "SELECTED_AGENT_INVOCATION_BINDING_ONLY"
+    },
+    {
+      "component": "ModuleRouter",
+      "implementation": ["intent_kernel/router/module_router.py:ModuleRouter"],
+      "reachability": "ACTIVE_KERNEL_PIPELINE_COMPATIBILITY",
+      "primary_classification": "COMPATIBILITY_ONLY",
+      "authorities": {
+        "interpretation": "COMPATIBILITY_ONLY",
+        "capability_selection": "COMPATIBILITY_ONLY",
+        "execution": "COMPATIBILITY_ONLY"
+      },
+      "evidence": ["ModuleRouter prioritizes Domain, then trigger words, then Core fallback and records legacy telemetry."],
+      "intended_disposition": "EXPLICIT_OBSERVABLE_FALLBACK_ONLY"
+    },
+    {
+      "component": "LegacyCapabilityExecutorAdapter",
+      "implementation": ["intent_kernel/adapters/legacy.py:LegacyCapabilityExecutorAdapter"],
+      "reachability": "COMPOSED_COMPATIBILITY_PATH",
+      "primary_classification": "COMPATIBILITY_ONLY",
+      "authorities": {
+        "capability_selection": "COMPATIBILITY_ONLY",
+        "mission_lifecycle": "AUTHORITY_CONFLICT",
+        "execution": "COMPATIBILITY_ONLY"
+      },
+      "evidence": ["Adapter contains a hardcoded Domain-to-capability map and calls MissionEngine.complete after execution service output."],
+      "intended_disposition": "ISOLATED_COMPATIBILITY_ADAPTER_WITHOUT_COMPLETION_AUTHORITY"
+    },
+    {
+      "component": "CapabilityExecutionService",
+      "implementation": ["intent_kernel/orchestration/execution.py:CapabilityExecutionService"],
+      "reachability": "ACTIVE_DIRECT_KERNEL_MISSION_ROUTE",
+      "primary_classification": "EXECUTION_BINDING",
+      "authorities": {
+        "capability_selection": "AUTHORITY_CONFLICT",
+        "provider_selection": "EXECUTION_BINDING",
+        "agent_selection": "EXECUTION_BINDING",
+        "authorization": "CANONICAL_AUTHORITY",
+        "execution": "EXECUTION_BINDING",
+        "memory": "PROJECTION"
+      },
+      "evidence": ["Service selects from CanonicalCapabilityRegistry, evaluates capability.execute, dispatches app/agent/provider and proposes PKB knowledge."],
+      "intended_disposition": "EXECUTE_PRESELECTED_RRM_VALIDATED_BINDING"
+    },
+    {
+      "component": "MissionEngine",
+      "implementation": ["intent_kernel/application/mission_engine.py:MissionEngine"],
+      "reachability": "ACTIVE_PRODUCT_MISSION_PATH",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "mission_lifecycle": "AUTHORITY_CONFLICT",
+        "persistence": "PERSISTENCE_ONLY"
+      },
+      "evidence": ["MissionEngine owns create/start/pause/resume/complete and the MissionStore, but complete accepts no verification evidence."],
+      "intended_disposition": "SOLE_MISSION_IDENTITY_AND_LIFECYCLE_OWNER_WITH_EVIDENCE_GATED_COMPLETION"
+    },
+    {
+      "component": "MissionRuntime",
+      "implementation": ["intent_kernel/runtime/mission_runtime.py:MissionRuntime"],
+      "reachability": "ACTIVE_AUTHORIZED_SYNTHETIC_MISSION_PATH",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "mission_lifecycle": "AUTHORITY_CONFLICT",
+        "authorization": "CANONICAL_AUTHORITY",
+        "execution": "CANONICAL_AUTHORITY",
+        "verification": "CANONICAL_AUTHORITY",
+        "persistence": "PERSISTENCE_ONLY"
+      },
+      "evidence": ["Runtime owns a separate runtime state machine, ActionGate, executor, VerificationGate, MissionCompletionGate and checkpoints."],
+      "intended_disposition": "SOLE_CONTROLLED_EXECUTION_OWNER_SYNCHRONIZED_THROUGH_MISSION_ENGINE"
+    },
+    {
+      "component": "ToolRegistry",
+      "implementation": ["intent_kernel/tools/registry.py:InMemoryToolRegistry"],
+      "reachability": "NOT_COMPOSED_IN_PRODUCT_RESOLVER",
+      "primary_classification": "DEAD_OR_UNREACHABLE",
+      "authorities": {
+        "resource_truth": "AUTHORITY_CONFLICT",
+        "capability_selection": "PROJECTION",
+        "persistence": "PERSISTENCE_ONLY"
+      },
+      "evidence": ["Tool registry stores independent tool statuses/capability mappings; the composed CapabilityFirstResolver receives tool_registry=None."],
+      "intended_disposition": "HOW_TO_CALL_BINDING_PROJECTION_OF_RRM"
+    },
+    {
+      "component": "ToolAuthorizationGate",
+      "implementation": ["intent_kernel/tools/authorization.py:ToolAuthorizationGate"],
+      "reachability": "ACTIVE_PRODUCT_MISSION_PATH",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "authorization": "CANONICAL_AUTHORITY"
+      },
+      "evidence": ["ProductBridge handles every non-ALLOW state before constructing or running MissionRuntime."],
+      "intended_disposition": "SOLE_TOOL_AND_RESOURCE_AUTHORIZATION_OWNER"
+    },
+    {
+      "component": "ActionGate",
+      "implementation": ["intent_kernel/runtime/action_gate.py:ActionGate"],
+      "reachability": "ACTIVE_INSIDE_MISSION_RUNTIME",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "resource_truth": "PROJECTION",
+        "authorization": "CANONICAL_AUTHORITY"
+      },
+      "evidence": ["MissionRuntime calls ActionGate before executor; gate may deny, require confirmation or wait for resource and receives RRM."],
+      "intended_disposition": "SOLE_ACTION_LEVEL_POLICY_CONFIRMATION_AND_REVALIDATION_BOUNDARY"
+    },
+    {
+      "component": "VerificationGate",
+      "implementation": ["intent_kernel/runtime/verification.py:VerificationGate"],
+      "reachability": "ACTIVE_AFTER_MISSIONRUNTIME_EXECUTOR",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "verification": "CANONICAL_AUTHORITY"
+      },
+      "evidence": ["VerificationGate emits CompletionEvidence for each executed node and controls SUCCEEDED versus FAILED node state."],
+      "intended_disposition": "SOLE_NODE_RESULT_VERIFICATION_OWNER"
+    },
+    {
+      "component": "MissionCompletionGate",
+      "implementation": ["intent_kernel/runtime/verification.py:MissionCompletionGate"],
+      "reachability": "ACTIVE_INSIDE_MISSION_RUNTIME",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "mission_lifecycle": "CANONICAL_AUTHORITY",
+        "verification": "CANONICAL_AUTHORITY"
+      },
+      "evidence": ["MissionRuntime can set its own status COMPLETED only after all nodes and optional output contract are verified."],
+      "intended_disposition": "SOLE_COMPLETION_EVIDENCE_AUTHORITY_FOR_MISSIONENGINE"
+    },
+    {
+      "component": "CognitiveResponseAssembler",
+      "implementation": ["intent_kernel/response.py:CognitiveResponseAssembler"],
+      "reachability": "ACTIVE_FOR_EVERY_PRODUCTBRIDGE_CHAT_RESPONSE",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "response_construction": "CANONICAL_AUTHORITY"
+      },
+      "evidence": ["ProductBridge.dispatch sends every chat response through _govern_response and assembler response.output evaluation."],
+      "intended_disposition": "SOLE_SEMANTIC_RESPONSE_ENVELOPE_AND_FINAL_POLICY_AUTHORITY"
+    },
+    {
+      "component": "CanonicalConstitutionEngine",
+      "implementation": ["intent_kernel/constitution/canonical.py:CanonicalConstitutionEngine"],
+      "reachability": "ACTIVE_UNIVERSAL_GOVERNANCE_PATHS",
+      "primary_classification": "CANONICAL_AUTHORITY",
+      "authorities": {
+        "authorization": "CANONICAL_AUTHORITY",
+        "verification": "PROJECTION"
+      },
+      "evidence": ["Composition shares one engine across product.input, memory, capability.resolve, mission.plan, tool.authorize, action.execute and response.output paths."],
+      "intended_disposition": "UNIVERSAL_POLICY_AUTHORITY"
+    },
+    {
+      "component": "PipelineDAG",
+      "implementation": ["intent_kernel/engine/pipeline.py:PipelineDAG", "intent_kernel/engine/nodes.py"],
+      "reachability": "ACTIVE_KERNEL_FALLBACK",
+      "primary_classification": "COMPATIBILITY_ONLY",
+      "authorities": {
+        "capability_selection": "COMPATIBILITY_ONLY",
+        "execution": "COMPATIBILITY_ONLY",
+        "response_construction": "COMPATIBILITY_ONLY"
+      },
+      "evidence": ["Kernel executes the legacy DAG after provider and canonical-route preparation; deliver node produces final output text."],
+      "intended_disposition": "EXPLICIT_GOVERNED_COMPATIBILITY_EXECUTION"
+    }
+  ],
+  "confirmed_authority_conflicts": [
+    {
+      "id": "AC-001",
+      "dimension": "response_construction",
+      "owners": ["ProductBridge", "BCC", "Kernel", "PipelineDAG", "CognitiveResponseAssembler"],
+      "finding": "The assembler governs the final envelope, but upstream components independently author semantic text, status, confidence, provenance and Mission meaning.",
+      "target_checkpoint": "11.2 and 11.6"
+    },
+    {
+      "id": "AC-002",
+      "dimension": "mission_lifecycle",
+      "owners": ["MissionEngine", "MissionRuntime", "Kernel", "LegacyCapabilityExecutorAdapter", "ProductBridge Session Store"],
+      "finding": "Verified runtime completion, direct MissionEngine completion and session-only completed labels are distinct current truths.",
+      "target_checkpoint": "11.3"
+    },
+    {
+      "id": "AC-003",
+      "dimension": "resource_truth",
+      "owners": ["RRM", "ProviderManager", "CanonicalCapabilityRegistry", "Core App CapabilityRouter", "ToolRegistry", "CanonicalAgentOrchestrator", "COR"],
+      "finding": "RRM is the resolver truth, but binding registries can independently report membership, default selection, health or availability.",
+      "target_checkpoint": "11.4"
+    },
+    {
+      "id": "AC-004",
+      "dimension": "memory",
+      "owners": ["AME", "PKB / KnowledgeManager", "ProductBridge Session Store"],
+      "finding": "Project facts and preferences may coexist in AME, PKB events and session known_context without one reconciliation/supersession contract.",
+      "target_checkpoint": "11.5"
+    },
+    {
+      "id": "AC-005",
+      "dimension": "provider_selection",
+      "owners": ["CapabilityFirstResolver", "ProviderManager", "CanonicalCapabilityRegistry", "COR", "ProductBridge"],
+      "finding": "The cognitive resolver can identify a provider strategy while Kernel and ProductBridge still use ProviderManager default/fallback selection.",
+      "target_checkpoint": "11.4 and 11.6"
+    },
+    {
+      "id": "AC-006",
+      "dimension": "capability_selection",
+      "owners": ["CapabilityFirstResolver", "Core App CapabilityRouter", "ModuleRouter", "LegacyCapabilityExecutorAdapter"],
+      "finding": "Explicit canonical capability selection is active, but Core App Domain defaults and legacy Domain/trigger mapping remain callable compatibility authorities.",
+      "target_checkpoint": "11.4 and 11.7"
+    }
+  ],
+  "product_bridge_migration_ledger": [
+    {
+      "current_responsibility": "IUE invocation and semantic context construction",
+      "canonical_owner": "IUE behind canonical conversation service",
+      "current_authority": "ProductBridge orders invocation and constructs session context",
+      "target_authority": "Conversation service invokes IUE; ProductBridge transports input",
+      "migration_status": "PARTIALLY_DELEGATED",
+      "required_parity_test": "StructuredIntent and authoritative terminal route remain identical through ProductBridge"
+    },
+    {
+      "current_responsibility": "Pending dialogue matching, mutation, persistence and Mission association",
+      "canonical_owner": "CDM plus canonical conversation service",
+      "current_authority": "CDM types the answer; ProductBridge applies and persists it",
+      "target_authority": "Conversation service owns dialogue transition; session store persists projection",
+      "migration_status": "PARTIALLY_DELEGATED",
+      "required_parity_test": "Valid, false-positive, ambiguous and independent-intent cases preserve context and Mission isolation"
+    },
+    {
+      "current_responsibility": "Memory fact recognition and ingestion",
+      "canonical_owner": "AME/KOM with KnowledgePipeline governance",
+      "current_authority": "ProductBridge regex/keywords plus direct AME write",
+      "target_authority": "Conversation service proposes typed candidate; memory authority commits",
+      "migration_status": "NOT_STARTED",
+      "required_parity_test": "Preference, project fact, correction, restart, sensitivity and isolation"
+    },
+    {
+      "current_responsibility": "Memory query detection, retrieval and response",
+      "canonical_owner": "AME/KOM plus canonical conversation service",
+      "current_authority": "ProductBridge keyword detection, AME query, formatting and status",
+      "target_authority": "Conversation service requests memory and returns CognitiveResponse",
+      "migration_status": "NOT_STARTED",
+      "required_parity_test": "Question versus fact, UNKNOWN, expiry, no Mission and project isolation"
+    },
+    {
+      "current_responsibility": "BCC/local response selection",
+      "canonical_owner": "Canonical conversation service invoking BCC",
+      "current_authority": "ProductBridge matches BCC patterns and returns BCC summary",
+      "target_authority": "Cognitive LOCAL_RESPONSE decision invokes BCC content service",
+      "migration_status": "PARTIALLY_DELEGATED",
+      "required_parity_test": "Capability help remains local, provider-free, Mission-free and governed"
+    },
+    {
+      "current_responsibility": "Financial parsing and field filling",
+      "canonical_owner": "CDM and typed conversation policies",
+      "current_authority": "ProductBridge money parser, keyword extraction and state machine",
+      "target_authority": "Canonical conversation runtime",
+      "migration_status": "NOT_STARTED",
+      "required_parity_test": "Full finance flow, XZ-91, Iceland 2025, marker collisions and unrelated intent"
+    },
+    {
+      "current_responsibility": "Application/product parsing and field filling",
+      "canonical_owner": "CDM and typed conversation policies",
+      "current_authority": "ProductBridge keyword extraction and state machine",
+      "target_authority": "Canonical conversation runtime",
+      "migration_status": "NOT_STARTED",
+      "required_parity_test": "Application multi-turn and spreadsheet-not-app behavior"
+    },
+    {
+      "current_responsibility": "Mission ID creation, resume and exposure",
+      "canonical_owner": "MissionEngine plus Mission conversation coordinator",
+      "current_authority": "ProductBridge generates UUIDs, selects resume ID and stores status",
+      "target_authority": "MissionEngine identity; only related responses expose Mission ID",
+      "migration_status": "PARTIALLY_DELEGATED",
+      "required_parity_test": "Terminal, local and unrelated requests never expose or mutate pending Mission"
+    },
+    {
+      "current_responsibility": "Provider default and fallback routing",
+      "canonical_owner": "Capability resolver over RRM; ProviderManager invocation binding",
+      "current_authority": "ProductBridge configures fallback and Kernel routes by legacy Mode",
+      "target_authority": "Resolver selects eligible provider; manager invokes exact selection",
+      "migration_status": "NOT_STARTED",
+      "required_parity_test": "Zero provider, unhealthy provider, explicit fallback, provenance and no fabricated success"
+    },
+    {
+      "current_responsibility": "Zero-provider response handling",
+      "canonical_owner": "CognitiveCapabilityRuntime, RRM and conversation service",
+      "current_authority": "Terminal decision is canonical; ProductBridge also rewrites mock output",
+      "target_authority": "One truthful response from canonical resource resolution",
+      "migration_status": "PARTIALLY_DELEGATED",
+      "required_parity_test": "XZ-91, Iceland 2025 and external reasoning never invoke or invent unavailable provider"
+    },
+    {
+      "current_responsibility": "Tool authorization and MissionRuntime handoff",
+      "canonical_owner": "Mission service, ToolAuthorizationGate and MissionRuntime",
+      "current_authority": "ProductBridge constructs candidate/tool/gate/node and handles decisions",
+      "target_authority": "Mission service selects RRM resource and hands authorized plan to runtime",
+      "migration_status": "PARTIALLY_DELEGATED",
+      "required_parity_test": "All authorization states; only ALLOW reaches runtime and ActionGate"
+    },
+    {
+      "current_responsibility": "Response semantic meaning",
+      "canonical_owner": "Conversation or Mission runtime plus CognitiveResponseAssembler",
+      "current_authority": "ProductBridge authors text, status, mode, confidence, provenance and Mission meaning",
+      "target_authority": "Canonical services return CognitiveResponse; bridge serializes only",
+      "migration_status": "NOT_STARTED",
+      "required_parity_test": "All response sources share truthful status, epistemic state, provenance and limitations"
+    },
+    {
+      "current_responsibility": "Session serialization and known_context persistence",
+      "canonical_owner": "Session store as transient projection",
+      "current_authority": "ProductBridge defines schema and stores context plus Mission status",
+      "target_authority": "Persist dialogue/runtime projections only, never independent durable knowledge",
+      "migration_status": "NOT_STARTED",
+      "required_parity_test": "Restart continuity without duplicate durable truth or project leakage"
+    },
+    {
+      "current_responsibility": "JSON-lines product serialization",
+      "canonical_owner": "ProductBridge",
+      "current_authority": "ProductBridge",
+      "target_authority": "ProductBridge",
+      "migration_status": "TARGET_ROLE_ALREADY_VALID",
+      "required_parity_test": "Gateway handshake, UTF-8, error containment and response schema"
+    }
+  ],
+  "canonical_target_owners": {
+    "interpretation": "IUE",
+    "context": "CDM through canonical conversation service",
+    "memory": "AME/KOM",
+    "capability_discovery": "CapabilityRequirementDiscovery",
+    "resource_truth": "RRM",
+    "capability_selection": "CapabilityFirstResolver",
+    "provider_selection": "Resolver over RRM",
+    "agent_selection": "Resolver over RRM",
+    "mission_lifecycle": "MissionEngine",
+    "authorization": "ToolAuthorizationGate then ActionGate",
+    "execution": "MissionRuntime for Missions; conversation service for non-side-effecting turns",
+    "verification": "VerificationGate and MissionCompletionGate",
+    "response_construction": "CognitiveResponseAssembler consuming canonical service results",
+    "persistence": "Owner-specific stores only; no persistence layer may create semantic authority"
+  },
+  "checkpoint_boundaries": {
+    "11.2": "Move non-Mission semantic control behind one conversation service without copying a parallel pipeline.",
+    "11.3": "Make verified evidence the only path from runtime results to MissionEngine completion.",
+    "11.4": "Require RRM eligibility at selection and immediately before execution; registries become bindings.",
+    "11.5": "Define AME/PKB/session reconciliation before any non-destructive memory migration.",
+    "11.6": "Make CognitiveResponse the semantic result of every major path and ProviderManager invocation-only.",
+    "11.7": "Make every remaining compatibility use explicit, observable and subordinate."
+  }
+}

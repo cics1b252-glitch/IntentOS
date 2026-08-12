@@ -127,9 +127,11 @@ def test_fallback_requires_explicit_authorization(monkeypatch, tmp_path):
     bridge.kernel.process = process
 
     denied = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-        "fallback_provider": "alternate", "allow_fallback": False, "session_id": "denied"}))
+        "fallback_provider": "alternate", "allow_fallback": False, "session_id": "denied",
+        "allow_compatibility_fallback": True}))
     allowed = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-        "fallback_provider": "alternate", "allow_fallback": True, "session_id": "allowed"}))
+        "fallback_provider": "alternate", "allow_fallback": True, "session_id": "allowed",
+        "allow_compatibility_fallback": True}))
     assert denied["ok"] is False
     assert allowed["ok"] is True and allowed["provider"] == "alternate"
     assert allowed["fallback_used"] is True
@@ -165,6 +167,7 @@ def test_session_response_records_provider(monkeypatch, tmp_path):
         context["mission_id"] = "11111111-1111-4111-8111-111111111111"
         return Result()
     bridge.kernel.process = process
-    response = asyncio.run(bridge.dispatch({"action": "chat", "message": "olá", "session_id": "provider-history"}))
+    response = asyncio.run(bridge.dispatch({"action": "chat", "message": "olá", "session_id": "provider-history",
+                                            "allow_compatibility_fallback": True}))
     saved = json.loads((tmp_path / "missions" / "provider-history.json").read_text(encoding="utf-8"))
     assert saved["response"]["provider"] == response["provider"]

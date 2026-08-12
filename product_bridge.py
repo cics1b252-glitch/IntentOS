@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from intent_kernel.application import ApplicationFactory, KernelBuilder
-from intent_kernel.contracts import MissionId, MissionStatus
+from intent_kernel.contracts import MissionContext, MissionId, MissionStatus
 from intent_kernel.cdm import CognitiveDialogueManager
 from intent_kernel.cpe import CognitivePlanningEngine
 from intent_kernel.iue import IntentUnderstandingEngine
@@ -32,6 +32,21 @@ from intent_kernel.ame import (
 from intent_kernel.persistence import JsonFilePersistenceEngine
 from intent_kernel.bcc import BootstrapCognitiveCortex
 from intent_kernel.modules.fin.module import _extract_brl_amount
+from intent_kernel.cognition import CognitiveExecutionMode
+from intent_kernel.response import (
+    CognitiveResponse,
+    CognitiveResponseAssembler,
+    ResponseStatus,
+)
+from intent_kernel.runtime.models import ActionContract, RuntimeNode, SideEffectLevel
+from intent_kernel.tools.authorization import ToolAuthorizationGate
+from intent_kernel.tools.models import (
+    PermissionDecisionState,
+    ToolCandidate,
+    ToolHealthStatus,
+    ToolResource,
+    ToolStatus,
+)
 
 APP_VERSION = "0.4.4-alpha"
 BRIDGE_VERSION = "0.4.4-alpha"
@@ -135,6 +150,9 @@ class ProductBridge:
         self.ame_repo = LocalKnowledgeObjectRepository(persistence_engine=persistence_engine)
         self.ame = AdaptiveMemoryEngine(repository=self.ame_repo)
         self.bcc = BootstrapCognitiveCortex(ame=self.ame)
+        self.response_assembler = CognitiveResponseAssembler(
+            self.components.constitution_engine
+        )
         self.last_capability_analysis: dict[str, Any] | None = None
 
     async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -215,7 +233,8 @@ class ProductBridge:
         if action == "intent" or action == "chat":
             if "text" in request and "message" not in request:
                 request["message"] = request["text"]
-            return await self._chat(request)
+            response = await self._chat(request)
+            return await self._govern_response(response, request)
         if action == "diagnostics" or action == "flow_diagnostics":
             return {
                 "ok": True,
@@ -249,6 +268,20 @@ class ProductBridge:
         if not message:
             return self._fail("bridge_request_received", "empty_message",
                               "Escreva uma mensagem antes de enviar.", started)
+
+        input_verdict = await self.components.constitution_engine.evaluate(
+            "product.input", message, {
+                "session_id": request.get("session_id", "product-alpha"),
+                "project_id": request.get("project_id", "GLOBAL"),
+            }
+        )
+        if not input_verdict.allowed:
+            return {
+                "ok": True, "text": f"Solicitação bloqueada pela Constitution: {input_verdict.reason}",
+                "status": "BLOCKED", "execution_mode": "BLOCKED",
+                "epistemic_status": "fact", "confidence": 1.0,
+                "provider": None, "provider_called": False, "mission_id": None,
+            }
 
         session_id = str(request.get("session_id", "product-alpha"))
         project_id = str(request.get("project_id") or request.get("projectId") or "GLOBAL")
@@ -295,17 +328,34 @@ class ProductBridge:
         self.last_capability_analysis = capability_decision.to_dict()
         context["capability_analysis"] = self.last_capability_analysis
 
+        # The cognitive decision is authoritative. Compatibility continuations are
+        # explicit and may not override terminal canonical states.
+        compatibility_continuation = isinstance(pending_dialogue, dict)
+        explicit_compatibility = request.get("allow_compatibility_fallback") is True
+        if not compatibility_continuation and not explicit_compatibility:
+            terminal = self._terminal_cognitive_response(capability_decision)
+            if terminal is not None:
+                return terminal
+            if capability_decision.mode is CognitiveExecutionMode.MISSION:
+                return await self._run_controlled_mission(
+                    message, capability_decision, context
+                )
+
         # 1. Ingest Facts/Preferences into AME
         lower = message.lower()
-        if (
-            not _is_question(message)
-            and any(p in lower for p in [
-                "prefiro", "preferência", "minhas respostas devem ser",
-                "usamos ", "projeto_",
-            ])
-        ):
+        memory_fact = self._recognize_memory_fact(message, structured_intent)
+        if memory_fact is not None:
+            memory_verdict = await self.components.constitution_engine.evaluate(
+                "memory.write", {"content": memory_fact}, {"project_id": project_id}
+            )
+            if not memory_verdict.allowed:
+                return {
+                    "ok": True, "text": "A gravação de memória foi bloqueada pela Constitution.",
+                    "status": "BLOCKED", "execution_mode": "BLOCKED",
+                    "provider": None, "provider_called": False, "mission_id": None,
+                }
             candidate = MemoryCandidate(
-                proposed_content=message,
+                proposed_content=memory_fact,
                 reason_to_remember=f"Memória informada no projeto {project_id}",
                 source="user_chat",
                 project_id=project_id,
@@ -316,6 +366,15 @@ class ProductBridge:
         # 2. Check Memory Queries ("como prefiro...", "qual tecnologia...", "qual é o meu objetivo...")
         is_memory_query = any(k in lower for k in ["como prefiro", "qual tecnologia", "qual é o meu objetivo", "qual meu objetivo", "o que sabemos sobre", "qual o projeto", "qual linguagem"])
         if is_memory_query:
+            memory_read_verdict = await self.components.constitution_engine.evaluate(
+                "memory.read", {"query": message}, {"project_id": project_id}
+            )
+            if not memory_read_verdict.allowed:
+                return {
+                    "ok": True, "text": "A leitura de memória foi bloqueada pela Constitution.",
+                    "status": "BLOCKED", "execution_mode": "BLOCKED",
+                    "provider": None, "provider_called": False, "mission_id": None,
+                }
             ret = await self.ame.retrieve_memory(MemoryQuery(query_text=message, project_id=project_id))
             now = utc_iso()
             if ret.objects:
@@ -338,17 +397,17 @@ class ProductBridge:
                 "pending_question": "",
                 "last_user_message": message,
                 "last_system_response": text_out,
-                "active_mission_id": mission_id,
+                "active_mission_id": None,
                 "updated_at": now,
             }
             self._save_session(session_id, {
                 "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
-                "mission_id": mission_id, "conversation_state": conv_state,
+                "mission_id": None, "conversation_state": conv_state,
                 "history": full_history, "updated_at": now,
             })
             return {
                 "ok": True, "text": text_out, "provider": "local", "provider_called": False, "status": "concluído",
-                "mission_id": mission_id, "domain": "memory", "conversation_state": conv_state, "inspector": conv_state,
+                "mission_id": None, "domain": "memory", "conversation_state": conv_state, "inspector": conv_state,
                 "trace": self.last_trace
             }
 
@@ -370,17 +429,17 @@ class ProductBridge:
                 "pending_question": "",
                 "last_user_message": message,
                 "last_system_response": bcc_res.summary,
-                "active_mission_id": mission_id,
+                "active_mission_id": None,
                 "updated_at": now,
             }
             self._save_session(session_id, {
                 "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
-                "mission_id": mission_id, "conversation_state": conv_state,
+                "mission_id": None, "conversation_state": conv_state,
                 "history": full_history, "updated_at": now,
             })
             return {
                 "ok": True, "text": bcc_res.summary, "provider": "local", "provider_called": False, "status": "concluído",
-                "mission_id": mission_id, "domain": "system", "conversation_state": conv_state, "inspector": conv_state,
+                "mission_id": None, "domain": "system", "conversation_state": conv_state, "inspector": conv_state,
                 "trace": self.last_trace
             }
 
@@ -810,6 +869,189 @@ Estratégia completa registrada no histórico para execução."""
                 "iqi": structured_intent.intent_quality_index,
                 "conversation_state": conv_state, "inspector": conv_state,
                 "trace": self.last_trace}
+
+    @staticmethod
+    def _recognize_memory_fact(message: str, structured_intent: Any) -> str | None:
+        """Recognize durable declarative facts without one exact phrase contract."""
+        if _is_question(message):
+            return None
+        normalized = message.strip()
+        lower = normalized.casefold()
+        preference = any(marker in lower for marker in (
+            "prefiro", "preferência", "minhas respostas devem ser", "gosto de",
+        ))
+        project_fact = bool(re.search(
+            r"\b(?:este|o|meu|nosso)\s+projeto\b.*\b(?:usa|utiliza|adota|emprega|foi feito|é feito)\b",
+            lower,
+        ))
+        declarative = not getattr(structured_intent, "clarifying_question", None)
+        return normalized if declarative and (preference or project_fact) else None
+
+    def _terminal_cognitive_response(self, decision: Any) -> dict[str, Any] | None:
+        mode = decision.mode
+        composition = decision.composition
+        missing = list(composition.missing_capabilities if composition else [])
+        authorization = list(
+            composition.authorization_requirements if composition else []
+        )
+        common = {
+            "ok": True,
+            "execution_mode": mode.value,
+            "provider": None,
+            "provider_called": False,
+            "mission_id": None,
+            "missing_capabilities": missing,
+            "authorization_requirements": authorization,
+            "capability_analysis": decision.to_dict(),
+        }
+        if mode is CognitiveExecutionMode.UNKNOWN:
+            return {**common, "text": "Não há capacidade ou recurso elegível suficiente para atender esta solicitação com segurança.", "status": "UNKNOWN", "domain": decision.domain_hint, "epistemic_status": "unknown", "confidence": 1.0}
+        if mode is CognitiveExecutionMode.BLOCKED:
+            return {**common, "text": "A solicitação foi bloqueada pela Constitution.", "status": "BLOCKED", "domain": decision.domain_hint, "epistemic_status": "fact", "confidence": 1.0}
+        if mode is CognitiveExecutionMode.AUTHORIZATION_REQUIRED:
+            return {**common, "text": "Esta ação exige autorização explícita antes de qualquer execução.", "status": "AUTHORIZATION_REQUIRED", "domain": decision.domain_hint, "epistemic_status": "fact", "confidence": 1.0}
+        if mode is CognitiveExecutionMode.EXTERNAL_REASONING_REQUIRED:
+            return {**common, "text": "Não tenho conhecimento local suficiente e não há Provider externo elegível conectado.", "status": "EXTERNAL_RESOURCE_REQUIRED", "domain": decision.domain_hint, "epistemic_status": "unknown", "confidence": 1.0}
+        return None
+
+    async def _run_controlled_mission(
+        self, message: str, decision: Any, context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Reach the governed MissionRuntime with a non-executing synthetic action."""
+        mission = await self.components.mission_engine.create(
+            message,
+            context=MissionContext(
+                session_id=context["session_id"],
+                correlation_id=context["correlation_id"],
+            ),
+        )
+        mission = await self.components.mission_engine.start(mission.id)
+        planning_verdict = await self.components.constitution_engine.evaluate(
+            "mission.plan", {"objective": message}, {"project_id": context["project_id"]}
+        )
+        if not planning_verdict.allowed:
+            await self.components.mission_engine.pause(
+                mission.id,
+                status=MissionStatus.BLOCKED,
+                blocker={"source": "constitution", "phase": "planning"},
+            )
+            return {
+                "ok": True, "text": "O planejamento foi bloqueado pela Constitution.",
+                "status": "BLOCKED", "execution_mode": "BLOCKED",
+                "provider": None, "provider_called": False,
+                "mission_id": str(mission.id),
+            }
+        # CPE/COR/ECC supervise plan construction; their result is diagnostic and
+        # MissionRuntime remains the sole action execution authority.
+        executive = self.ecc.process_intent(
+            text=message,
+            session_context={"project_id": context["project_id"]},
+        )
+        capability = decision.requirements[0].capability_id
+        requested_permissions = self.components.cognitive_capability_runtime._PERMISSIONS
+        permission = [requested_permissions[capability]]
+        candidate = ToolCandidate(
+            tool_id="synthetic-controlled-action",
+            capability=capability,
+            authorization_status=PermissionDecisionState.GRANTED,
+            health=ToolHealthStatus.HEALTHY,
+        )
+        tool = ToolResource(
+            tool_id=candidate.tool_id,
+            capabilities=[capability],
+            status=ToolStatus.AVAILABLE,
+            required_permissions=list(permission),
+        )
+        authorization = await ToolAuthorizationGate(
+            self.components.constitution_engine
+        ).evaluate_tool(candidate, tool, project_id=context["project_id"])
+        contract = ActionContract(
+            capability="test.echo",
+            action_type="SIMULATED",
+            inputs_reference={"message": message, "requested_capability": capability},
+            side_effect_level=SideEffectLevel.EXTERNAL_REVERSIBLE,
+            required_permissions=list(permission),
+            confirmation_required=True,
+            provenance={"requested_capability": capability, "synthetic": True},
+        )
+        node = RuntimeNode(
+            capability=capability,
+            action_contract=contract,
+        )
+        instance = self.components.mission_runtime.create_instance(
+            str(mission.id),
+            str(getattr(executive, "execution_graph", None) or "ecc-plan"),
+            [node],
+            project_id=context["project_id"],
+        )
+        instance = await self.components.mission_runtime.run_mission(instance.runtime_id)
+        if instance.status.value == "WAITING_USER_CONFIRMATION":
+            await self.components.mission_engine.pause(
+                mission.id,
+                status=MissionStatus.WAITING_FOR_PERMISSION,
+                blocker={"source": "action_gate", "requires": "user.confirmation"},
+            )
+        return {
+            "ok": True,
+            "text": "A ação foi planejada e aguarda confirmação antes da execução simulada.",
+            "status": "AUTHORIZATION_REQUIRED",
+            "execution_mode": "MISSION",
+            "epistemic_status": "fact",
+            "confidence": 1.0,
+            "provider": None,
+            "provider_called": False,
+            "mission_id": str(mission.id),
+            "runtime_id": instance.runtime_id,
+            "runtime_status": instance.status.value,
+            "authorization_gate": authorization.value,
+            "authorization_requirements": ["user.confirmation"],
+            "next_actions": ["Confirmar a ação simulada"],
+            "verification_evidence": list(instance.completion_evidence),
+            "domain": decision.domain_hint,
+        }
+
+    async def _govern_response(
+        self, response: dict[str, Any], request: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Normalize every product response and apply the canonical output gate."""
+        raw_status = str(response.get("status", "COMPLETED")).upper()
+        aliases = {"CONCLUÍDO": "COMPLETED", "CONCLUIDO": "COMPLETED"}
+        raw_status = aliases.get(raw_status, raw_status)
+        try:
+            status = ResponseStatus(raw_status)
+        except ValueError:
+            status = ResponseStatus.FAILED if not response.get("ok", True) else ResponseStatus.COMPLETED
+        canonical = CognitiveResponse(
+            text=str(response.get("text") or response.get("error") or ""),
+            status=status,
+            execution_mode=str(response.get("execution_mode") or self.last_capability_analysis and self.last_capability_analysis.get("mode") or "CONVERSATION"),
+            epistemic_status=str(response.get("epistemic_status", "conclusion")),
+            confidence=float(response.get("confidence", 1.0 if status is not ResponseStatus.COMPLETED else 0.5)),
+            provider=response.get("provider"),
+            provider_called=bool(response.get("provider_called", False)),
+            resource_provenance=list(response.get("resource_provenance", [])),
+            mission_id=response.get("mission_id"),
+            verification_evidence=list(response.get("verification_evidence", [])),
+            limitations=list(response.get("limitations", [])),
+            missing_capabilities=list(response.get("missing_capabilities", [])),
+            authorization_requirements=list(response.get("authorization_requirements", [])),
+            next_actions=list(response.get("next_actions", [])),
+        )
+        canonical = await self.response_assembler.assemble(
+            canonical,
+            {"project_id": request.get("project_id", "GLOBAL"), "session_id": request.get("session_id", "product-alpha")},
+        )
+        normalized = canonical.to_dict()
+        normalized.update({key: value for key, value in response.items() if key not in normalized})
+        normalized["text"] = canonical.text
+        normalized["status"] = canonical.status.value
+        normalized["execution_mode"] = canonical.execution_mode
+        normalized["epistemic_status"] = canonical.epistemic_status
+        normalized["confidence"] = canonical.confidence
+        normalized["provider"] = canonical.provider
+        normalized["provider_called"] = canonical.provider_called
+        normalized["mission_id"] = canonical.mission_id
+        return normalized
 
     def _record_local_flow(self, structured_intent: Any, mission_id: str) -> None:
         self._flow_event("intent_created", intent_id=structured_intent.intent_id)

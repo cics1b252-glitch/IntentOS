@@ -26,7 +26,8 @@ def test_first_intent_uses_kernel_and_persists_session(monkeypatch, tmp_path):
 
     bridge.kernel.process = process
     response = asyncio.run(bridge.dispatch({"action": "chat",
-        "message": "Explique qual é sua função.", "session_id": "product-alpha"}))
+        "message": "Explique qual é sua função.", "session_id": "product-alpha",
+        "allow_compatibility_fallback": True}))
     assert response["ok"] and response["mission_id"]
     saved = json.loads((tmp_path / "missions" / "product-alpha.json").read_text(encoding="utf-8"))
     assert saved["intent"]["domain"] == "other"
@@ -60,7 +61,8 @@ def test_provider_quota_error_is_clear_and_recoverable(monkeypatch, tmp_path):
 
     bridge.kernel.process = fail
     response = asyncio.run(bridge.dispatch(
-        {"action": "chat", "message": "resuma", "session_id": "quota"}))
+        {"action": "chat", "message": "resuma", "session_id": "quota",
+         "allow_compatibility_fallback": True}))
     assert response["error_code"] == "provider_quota"
     assert "cota" in response["error"].lower()
     assert "sensitive" not in response["error"]
@@ -68,7 +70,7 @@ def test_provider_quota_error_is_clear_and_recoverable(monkeypatch, tmp_path):
     assert saved["mission_status"] == "failed_recoverable"
 
 
-def test_arbitrary_intent_compiles_to_canonical_mission():
+def test_domain_is_not_the_canonical_execution_destination():
     source = inspect.getsource(Kernel._execute_canonical_route)
-    assert 'Domain.OTHER: "knowledge.intent"' in source
-    assert 'context["mission_id"]' in source
+    assert 'Domain.OTHER: "knowledge.intent"' not in source
+    assert 'analysis.get("mode") != "MISSION"' in source

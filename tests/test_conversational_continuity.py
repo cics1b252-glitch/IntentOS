@@ -33,7 +33,7 @@ class TestConversationalContinuity(unittest.TestCase):
         res1 = asyncio.run(self.bridge.dispatch(req1))
 
         self.assertTrue(res1.get("ok"))
-        self.assertEqual(res1.get("status"), "waiting_context")
+        self.assertEqual(res1.get("status"), "WAITING_CONTEXT")
         self.assertEqual(res1.get("dialogue_state"), "WAITING_CONTEXT")
         mission_id = res1.get("mission_id")
         self.assertIsNotNone(mission_id)
@@ -58,7 +58,7 @@ class TestConversationalContinuity(unittest.TestCase):
         res2 = asyncio.run(self.bridge.dispatch(req2))
 
         self.assertTrue(res2.get("ok"))
-        self.assertEqual(res2.get("status"), "concluído")
+        self.assertEqual(res2.get("status"), "COMPLETED")
         self.assertEqual(res2.get("mission_id"), mission_id)  # Mission ID preserved!
         self.assertIn("Análise de Investimento", res2.get("text", ""))
         self.assertIn("24.000/mês", res2.get("text", ""))
@@ -80,7 +80,7 @@ class TestConversationalContinuity(unittest.TestCase):
         }
         res1 = asyncio.run(self.bridge.dispatch(req1))
         mission_id = res1.get("mission_id")
-        self.assertEqual(res1.get("status"), "waiting_context")
+        self.assertEqual(res1.get("status"), "WAITING_CONTEXT")
 
         # Simulate process restart by instantiating a brand new ProductBridge
         new_bridge = ProductBridge()
@@ -94,7 +94,7 @@ class TestConversationalContinuity(unittest.TestCase):
         res2 = asyncio.run(new_bridge.dispatch(req2))
 
         self.assertTrue(res2.get("ok"))
-        self.assertEqual(res2.get("status"), "concluído")
+        self.assertEqual(res2.get("status"), "COMPLETED")
         self.assertEqual(res2.get("mission_id"), mission_id)  # Auto-resumed from disk session!
         self.assertIn("24.000/mês", res2.get("text", ""))
 

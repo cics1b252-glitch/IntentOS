@@ -44,7 +44,8 @@ def test_bridge_and_session_round_trip_unicode(monkeypatch, tmp_path):
 
     bridge.kernel.process = process
     response = asyncio.run(bridge.dispatch({"action": "chat", "message": UNICODE_SAMPLE,
-                                            "session_id": "unicode"}))
+                                            "session_id": "unicode",
+                                            "allow_compatibility_fallback": True}))
     assert response["ok"] and response["text"].endswith(UNICODE_SAMPLE)
     restored = asyncio.run(bridge.dispatch({"action": "restore_session", "session_id": "unicode"}))
     assert restored["session"]["history"][-1]["content"].endswith(UNICODE_SAMPLE)

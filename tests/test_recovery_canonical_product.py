@@ -47,7 +47,7 @@ def test_multi_turn_finance_advances_and_preserves_mission(monkeypatch, tmp_path
     }))
 
     assert first["target_field"] == "recurrence"
-    assert second["status"] == "concluído"
+    assert second["status"] == "COMPLETED"
     assert second["mission_id"] == first["mission_id"]
     restored = bridge._load_session("finance")
     assert restored["pending_dialogue"] is None
@@ -70,8 +70,8 @@ def test_zero_provider_is_local_for_capability_and_unknown_for_knowledge(monkeyp
     }))
 
     assert capability["provider"] == "local"
-    assert unknown["provider"] == "local"
-    assert "UNKNOWN" in unknown["text"]
+    assert unknown["provider"] is None
+    assert unknown["status"] == "EXTERNAL_RESOURCE_REQUIRED"
     assert "quota" not in unknown["text"].lower()
 
 

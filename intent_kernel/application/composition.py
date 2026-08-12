@@ -54,6 +54,8 @@ from intent_kernel.providers import ManagedProvider, MockProvider, ProviderManag
 from intent_kernel.router import ModuleRouter
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.service import RegistryResourceManager
+from intent_kernel.rrm.models import CapabilityResource, ResourceOrigin, AvailabilitySource
+from intent_kernel.runtime import MissionRuntime
 
 LEGACY_ADAPTERS = (
     "ModuleRouter",
@@ -88,6 +90,7 @@ class ApplicationComponents:
     knowledge_pipeline: Any
     resource_manager: RegistryResourceManager
     cognitive_capability_runtime: CognitiveCapabilityRuntime
+    mission_runtime: MissionRuntime
     migration_telemetry: MigrationTelemetry
     bootstrap_mode: str = "canonical"
     legacy_adapters: tuple[str, ...] = LEGACY_ADAPTERS
@@ -257,6 +260,17 @@ class KernelBuilder:
             provider = providers.get(provider_name)
             capability_registry.register_provider(provider)
             projection.project_provider(provider)
+        for capability_id in (
+            "memory.write", "memory.retrieve", "productivity.spreadsheet"
+        ):
+            resource_manager.register_capability(CapabilityResource(
+                capability_id=capability_id,
+                name=capability_id,
+                description="Explicit ProductBridge compatibility binding",
+                resource_origin=ResourceOrigin.MIGRATION,
+                availability_source=AvailabilitySource.CONFIGURATION,
+                metadata={"executor_kind": "ame", "compatibility": True},
+            ))
         cognitive_capability_runtime = CognitiveCapabilityRuntime(
             discovery=CapabilityRequirementDiscovery(),
             resolver=CapabilityFirstResolver(
@@ -274,6 +288,10 @@ class KernelBuilder:
             knowledge_pipeline=kernel.knowledge.pipeline,
             event_publisher=event_publisher,
             idempotency_store=idempotency_store,
+        )
+        mission_runtime = MissionRuntime(
+            rrm_service=resource_manager,
+            constitution=constitution_engine,
         )
         legacy_capability_executor = LegacyCapabilityExecutorAdapter(
             router,
@@ -326,6 +344,7 @@ class KernelBuilder:
             knowledge_pipeline=kernel.knowledge.pipeline,
             resource_manager=resource_manager,
             cognitive_capability_runtime=cognitive_capability_runtime,
+            mission_runtime=mission_runtime,
             migration_telemetry=migration_telemetry,
         )
 

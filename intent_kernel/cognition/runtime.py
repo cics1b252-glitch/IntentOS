@@ -60,6 +60,12 @@ class CognitiveCapabilityRuntime:
         "application.launch",
         "application.control",
     }
+    _PERMISSIONS = {
+        "external.communication": "email.send",
+        "filesystem.modify": "filesystem.write",
+        "application.launch": "application.launch",
+        "application.control": "application.control",
+    }
 
     def __init__(
         self,
@@ -108,15 +114,26 @@ class CognitiveCapabilityRuntime:
         elif any(item in normalized for item in self._LOCAL_RESPONSE_MARKERS):
             mode = CognitiveExecutionMode.LOCAL_RESPONSE
             reason = "The request can be answered by local system guidance"
-        elif (
-            capability_ids & self._MISSION_CAPABILITIES
-            and composition.status is CapabilityResolutionStatus.AVAILABLE
-        ):
-            mode = CognitiveExecutionMode.MISSION
-            reason = "The request implies an external or persistent effect"
         elif capability_ids & self._MISSION_CAPABILITIES:
+            needed = {
+                self._PERMISSIONS[item]
+                for item in capability_ids & self._MISSION_CAPABILITIES
+            }
+            if needed <= set(authorized_permissions):
+                mode = CognitiveExecutionMode.MISSION
+                reason = "Authorized side effect requires controlled MissionRuntime execution"
+            else:
+                mode = CognitiveExecutionMode.AUTHORIZATION_REQUIRED
+                reason = "A side-effecting request requires explicit authorization"
+                composition.authorization_requirements = sorted(
+                    needed - set(authorized_permissions)
+                )
+        elif (
+            composition.status is CapabilityResolutionStatus.EXTERNAL_RESOURCE_REQUIRED
+            and "knowledge.lookup" in capability_ids
+        ):
             mode = CognitiveExecutionMode.UNKNOWN
-            reason = "Action capabilities are missing or unavailable"
+            reason = "Grounded knowledge is unavailable"
         elif composition.status is CapabilityResolutionStatus.EXTERNAL_RESOURCE_REQUIRED:
             mode = CognitiveExecutionMode.EXTERNAL_REASONING_REQUIRED
             reason = "No eligible external reasoning resource is configured"

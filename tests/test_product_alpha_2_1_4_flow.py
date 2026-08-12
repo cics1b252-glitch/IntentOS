@@ -131,9 +131,11 @@ def test_retry_forwards_same_mission_to_canonical_kernel(monkeypatch, tmp_path):
 
     bridge.kernel.process = characterized_process
     first = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-                                         "session_id": "retry"}))
+                                         "session_id": "retry",
+                                         "allow_compatibility_fallback": True}))
     second = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-        "session_id": "retry", "resume_mission_id": first["mission_id"]}))
+        "session_id": "retry", "resume_mission_id": first["mission_id"],
+        "allow_compatibility_fallback": True}))
     assert not first["ok"] and second["ok"]
     assert first["mission_id"] == second["mission_id"] == mission_id
     assert seen == [None, mission_id]

@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from intent_kernel.cognition.runtime import (
+    CognitiveExecutionDecision,
+    CognitiveExecutionMode,
+)
 from intent_kernel.contracts import ProviderResponse
 from intent_kernel.time_utils import utc_iso
 from intent_kernel.types import Domain, EpistemicStatus, IntentOutput, Mode
@@ -117,6 +121,14 @@ def test_failure_updates_trace_and_preserves_created_mission(monkeypatch, tmp_pa
 def test_retry_forwards_same_mission_to_canonical_kernel(monkeypatch, tmp_path):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
     bridge = ProductBridge()
+
+    async def nonterminal(*_args, **_kwargs):
+        return CognitiveExecutionDecision(
+            mode=CognitiveExecutionMode.CONVERSATION,
+            reason="test nonterminal compatibility precondition",
+        )
+
+    bridge.components.cognitive_capability_runtime.analyze = nonterminal
     mission_id = "22222222-2222-4222-8222-222222222222"
     seen: list[str | None] = []
 
@@ -131,9 +143,11 @@ def test_retry_forwards_same_mission_to_canonical_kernel(monkeypatch, tmp_path):
 
     bridge.kernel.process = characterized_process
     first = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-                                         "session_id": "retry"}))
+                                         "session_id": "retry",
+                                         "allow_compatibility_fallback": True}))
     second = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-        "session_id": "retry", "resume_mission_id": first["mission_id"]}))
+        "session_id": "retry", "resume_mission_id": first["mission_id"],
+        "allow_compatibility_fallback": True}))
     assert not first["ok"] and second["ok"]
     assert first["mission_id"] == second["mission_id"] == mission_id
     assert seen == [None, mission_id]

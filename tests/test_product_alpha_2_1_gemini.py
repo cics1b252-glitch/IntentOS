@@ -8,6 +8,10 @@ from pathlib import Path
 import pytest
 
 from intent_kernel.application import KernelBuilder
+from intent_kernel.cognition.runtime import (
+    CognitiveExecutionDecision,
+    CognitiveExecutionMode,
+)
 from intent_kernel.providers import GeminiProvider, GeminiProviderError, ManagedProvider, ProviderManager
 from intent_kernel.contracts import ProviderRequest, ProviderMessage, ProviderResponse
 from intent_kernel.types import Message
@@ -16,6 +20,16 @@ from product_bridge import ProductBridge
 ROOT = Path(__file__).parents[1]
 HOST = (ROOT / "windows" / "host" / "ProductController.cs").read_text(encoding="utf-8")
 UI = (ROOT / "ui" / "shell" / "product" / "product.js").read_text(encoding="utf-8")
+
+
+def _enable_nonterminal_compatibility(bridge):
+    async def analyze(*_args, **_kwargs):
+        return CognitiveExecutionDecision(
+            mode=CognitiveExecutionMode.CONVERSATION,
+            reason="test nonterminal compatibility precondition",
+        )
+
+    bridge.components.cognitive_capability_runtime.analyze = analyze
 
 
 def _success_transport(method, path, payload):
@@ -102,6 +116,7 @@ def test_managed_provider_fallback_is_opt_in_and_preserves_request():
 def test_fallback_requires_explicit_authorization(monkeypatch, tmp_path):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
     bridge = ProductBridge()
+    _enable_nonterminal_compatibility(bridge)
 
     class Provider:
         def __init__(self, name): self.name = name
@@ -127,9 +142,11 @@ def test_fallback_requires_explicit_authorization(monkeypatch, tmp_path):
     bridge.kernel.process = process
 
     denied = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-        "fallback_provider": "alternate", "allow_fallback": False, "session_id": "denied"}))
+        "fallback_provider": "alternate", "allow_fallback": False, "session_id": "denied",
+        "allow_compatibility_fallback": True}))
     allowed = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-        "fallback_provider": "alternate", "allow_fallback": True, "session_id": "allowed"}))
+        "fallback_provider": "alternate", "allow_fallback": True, "session_id": "allowed",
+        "allow_compatibility_fallback": True}))
     assert denied["ok"] is False
     assert allowed["ok"] is True and allowed["provider"] == "alternate"
     assert allowed["fallback_used"] is True
@@ -158,6 +175,7 @@ def test_free_tier_notice_is_explicit():
 def test_session_response_records_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
     bridge = ProductBridge()
+    _enable_nonterminal_compatibility(bridge)
     class Result:
         text = "persistida"
         domain = type("Domain", (), {"value": "other"})()
@@ -165,6 +183,7 @@ def test_session_response_records_provider(monkeypatch, tmp_path):
         context["mission_id"] = "11111111-1111-4111-8111-111111111111"
         return Result()
     bridge.kernel.process = process
-    response = asyncio.run(bridge.dispatch({"action": "chat", "message": "olá", "session_id": "provider-history"}))
+    response = asyncio.run(bridge.dispatch({"action": "chat", "message": "olá", "session_id": "provider-history",
+                                            "allow_compatibility_fallback": True}))
     saved = json.loads((tmp_path / "missions" / "provider-history.json").read_text(encoding="utf-8"))
     assert saved["response"]["provider"] == response["provider"]

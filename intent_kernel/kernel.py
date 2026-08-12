@@ -299,24 +299,17 @@ class Kernel:
         context: dict[str, Any],
         session_id: str,
     ) -> Any | None:
-        """Execute characterized canonical routes before legacy fallback."""
+        """Execute an explicitly selected capability; Domain is metadata only."""
         service = self._canonical_execution_service
-        capability = {
-            Domain.FINANCE: "finance.intent",
-            Domain.RESEARCH: "knowledge.intent",
-            Domain.WRITING: "knowledge.intent",
-            Domain.PLANNING: "knowledge.intent",
-            Domain.EDUCATION: "knowledge.intent",
-            Domain.ENGINEERING: "engineering.intent",
-            Domain.PROGRAMMING: "engineering.intent",
-            Domain.BUSINESS: "knowledge.intent",
-            Domain.MARKETING: "knowledge.intent",
-            Domain.DATA: "knowledge.intent",
-            Domain.CREATIVITY: "knowledge.intent",
-            Domain.LEGAL: "knowledge.intent",
-            Domain.LIFE: "knowledge.intent",
-            Domain.OTHER: "knowledge.intent",
-        }.get(parsed.domain)
+        analysis = context.get("capability_analysis") or {}
+        if analysis.get("mode") != "MISSION":
+            return None
+        steps = (analysis.get("composition") or {}).get("steps") or []
+        selected = [
+            step for step in steps
+            if str(step.get("strategy", "")).startswith("capability:")
+        ]
+        capability = selected[0]["capability_id"] if selected else None
         if service is None or self.mission_engine is None or capability is None:
             return None
         canonical_domain = CanonicalDomain(parsed.domain.value)

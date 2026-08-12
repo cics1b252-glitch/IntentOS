@@ -7,6 +7,10 @@ import json
 import sys
 from pathlib import Path
 
+from intent_kernel.cognition.runtime import (
+    CognitiveExecutionDecision,
+    CognitiveExecutionMode,
+)
 from intent_kernel.pkb.json_store import JsonFileStore
 from intent_kernel.pkb.models import KnowledgeEvent
 from product_bridge import ProductBridge, _protocol_write
@@ -34,6 +38,14 @@ def test_bridge_and_session_round_trip_unicode(monkeypatch, tmp_path):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path / "Dados com acentuação"))
     bridge = ProductBridge()
 
+    async def nonterminal(*_args, **_kwargs):
+        return CognitiveExecutionDecision(
+            mode=CognitiveExecutionMode.CONVERSATION,
+            reason="test nonterminal compatibility precondition",
+        )
+
+    bridge.components.cognitive_capability_runtime.analyze = nonterminal
+
     class Result:
         text = f"## Resposta Gemini\n\n{UNICODE_SAMPLE}"
         domain = type("Domain", (), {"value": "other"})()
@@ -44,7 +56,8 @@ def test_bridge_and_session_round_trip_unicode(monkeypatch, tmp_path):
 
     bridge.kernel.process = process
     response = asyncio.run(bridge.dispatch({"action": "chat", "message": UNICODE_SAMPLE,
-                                            "session_id": "unicode"}))
+                                            "session_id": "unicode",
+                                            "allow_compatibility_fallback": True}))
     assert response["ok"] and response["text"].endswith(UNICODE_SAMPLE)
     restored = asyncio.run(bridge.dispatch({"action": "restore_session", "session_id": "unicode"}))
     assert restored["session"]["history"][-1]["content"].endswith(UNICODE_SAMPLE)

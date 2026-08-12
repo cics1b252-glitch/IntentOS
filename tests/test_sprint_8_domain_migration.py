@@ -77,7 +77,7 @@ async def test_migrated_domain_preserves_legacy_visible_response(
 
 
 @pytest.mark.asyncio
-async def test_migrated_domains_never_invoke_module_router(tmp_path):
+async def test_direct_kernel_calls_use_instrumented_compatibility_fallback(tmp_path):
     components = _factory(tmp_path).get_components()
 
     await components.kernel.process("pesquise integração de sistemas")
@@ -85,9 +85,9 @@ async def test_migrated_domains_never_invoke_module_router(tmp_path):
     await components.kernel.process("quero investir 5000")
     metrics = components.migration_telemetry.snapshot()
 
-    assert metrics["canonical_executions"] == 3
-    assert metrics["fallback_executions"] == 0
-    assert metrics["legacy_component_calls"].get("ModuleRouter", 0) == 0
+    assert metrics["canonical_executions"] == 0
+    assert metrics["fallback_executions"] == 3
+    assert metrics["legacy_component_calls"].get("ModuleRouter", 0) == 3
 
 
 @pytest.mark.asyncio

@@ -100,7 +100,7 @@ async def test_application_control_is_not_executed_when_resource_missing(compone
     decision = await components.cognitive_capability_runtime.analyze(
         "Quero que o sistema abra um programa instalado e faça uma tarefa nele."
     )
-    assert decision.mode is CognitiveExecutionMode.UNKNOWN
+    assert decision.mode is CognitiveExecutionMode.AUTHORIZATION_REQUIRED
     assert decision.composition.executable is False
     assert "application.launch" in decision.composition.missing_capabilities
 

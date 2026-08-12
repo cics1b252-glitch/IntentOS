@@ -105,6 +105,13 @@ class CapabilityRequirementDiscovery:
     """
 
     _RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+        (("investir",), "finance.intent", "Analyze an investment request"),
+        (("investimento",), "finance.intent", "Analyze an investment request"),
+        (("aporte",), "finance.intent", "Analyze an investment contribution"),
+        (("mil",), "finance.intent", "Analyze a monetary request"),
+        (("aplicativo",), "engineering.intent", "Design an application"),
+        (("app",), "engineering.intent", "Design an application"),
+        (("planilha",), "productivity.spreadsheet", "Create a spreadsheet"),
         (("criar", "sistema"), "requirements.discovery", "Discover requirements"),
         (("sistema",), "data.modeling", "Model the information required by the system"),
         (("sistema",), "workflow.design", "Design the operational workflow"),
@@ -119,6 +126,7 @@ class CapabilityRequirementDiscovery:
         (("producao",), "production.tracking", "Track production"),
         (("custos",), "cost.tracking", "Track costs"),
         (("vendas",), "sales.tracking", "Track sales"),
+        (("perdas",), "loss.tracking", "Track operational losses"),
         (("aprender",), "learning.goal_management", "Manage a learning goal"),
         (("evolucao",), "learning.progress_tracking", "Track learning progress"),
         (("acompanhasse",), "learning.progress_tracking", "Track learning progress"),
@@ -136,9 +144,22 @@ class CapabilityRequirementDiscovery:
         (("resumo",), "report.explain", "Explain a report"),
         (("abra", "programa"), "application.launch", "Launch an installed application"),
         (("tarefa", "nele"), "application.control", "Control an application"),
+        (("email",), "external.communication", "Send an external communication"),
+        (("e-mail",), "external.communication", "Send an external communication"),
         (("enviar",), "external.communication", "Send an external communication"),
+        (("envie",), "external.communication", "Send an external communication"),
         (("modificar", "arquivos"), "filesystem.modify", "Modify files"),
+        (("modifique", "arquivos"), "filesystem.modify", "Modify files"),
+        (("alterar", "arquivos"), "filesystem.modify", "Modify files"),
+        (("altere", "arquivos"), "filesystem.modify", "Modify files"),
+        (("explique",), "knowledge.explain", "Explain a concept"),
+        (("populacao",), "knowledge.lookup", "Look up grounded knowledge"),
+        (("capital",), "knowledge.lookup", "Look up grounded knowledge"),
         (("prefiro",), "memory.write", "Store a user preference"),
+        (("projeto", "usa"), "memory.write", "Store a project fact"),
+        (("projeto", "utiliza"), "memory.write", "Store a project fact"),
+        (("qual", "tecnologia"), "memory.retrieve", "Retrieve a project fact"),
+        (("como", "prefiro"), "memory.retrieve", "Retrieve a preference"),
     )
 
     @staticmethod
@@ -175,10 +196,39 @@ class CapabilityRequirementDiscovery:
                             "interface.design",
                             "content.explain",
                             "assessment.plan",
+                            "knowledge.explain",
+                            "knowledge.lookup",
                         },
                         provenance=("bootstrap_semantic_decomposition",),
                     ),
                 )
+        pending = (project_context or {}).get("pending_dialogue")
+        pending_match = (project_context or {}).get("pending_dialogue_match")
+        pending_capability = None
+        if (
+            isinstance(pending, dict)
+            and isinstance(pending_match, dict)
+            and pending_match.get("match_status") == "VALID_CONTINUATION"
+        ):
+            target = str(pending.get("target_field") or "")
+            if target in {
+                "amount", "recurrence", "investment_frequency", "goal",
+                "risk_profile", "time_horizon", "liquidity",
+            }:
+                pending_capability = "finance.intent"
+            elif target in {"platform", "purpose", "connectivity", "pricing"}:
+                pending_capability = "engineering.intent"
+        if pending_capability is not None:
+            requirements.setdefault(
+                pending_capability,
+                CapabilityRequirement(
+                    capability_id=pending_capability,
+                    description="Continue the semantically matched pending dialogue",
+                    expected_outputs=("structured_result",),
+                    verification_requirements=("pending_field_answer_matches",),
+                    provenance=("pending_dialogue_semantic_match",),
+                ),
+            )
         if not requirements:
             requirements["intent.analyze"] = CapabilityRequirement(
                 capability_id="intent.analyze",

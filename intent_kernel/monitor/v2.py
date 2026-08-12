@@ -275,6 +275,12 @@ class IntentOSMonitorV2:
             from intent_kernel.continuity import CognitiveContinuity
             import asyncio
             continuity = CognitiveContinuity(kernel=self.kernel)
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                return {"grade": "N/A", "total_events": 0}
             health = asyncio.run(continuity.assess_health())
             return {
                 "grade": health.health_grade,

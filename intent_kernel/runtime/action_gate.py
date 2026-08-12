@@ -50,6 +50,12 @@ class ActionGate:
             res = self._constitution.evaluate_action(contract.to_dict())
             if getattr(res, "verdict", "ALLOW") == "DENY":
                 return ActionGateDecision.DENY
+        elif self._constitution and hasattr(self._constitution, "evaluate"):
+            res = await self._constitution.evaluate(
+                "action.execute", contract.to_dict(), {}
+            )
+            if not getattr(res, "allowed", True):
+                return ActionGateDecision.DENY
 
         # 2. Explicit Deny Policy Check
         policy = execution_policy or {}

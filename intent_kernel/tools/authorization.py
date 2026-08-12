@@ -55,6 +55,14 @@ class ToolAuthorizationGate:
             res = self._constitution.evaluate_action({"capability": candidate.capability, "tool_id": tool.tool_id})
             if getattr(res, "verdict", "ALLOW") == "DENY":
                 return ToolAuthorizationDecisionState.DENY
+        elif self._constitution and hasattr(self._constitution, "evaluate"):
+            res = await self._constitution.evaluate(
+                "tool.authorize",
+                {"capability": candidate.capability, "tool_id": tool.tool_id},
+                {"project_id": project_id},
+            )
+            if not getattr(res, "allowed", True):
+                return ToolAuthorizationDecisionState.DENY
 
         # 4. Mission Constraints Check
         constraints = mission_constraints or []

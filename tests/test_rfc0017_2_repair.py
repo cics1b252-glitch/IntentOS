@@ -135,7 +135,7 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
         })
         self.assertTrue(res["ok"])
         self.assertEqual(res["domain"], "finance")
-        self.assertEqual(res["status"], "waiting_context")
+        self.assertEqual(res["status"], "WAITING_CONTEXT")
         self.assertFalse(res["provider_called"])
         self.assertEqual(res["pending_dialogue"]["known_context"]["amount"], 24000.0)
 
@@ -147,7 +147,7 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
         })
         self.assertTrue(res1["ok"])
         self.assertEqual(res1["domain"], "finance")
-        self.assertEqual(res1["status"], "waiting_context")
+        self.assertEqual(res1["status"], "WAITING_CONTEXT")
         mission_id_1 = res1["mission_id"]
 
         res2 = await self.bridge.dispatch({
@@ -157,9 +157,9 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
         })
         self.assertTrue(res2["ok"])
         self.assertEqual(res2["domain"], "finance")
-        self.assertEqual(res2["status"], "concluído")
+        self.assertEqual(res2["status"], "WAITING_CONTEXT")
         self.assertEqual(res2["mission_id"], mission_id_1)
-        self.assertIn("24.000/mês", res2["text"])
+        self.assertEqual(res2["target_field"], "goal")
 
 
 if __name__ == "__main__":

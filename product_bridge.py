@@ -16,7 +16,11 @@ from uuid import uuid4
 
 from intent_kernel.application import ApplicationFactory, KernelBuilder
 from intent_kernel.contracts import MissionContext, MissionId, MissionStatus
-from intent_kernel.cdm import CognitiveDialogueManager
+from intent_kernel.cdm import (
+    CognitiveDialogueManager,
+    PendingDialogueContext,
+    PendingDialogueMatchStatus,
+)
 from intent_kernel.cpe import CognitivePlanningEngine
 from intent_kernel.iue import IntentUnderstandingEngine
 from intent_kernel.cor import CapabilityOrchestrator
@@ -42,6 +46,7 @@ from intent_kernel.runtime.models import ActionContract, RuntimeNode, SideEffect
 from intent_kernel.tools.authorization import ToolAuthorizationGate
 from intent_kernel.tools.models import (
     PermissionDecisionState,
+    ToolAuthorizationDecisionState,
     ToolCandidate,
     ToolHealthStatus,
     ToolResource,
@@ -154,6 +159,7 @@ class ProductBridge:
             self.components.constitution_engine
         )
         self.last_capability_analysis: dict[str, Any] | None = None
+        self.last_pending_dialogue_match: dict[str, Any] | None = None
 
     async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         action = request.get("action")
@@ -234,6 +240,10 @@ class ProductBridge:
             if "text" in request and "message" not in request:
                 request["message"] = request["text"]
             response = await self._chat(request)
+            if self.last_pending_dialogue_match is not None:
+                response.setdefault(
+                    "pending_dialogue_match", self.last_pending_dialogue_match
+                )
             return await self._govern_response(response, request)
         if action == "diagnostics" or action == "flow_diagnostics":
             return {
@@ -261,6 +271,7 @@ class ProductBridge:
     async def _chat(self, request: dict[str, Any]) -> dict[str, Any]:
         correlation_id = str(request.get("correlation_id") or uuid4())
         started = time.perf_counter()
+        self.last_pending_dialogue_match = None
         self.last_trace = self._empty_trace(correlation_id)
         self.last_trace["dataMigrationStatus"] = self.data_migration_status
         self._flow_event("bridge_request_received")
@@ -293,12 +304,27 @@ class ProductBridge:
             for item in recent if isinstance(item, dict)
         )
         stored_pending_dialogue = saved.get("pending_dialogue")
-        pending_capability = (
-            self.components.cognitive_capability_runtime.discovery
-            .pending_continuation_capability(message, stored_pending_dialogue)
+        independent_session_context = {
+            "conversation_context": conversation_context,
+            "user_profile": saved.get("user_profile") or request.get("user_profile") or {},
+            "project_id": project_id,
+        }
+        independent_intent = self.iue.analyze(
+            message, session_context=independent_session_context
         )
+        pending_context = (
+            PendingDialogueContext.from_dict(stored_pending_dialogue)
+            if isinstance(stored_pending_dialogue, dict)
+            else None
+        )
+        pending_match = self.cdm.match_pending_response(
+            message, pending_context, independent_intent
+        )
+        self.last_pending_dialogue_match = pending_match.to_dict()
         pending_dialogue = (
-            stored_pending_dialogue if pending_capability is not None else None
+            stored_pending_dialogue
+            if pending_match.match_status is PendingDialogueMatchStatus.VALID_CONTINUATION
+            else None
         )
         resume_mission_id = request.get("resume_mission_id") or (
             saved.get("mission_id") if pending_dialogue is not None else None
@@ -312,7 +338,11 @@ class ProductBridge:
             "user_profile": saved.get("user_profile") or request.get("user_profile") or {},
             "project_id": project_id,
         }
-        structured_intent = self.iue.analyze(message, session_context=session_ctx_iue)
+        structured_intent = (
+            self.iue.analyze(message, session_context=session_ctx_iue)
+            if pending_dialogue is not None
+            else independent_intent
+        )
 
         context: dict[str, Any] = {
             "session_id": session_id,
@@ -323,6 +353,7 @@ class ProductBridge:
             "conversation_context": conversation_context,
             "structured_intent": structured_intent.to_dict(),
             "pending_dialogue": pending_dialogue,
+            "pending_dialogue_match": self.last_pending_dialogue_match,
             "resume_mission_id": resume_mission_id,
             "flow_event": self._flow_event,
         }
@@ -333,6 +364,7 @@ class ProductBridge:
             project_context={
                 "project_id": project_id,
                 "pending_dialogue": pending_dialogue,
+                "pending_dialogue_match": self.last_pending_dialogue_match,
             },
             persistent_constraints=request.get("persistent_constraints", ()),
             authorized_permissions=request.get("authorized_permissions", ()),
@@ -458,66 +490,78 @@ class ProductBridge:
         if not known_kc and isinstance(pending_dialogue, dict) and isinstance(pending_dialogue.get("known_context"), dict):
             known_kc = dict(pending_dialogue.get("known_context"))
 
-        # Ingest incremental facts into known_kc
-        # Amount: contextual financial parsing, never unrelated numbers.
-        amount = _financial_amount(message)
-        if amount is not None:
-            known_kc["amount"] = amount
-            known_kc["amount_str"] = f"R$ {amount:,.2f}".replace(
-                ",", "X").replace(".", ",").replace("X", "."
-            ).removesuffix(",00")
-        
-        # Recurrence
-        if any(w in lower for w in ["mensal", "mensais", "aporte mensal", "por mês", "todo mês"]):
-            known_kc["recurrence"] = "mensal"
-        elif any(w in lower for w in ["único", "unico", "uma vez", "pontual", "tenho", "disponível", "disponivel"]):
-            known_kc["recurrence"] = "único"
+        # A valid pending answer mutates exactly the typed target field. All other
+        # utterances are analyzed independently and cannot leak marker collisions
+        # into the saved dialogue context.
+        if pending_dialogue is not None:
+            target = pending_match.target_field
+            candidate_value = pending_match.candidate_value
+            canonical_target = (
+                "recurrence" if target == "investment_frequency" else target
+            )
+            known_kc[canonical_target] = candidate_value
+            if canonical_target == "amount":
+                known_kc["amount_str"] = f"R$ {candidate_value:,.2f}".replace(
+                    ",", "X").replace(".", ",").replace("X", "."
+                ).removesuffix(",00")
+        else:
+            # Initial compatibility turns retain their existing extractors. They
+            # are not allowed to consume or mutate an unrelated pending dialogue.
+            amount = _financial_amount(message)
+            if amount is not None:
+                known_kc["amount"] = amount
+                known_kc["amount_str"] = f"R$ {amount:,.2f}".replace(
+                    ",", "X").replace(".", ",").replace("X", "."
+                ).removesuffix(",00")
 
-        # Goal
-        if "aposentadoria" in lower:
-            known_kc["goal"] = "aposentadoria"
-        elif "reserva" in lower or "emergência" in lower:
-            known_kc["goal"] = "reserva de emergência"
-        elif "imóvel" in lower or "casa" in lower:
-            known_kc["goal"] = "compra de imóvel"
+            if any(w in lower for w in ["mensal", "mensais", "aporte mensal", "por mês", "todo mês"]):
+                known_kc["recurrence"] = "mensal"
+            elif any(w in lower for w in ["único", "unico", "uma vez", "pontual", "tenho", "disponível", "disponivel"]):
+                known_kc["recurrence"] = "único"
 
-        # Risk
-        if "moderado" in lower:
-            known_kc["risk_profile"] = "moderado"
-        elif "conservador" in lower or "seguro" in lower:
-            known_kc["risk_profile"] = "conservador"
-        elif "arrojado" in lower or "agressivo" in lower:
-            known_kc["risk_profile"] = "arrojado"
+            if "aposentadoria" in lower:
+                known_kc["goal"] = "aposentadoria"
+            elif "reserva" in lower or "emergência" in lower:
+                known_kc["goal"] = "reserva de emergência"
+            elif "imóvel" in lower or "casa" in lower:
+                known_kc["goal"] = "compra de imóvel"
 
-        # Time horizon
-        if "10 anos" in lower or "dez anos" in lower:
-            known_kc["time_horizon"] = "10 anos"
-        elif "5 anos" in lower or "cinco anos" in lower:
-            known_kc["time_horizon"] = "5 anos"
+            if "moderado" in lower:
+                known_kc["risk_profile"] = "moderado"
+            elif "conservador" in lower or "seguro" in lower:
+                known_kc["risk_profile"] = "conservador"
+            elif "arrojado" in lower or "agressivo" in lower:
+                known_kc["risk_profile"] = "arrojado"
 
-        # Liquidity
-        if "liquidez" in lower or "não preciso" in lower or "sem necessidade" in lower:
-            known_kc["liquidity"] = "sem necessidade de liquidez imediata"
+            if "10 anos" in lower or "dez anos" in lower:
+                known_kc["time_horizon"] = "10 anos"
+            elif "5 anos" in lower or "cinco anos" in lower:
+                known_kc["time_horizon"] = "5 anos"
 
-        # App creation fields
+            if "liquidez" in lower or "não preciso" in lower or "sem necessidade" in lower:
+                known_kc["liquidity"] = "sem necessidade de liquidez imediata"
+
+        # Initial app intent may establish several fields; a continuation has
+        # already been constrained to one typed field above.
         is_spreadsheet = any(term in lower for term in ("planilha", "spreadsheet", "excel"))
-        if ("aplicativo" in lower or re.search(r"\bapp\b", lower)) and not is_spreadsheet:
-            known_kc["app_type"] = "aplicativo"
-        if "android" in lower:
-            known_kc["platform"] = "Android"
-        elif "ios" in lower:
-            known_kc["platform"] = "iOS"
-        elif "web" in lower:
-            known_kc["platform"] = "Web"
+        if pending_dialogue is None:
+            if ("aplicativo" in lower or re.search(r"\bapp\b", lower)) and not is_spreadsheet:
+                known_kc["app_type"] = "aplicativo"
+            if "android" in lower:
+                known_kc["platform"] = "Android"
+            elif "ios" in lower:
+                known_kc["platform"] = "iOS"
+            elif "web" in lower:
+                known_kc["platform"] = "Web"
 
-        if "estoque" in lower or "controle de estoque" in lower:
-            known_kc["purpose"] = "controle de estoque"
-        if "offline" in lower:
-            known_kc["connectivity"] = "offline"
-        elif "online" in lower:
-            known_kc["connectivity"] = "online"
-        if "gratuita" in lower or "grátis" in lower or "gratuito" in lower:
-            known_kc["pricing"] = "gratuita"
+            if "estoque" in lower or "controle de estoque" in lower:
+                known_kc["purpose"] = "controle de estoque"
+            if "offline" in lower:
+                known_kc["connectivity"] = "offline"
+            elif "online" in lower:
+                known_kc["connectivity"] = "online"
+            if "gratuita" in lower or "grátis" in lower or "gratuito" in lower:
+                known_kc["pricing"] = "gratuita"
 
         # Determine domain
         is_fin = (
@@ -967,6 +1011,88 @@ Estratégia completa registrada no histórico para execução."""
         authorization = await ToolAuthorizationGate(
             self.components.constitution_engine
         ).evaluate_tool(candidate, tool, project_id=context["project_id"])
+        if authorization is not ToolAuthorizationDecisionState.ALLOW:
+            boundary = {
+                ToolAuthorizationDecisionState.DENY: {
+                    "mission_status": MissionStatus.BLOCKED,
+                    "status": "BLOCKED",
+                    "execution_mode": "BLOCKED",
+                    "text": "A ferramenta selecionada foi bloqueada pela política de autorização.",
+                    "next_actions": ["Selecionar um recurso autorizado"],
+                    "authorization_requirements": [],
+                },
+                ToolAuthorizationDecisionState.REQUEST_PERMISSION: {
+                    "mission_status": MissionStatus.WAITING_FOR_PERMISSION,
+                    "status": "AUTHORIZATION_REQUIRED",
+                    "execution_mode": "MISSION",
+                    "text": "A missão aguarda autorização para usar a ferramenta selecionada.",
+                    "next_actions": ["Autorizar o uso da ferramenta"],
+                    "authorization_requirements": list(permission),
+                },
+                ToolAuthorizationDecisionState.REQUEST_CONFIRMATION: {
+                    "mission_status": MissionStatus.WAITING_FOR_DECISION,
+                    "status": "AUTHORIZATION_REQUIRED",
+                    "execution_mode": "MISSION",
+                    "text": "A ferramenta está elegível, mas esta ação específica aguarda confirmação.",
+                    "next_actions": ["Confirmar a ação específica"],
+                    "authorization_requirements": ["user.confirmation"],
+                    "confirmation_state": "WAITING_USER_CONFIRMATION",
+                },
+                ToolAuthorizationDecisionState.WAIT_TOOL: {
+                    "mission_status": MissionStatus.WAITING_FOR_INFORMATION,
+                    "status": "EXTERNAL_RESOURCE_REQUIRED",
+                    "execution_mode": "MISSION",
+                    "text": "A missão aguarda a disponibilidade da ferramenta selecionada.",
+                    "next_actions": ["Aguardar recurso elegível"],
+                    "authorization_requirements": [],
+                },
+                ToolAuthorizationDecisionState.RESELECT_TOOL: {
+                    "mission_status": MissionStatus.WAITING_FOR_DECISION,
+                    "status": "EXTERNAL_RESOURCE_REQUIRED",
+                    "execution_mode": "MISSION",
+                    "text": "A ferramenta atual não pode executar esta ação e deve ser substituída.",
+                    "next_actions": ["Selecionar outra ferramenta elegível"],
+                    "authorization_requirements": [],
+                },
+            }.get(authorization, {
+                "mission_status": MissionStatus.BLOCKED,
+                "status": "BLOCKED",
+                "execution_mode": "BLOCKED",
+                "text": "A decisão de autorização não permite execução.",
+                "next_actions": ["Reavaliar a autorização"],
+                "authorization_requirements": [],
+            })
+            await self.components.mission_engine.pause(
+                mission.id,
+                status=boundary["mission_status"],
+                blocker={
+                    "source": "tool_authorization_gate",
+                    "decision": authorization.value,
+                    "execution_eligible": False,
+                },
+            )
+            return {
+                "ok": True,
+                "text": boundary["text"],
+                "status": boundary["status"],
+                "execution_mode": boundary["execution_mode"],
+                "epistemic_status": "fact",
+                "confidence": 1.0,
+                "provider": None,
+                "provider_called": False,
+                "mission_id": str(mission.id),
+                "runtime_id": None,
+                "runtime_status": None,
+                "authorization_gate": authorization.value,
+                "authorization_requirements": boundary["authorization_requirements"],
+                "next_actions": boundary["next_actions"],
+                "verification_evidence": [],
+                "domain": decision.domain_hint,
+                **(
+                    {"confirmation_state": boundary["confirmation_state"]}
+                    if "confirmation_state" in boundary else {}
+                ),
+            }
         contract = ActionContract(
             capability="test.echo",
             action_type="SIMULATED",

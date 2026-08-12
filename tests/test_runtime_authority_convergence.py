@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import pytest
+import product_bridge as product_bridge_module
 
 from intent_kernel.cognition.runtime import (
     CognitiveExecutionDecision,
     CognitiveExecutionMode,
 )
+from intent_kernel.contracts import MissionId, MissionStatus
 from product_bridge import ProductBridge
+from intent_kernel.tools.models import ToolAuthorizationDecisionState
 
 
 @pytest.fixture
@@ -243,15 +246,19 @@ async def test_unrelated_explanation_interrupts_pending_finance(bridge):
         "message": "Quero investir 24 mil.",
         "session_id": "pending-explanation",
     })
+    saved_before = bridge._load_session("pending-explanation")
     response = await bridge.dispatch({
         "action": "chat",
         "message": "Explique juros compostos.",
         "session_id": "pending-explanation",
     })
+    saved_after = bridge._load_session("pending-explanation")
 
     assert response["status"] == "EXTERNAL_RESOURCE_REQUIRED"
     assert response["mission_id"] is None
     assert "perfil de risco" not in response["text"].casefold()
+    assert saved_after["pending_dialogue"] == saved_before["pending_dialogue"]
+    assert saved_after["conversation_state"]["known_context"] == saved_before["conversation_state"]["known_context"]
 
 
 @pytest.mark.asyncio
@@ -316,3 +323,203 @@ async def test_authorization_and_mission_override_pending_finance(bridge):
     assert mission["execution_mode"] == "MISSION"
     assert mission["runtime_status"] == "WAITING_USER_CONFIRMATION"
     assert mission["mission_id"] != first["mission_id"]
+
+
+async def _advance_finance_to(bridge, session_id, target_field):
+    response = await bridge.dispatch({
+        "action": "chat", "message": "Quero investir 24 mil.",
+        "session_id": session_id,
+    })
+    steps = {
+        "recurrence": [],
+        "goal": ["com aportes mensais"],
+        "risk_profile": ["com aportes mensais", "para aposentadoria"],
+        "time_horizon": [
+            "com aportes mensais", "para aposentadoria", "sou moderado",
+        ],
+    }
+    for answer in steps[target_field]:
+        response = await bridge.dispatch({
+            "action": "chat", "message": answer, "session_id": session_id,
+        })
+    assert response["target_field"] == target_field
+    return response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_field,message", [
+    ("goal", "Minha casa é azul."),
+    ("recurrence", "Minha reunião mensal terminou."),
+    ("risk_profile", "O carro está seguro."),
+    ("time_horizon", "O projeto dura cinco anos."),
+])
+async def test_marker_collision_is_not_pending_continuation(
+    bridge, target_field, message
+):
+    session_id = f"false-positive-{target_field}"
+    pending_response = await _advance_finance_to(
+        bridge, session_id, target_field
+    )
+    saved_before = bridge._load_session(session_id)
+
+    response = await bridge.dispatch({
+        "action": "chat", "message": message, "session_id": session_id,
+    })
+    saved_after = bridge._load_session(session_id)
+
+    assert response["pending_dialogue_match"]["match_status"] == "NOT_A_CONTINUATION"
+    assert response["mission_id"] is None
+    assert saved_after["pending_dialogue"] == saved_before["pending_dialogue"]
+    assert saved_after["conversation_state"]["known_context"] == saved_before["conversation_state"]["known_context"]
+    assert pending_response["mission_id"] == saved_before["mission_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_field,message,candidate", [
+    ("goal", "para aposentadoria", "aposentadoria"),
+    ("goal", "quero investir para comprar uma casa", "compra de imóvel"),
+    ("recurrence", "com aportes mensais", "mensal"),
+    ("risk_profile", "sou moderado", "moderado"),
+    ("time_horizon", "por cinco anos", "cinco anos"),
+])
+async def test_typed_pending_answers_remain_valid_continuations(
+    bridge, target_field, message, candidate
+):
+    session_id = f"valid-semantic-{target_field}-{candidate}"
+    pending_response = await _advance_finance_to(
+        bridge, session_id, target_field
+    )
+    response = await bridge.dispatch({
+        "action": "chat", "message": message, "session_id": session_id,
+    })
+
+    assert response["pending_dialogue_match"]["match_status"] == "VALID_CONTINUATION"
+    assert response["pending_dialogue_match"]["candidate_value"] == candidate
+    assert response["mission_id"] == pending_response["mission_id"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_pending_answer_does_not_mutate_dialogue(bridge):
+    session_id = "ambiguous-pending"
+    await _advance_finance_to(bridge, session_id, "goal")
+    saved_before = bridge._load_session(session_id)
+
+    response = await bridge.dispatch({
+        "action": "chat", "message": "talvez", "session_id": session_id,
+    })
+    saved_after = bridge._load_session(session_id)
+
+    assert response["pending_dialogue_match"]["match_status"] == "AMBIGUOUS"
+    assert response["mission_id"] is None
+    assert saved_after["pending_dialogue"] == saved_before["pending_dialogue"]
+    assert saved_after["conversation_state"]["known_context"] == saved_before["conversation_state"]["known_context"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "gate_state,expected_status,runtime_calls,action_gate_calls,mission_status",
+    [
+        (ToolAuthorizationDecisionState.ALLOW, "AUTHORIZATION_REQUIRED", 1, 1, MissionStatus.WAITING_FOR_PERMISSION),
+        (ToolAuthorizationDecisionState.DENY, "BLOCKED", 0, 0, MissionStatus.BLOCKED),
+        (ToolAuthorizationDecisionState.REQUEST_PERMISSION, "AUTHORIZATION_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_PERMISSION),
+        (ToolAuthorizationDecisionState.REQUEST_CONFIRMATION, "AUTHORIZATION_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_DECISION),
+        (ToolAuthorizationDecisionState.WAIT_TOOL, "EXTERNAL_RESOURCE_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_INFORMATION),
+        (ToolAuthorizationDecisionState.RESELECT_TOOL, "EXTERNAL_RESOURCE_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_DECISION),
+    ],
+)
+async def test_only_allow_crosses_tool_authorization_boundary(
+    bridge, monkeypatch, gate_state, expected_status, runtime_calls,
+    action_gate_calls, mission_status,
+):
+    counters = {
+        "runtime_create": 0, "runtime_run": 0,
+        "action_gate": 0, "executor": 0,
+    }
+
+    class InstrumentedAuthorizationGate:
+        def __init__(self, _constitution):
+            pass
+
+        async def evaluate_tool(self, *_args, **_kwargs):
+            return gate_state
+
+    runtime = bridge.components.mission_runtime
+    original_create = runtime.create_instance
+    original_run = runtime.run_mission
+    original_action_gate = runtime.action_gate.evaluate
+    original_execute = runtime.executor.execute
+
+    def counted_create(*args, **kwargs):
+        counters["runtime_create"] += 1
+        return original_create(*args, **kwargs)
+
+    async def counted_run(*args, **kwargs):
+        counters["runtime_run"] += 1
+        return await original_run(*args, **kwargs)
+
+    async def counted_action_gate(*args, **kwargs):
+        counters["action_gate"] += 1
+        return await original_action_gate(*args, **kwargs)
+
+    async def counted_execute(*args, **kwargs):
+        counters["executor"] += 1
+        return await original_execute(*args, **kwargs)
+
+    monkeypatch.setattr(
+        product_bridge_module, "ToolAuthorizationGate",
+        InstrumentedAuthorizationGate,
+    )
+    monkeypatch.setattr(runtime, "create_instance", counted_create)
+    monkeypatch.setattr(runtime, "run_mission", counted_run)
+    monkeypatch.setattr(runtime.action_gate, "evaluate", counted_action_gate)
+    monkeypatch.setattr(runtime.executor, "execute", counted_execute)
+
+    response = await bridge.dispatch({
+        "action": "chat",
+        "message": "Crie e envie um e-mail.",
+        "authorized_permissions": ["email.send"],
+    })
+
+    assert response["authorization_gate"] == gate_state.value
+    assert response["status"] == expected_status
+    assert counters == {
+        "runtime_create": runtime_calls,
+        "runtime_run": runtime_calls,
+        "action_gate": action_gate_calls,
+        "executor": 0,
+    }
+    mission = await bridge.components.mission_engine.get(
+        MissionId(response["mission_id"])
+    )
+    assert mission is not None
+    assert mission.status is mission_status
+    if gate_state is ToolAuthorizationDecisionState.ALLOW:
+        assert response["runtime_status"] == "WAITING_USER_CONFIRMATION"
+    else:
+        assert response["runtime_id"] is None
+        assert response["runtime_status"] is None
+
+
+@pytest.mark.asyncio
+async def test_authorization_confirmation_is_distinct_from_tool_permission(
+    bridge, monkeypatch
+):
+    class ConfirmationGate:
+        def __init__(self, _constitution):
+            pass
+
+        async def evaluate_tool(self, *_args, **_kwargs):
+            return ToolAuthorizationDecisionState.REQUEST_CONFIRMATION
+
+    monkeypatch.setattr(
+        product_bridge_module, "ToolAuthorizationGate", ConfirmationGate
+    )
+    response = await bridge.dispatch({
+        "action": "chat",
+        "message": "Crie e envie um e-mail.",
+        "authorized_permissions": ["email.send"],
+    })
+
+    assert response["confirmation_state"] == "WAITING_USER_CONFIRMATION"
+    assert response["authorization_gate"] == "REQUEST_CONFIRMATION"
+    assert response["runtime_id"] is None

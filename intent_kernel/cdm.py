@@ -15,7 +15,9 @@ Architectural Guarantee (RFC-0008):
 
 from __future__ import annotations
 
+import re
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -32,6 +34,36 @@ class DialogueState(str, Enum):
     MULTIPLE_VALID_PATHS = "MULTIPLE_VALID_PATHS"
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
     INSUFFICIENT_INFORMATION = "INSUFFICIENT_INFORMATION"
+
+
+class PendingDialogueMatchStatus(str, Enum):
+    """Whether an utterance is evidence-backed as an answer to the active question."""
+
+    VALID_CONTINUATION = "VALID_CONTINUATION"
+    NOT_A_CONTINUATION = "NOT_A_CONTINUATION"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True)
+class PendingDialogueMatch:
+    """Typed CDM decision for a possible pending-dialogue answer."""
+
+    target_field: str
+    candidate_value: Any | None
+    match_status: PendingDialogueMatchStatus
+    confidence: float
+    evidence: tuple[str, ...]
+    reason: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "target_field": self.target_field,
+            "candidate_value": self.candidate_value,
+            "match_status": self.match_status.value,
+            "confidence": self.confidence,
+            "evidence": list(self.evidence),
+            "reason": self.reason,
+        }
 
 
 @dataclass
@@ -170,6 +202,154 @@ class CognitiveDialogueManager:
 
     def __init__(self):
         self.learning_log: List[DialogueLearningRecord] = []
+
+    @staticmethod
+    def _normalize_answer(text: str) -> str:
+        normalized = unicodedata.normalize("NFKD", text.casefold())
+        return " ".join(
+            "".join(ch for ch in normalized if not unicodedata.combining(ch))
+            .strip(" .,!;:")
+            .split()
+        )
+
+    def match_pending_response(
+        self,
+        text: str,
+        pending: PendingDialogueContext | None,
+        structured_intent: StructuredIntent | None = None,
+    ) -> PendingDialogueMatch:
+        """Classify and type an answer without treating a pending question as a modal lock."""
+        if pending is None:
+            return PendingDialogueMatch(
+                target_field="", candidate_value=None,
+                match_status=PendingDialogueMatchStatus.NOT_A_CONTINUATION,
+                confidence=1.0, evidence=(), reason="No pending dialogue is active.",
+            )
+
+        target = pending.target_field
+        normalized = self._normalize_answer(text)
+        evidence = (
+            f"target_field={target}",
+            f"question={pending.pending_question}",
+            f"independent_domain={getattr(structured_intent, 'domain', 'unknown')}",
+        )
+        if not normalized:
+            return PendingDialogueMatch(
+                target, None, PendingDialogueMatchStatus.AMBIGUOUS, 0.0,
+                evidence, "The utterance is empty and cannot be typed safely.",
+            )
+
+        # A question or an independently structured request changes subject. It cannot
+        # answer a field merely because one of its words resembles a field marker.
+        is_question = text.strip().endswith("?") or bool(re.match(
+            r"^(qual|quais|como|quando|onde|quem|quanto|quantos|explique|descreva)\b",
+            normalized,
+        ))
+        if is_question:
+            return PendingDialogueMatch(
+                target, None, PendingDialogueMatchStatus.NOT_A_CONTINUATION, 1.0,
+                (*evidence, "independent_question_shape"),
+                "The utterance has the linguistic shape of a new independent request.",
+            )
+
+        patterns: dict[str, tuple[tuple[str, Any], ...]] = {
+            "recurrence": (
+                (r"(?:o aporte (?:sera )?|sera |vai ser |com (?:aportes? )?|pretendo aportar )?(?:mensal|mensais|todo mes|por mes)", "mensal"),
+                (r"(?:o aporte (?:sera )?|sera |vai ser )?(?:unico|uma vez|pontual)", "único"),
+            ),
+            "investment_frequency": (
+                (r"(?:o aporte (?:sera )?|sera |vai ser |com (?:aportes? )?|pretendo aportar )?(?:mensal|mensais|todo mes|por mes)", "mensal"),
+                (r"(?:o aporte (?:sera )?|sera |vai ser )?(?:unico|uma vez|pontual)", "único"),
+            ),
+            "goal": (
+                (r"(?:meu objetivo (?:e |seria )?|para |quero investir para )?aposentadoria", "aposentadoria"),
+                (r"(?:meu objetivo (?:e |seria )?|para |quero investir para )?(?:formar |criar )?(?:uma )?reserva(?: de emergencia)?", "reserva de emergência"),
+                (r"(?:meu objetivo (?:e |seria )?|para |quero investir para )?(?:comprar |adquirir )(?:uma |um )?(?:casa|imovel)", "compra de imóvel"),
+            ),
+            "risk_profile": (
+                (r"(?:sou |meu perfil (?:e |seria )?|prefiro (?:um perfil )?)?moderado", "moderado"),
+                (r"(?:sou |meu perfil (?:e |seria )?|prefiro (?:um perfil )?)?conservador", "conservador"),
+                (r"(?:sou |meu perfil (?:e |seria )?|prefiro (?:um perfil )?)?(?:arrojado|agressivo)", "arrojado"),
+            ),
+            "liquidity": (
+                (r"(?:preciso de )?liquidez imediata", "liquidez imediata"),
+                (r"(?:nao preciso de |sem necessidade de )liquidez(?: imediata)?", "sem necessidade de liquidez imediata"),
+                (r"posso manter aplicado(?: pelo prazo)?", "sem necessidade de liquidez imediata"),
+            ),
+            "platform": (
+                (r"(?:a plataforma (?:e |sera )?)?android", "Android"),
+                (r"(?:a plataforma (?:e |sera )?)?ios", "iOS"),
+                (r"(?:a plataforma (?:e |sera )?)?web", "Web"),
+                (r"(?:a plataforma (?:e |sera )?)?windows", "Windows"),
+            ),
+            "purpose": (
+                (r"(?:a finalidade (?:e |sera )?|para )?(?:controle de )?estoque", "controle de estoque"),
+                (r"(?:a finalidade (?:e |sera )?|para )?(?:controle de )?vendas", "controle de vendas"),
+                (r"(?:a finalidade (?:e |sera )?|para )?(?:gestao de )?clientes", "gestão de clientes"),
+                (r"(?:a finalidade (?:e |sera )?|para )?(?:gestao de )?manutencao", "gestão de manutenção"),
+            ),
+            "connectivity": (
+                (r"(?:precisa funcionar |funcionara |sera )?offline", "offline"),
+                (r"(?:precisa funcionar |funcionara |sera )?(?:apenas )?online", "online"),
+            ),
+            "pricing": (
+                (r"(?:sera |versao )?(?:gratuita|gratuito|gratis)", "gratuita"),
+                (r"(?:sera |versao )?(?:paga|pago|assinatura)", "paga"),
+            ),
+        }
+
+        if target == "amount":
+            amount_match = re.fullmatch(
+                r"(?:tenho |o valor (?:e |seria )?|quero investir )?(?:r\$\s*)?(\d+(?:[.,]\d+)?)\s*(mil|k|reais?)?",
+                normalized,
+            )
+            if amount_match:
+                amount = float(amount_match.group(1).replace(",", "."))
+                if amount_match.group(2) in {"mil", "k"}:
+                    amount *= 1000
+                return PendingDialogueMatch(
+                    target, amount, PendingDialogueMatchStatus.VALID_CONTINUATION,
+                    0.98, (*evidence, "typed_money_value"),
+                    "A complete amount answer was extracted for the requested field.",
+                )
+        elif target == "time_horizon":
+            horizon = re.fullmatch(
+                r"(?:por |pretendo investir por |quero investir por )?(\d+|um|dois|tres|quatro|cinco|dez) (anos?|meses?)",
+                normalized,
+            )
+            if horizon:
+                value = f"{horizon.group(1)} {horizon.group(2)}"
+                return PendingDialogueMatch(
+                    target, value, PendingDialogueMatchStatus.VALID_CONTINUATION,
+                    0.98, (*evidence, "typed_duration_value"),
+                    "A complete duration answer was extracted for the requested field.",
+                )
+        else:
+            for pattern, value in patterns.get(target, ()):
+                if re.fullmatch(pattern, normalized):
+                    return PendingDialogueMatch(
+                        target, value, PendingDialogueMatchStatus.VALID_CONTINUATION,
+                        0.98, (*evidence, "field_specific_full_match"),
+                        "The complete utterance has a valid answer shape and typed value.",
+                    )
+
+        # A sentence with its own subject/predicate is evidence of a new topic, while
+        # a short fragment remains ambiguous rather than being guessed into context.
+        tokens = normalized.split()
+        new_subject = len(tokens) >= 4 and bool(re.match(
+            r"^(minha|meu|o|a|este|esta|esse|essa)\b", normalized
+        ))
+        if new_subject:
+            return PendingDialogueMatch(
+                target, None, PendingDialogueMatchStatus.NOT_A_CONTINUATION, 0.95,
+                (*evidence, "independent_subject_predicate"),
+                "The utterance introduces an independent subject and no typed field answer.",
+            )
+        return PendingDialogueMatch(
+            target, None, PendingDialogueMatchStatus.AMBIGUOUS, 0.4,
+            (*evidence, "no_typed_value"),
+            "No plausible typed value can be extracted without guessing.",
+        )
 
     def evaluate(
         self,

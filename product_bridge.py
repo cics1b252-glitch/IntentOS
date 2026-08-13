@@ -16,13 +16,7 @@ from uuid import uuid4
 
 from intent_kernel.application import ApplicationFactory, KernelBuilder
 from intent_kernel.contracts import MissionContext, MissionId, MissionStatus
-from intent_kernel.cdm import (
-    CognitiveDialogueManager,
-    PendingDialogueContext,
-    PendingDialogueMatchStatus,
-)
 from intent_kernel.cpe import CognitivePlanningEngine
-from intent_kernel.iue import IntentUnderstandingEngine
 from intent_kernel.cor import CapabilityOrchestrator
 from intent_kernel.ecc import ExecutiveCognitiveController
 from intent_kernel.time_utils import utc_iso
@@ -142,8 +136,8 @@ class ProductBridge:
         self.factory = ApplicationFactory(builder)
         self.components = self.factory.get_components()
         self.kernel = self.factory.get_kernel()
-        self.iue = IntentUnderstandingEngine(pkb=getattr(self.kernel, "pkb", None))
-        self.cdm = CognitiveDialogueManager()
+        self.iue = self.components.iue
+        self.cdm = self.components.cdm
         self.cpe = CognitivePlanningEngine()
         self.cor = CapabilityOrchestrator()
         self.ecc = ExecutiveCognitiveController(iue=self.iue, cdm=self.cdm, cpe=self.cpe, cor=self.cor)
@@ -158,8 +152,10 @@ class ProductBridge:
         self.response_assembler = CognitiveResponseAssembler(
             self.components.constitution_engine
         )
+        self.conversation_service = self.components.conversation_service
         self.last_capability_analysis: dict[str, Any] | None = None
         self.last_pending_dialogue_match: dict[str, Any] | None = None
+        self.last_conversation_authority: dict[str, Any] | None = None
 
     async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         action = request.get("action")
@@ -244,12 +240,17 @@ class ProductBridge:
                 response.setdefault(
                     "pending_dialogue_match", self.last_pending_dialogue_match
                 )
+            if self.last_conversation_authority is not None:
+                response.setdefault(
+                    "conversation_authority", self.last_conversation_authority
+                )
             return await self._govern_response(response, request)
         if action == "diagnostics" or action == "flow_diagnostics":
             return {
                 "ok": True,
                 "trace": self.last_trace,
                 "capability_analysis": self.last_capability_analysis,
+                "conversation_authority": self.last_conversation_authority,
                 "data_migration_status": self.data_migration_status,
                 "app_version": APP_VERSION,
                 "bridge_version": BRIDGE_VERSION,
@@ -272,6 +273,7 @@ class ProductBridge:
         correlation_id = str(request.get("correlation_id") or uuid4())
         started = time.perf_counter()
         self.last_pending_dialogue_match = None
+        self.last_conversation_authority = None
         self.last_trace = self._empty_trace(correlation_id)
         self.last_trace["dataMigrationStatus"] = self.data_migration_status
         self._flow_event("bridge_request_received")
@@ -303,51 +305,32 @@ class ProductBridge:
             f"{('Usuário' if item.get('role') == 'user' else 'Intent OS')}: {item.get('content', '')}"
             for item in recent if isinstance(item, dict)
         )
-        stored_pending_dialogue = saved.get("pending_dialogue")
-        independent_session_context = {
-            "conversation_context": conversation_context,
-            "user_profile": saved.get("user_profile") or request.get("user_profile") or {},
-            "project_id": project_id,
-        }
-        independent_intent = self.iue.analyze(
-            message, session_context=independent_session_context
+        conversation_turn = await self.conversation_service.analyze_turn(
+            message,
+            saved_session=saved,
+            conversation_context=conversation_context,
+            project_id=project_id,
+            user_profile=(
+                saved.get("user_profile") or request.get("user_profile") or {}
+            ),
+            requested_resume_mission_id=request.get("resume_mission_id"),
+            persistent_constraints=request.get("persistent_constraints", ()),
+            authorized_permissions=request.get("authorized_permissions", ()),
         )
-        pending_context = (
-            PendingDialogueContext.from_dict(stored_pending_dialogue)
-            if isinstance(stored_pending_dialogue, dict)
-            else None
-        )
-        pending_match = self.cdm.match_pending_response(
-            message, pending_context, independent_intent
-        )
-        self.last_pending_dialogue_match = pending_match.to_dict()
-        pending_dialogue = (
-            stored_pending_dialogue
-            if pending_match.match_status is PendingDialogueMatchStatus.VALID_CONTINUATION
-            else None
-        )
-        resume_mission_id = request.get("resume_mission_id") or (
-            saved.get("mission_id") if pending_dialogue is not None else None
-        )
+        self.last_pending_dialogue_match = conversation_turn.pending_match.to_dict()
+        self.last_conversation_authority = conversation_turn.to_dict()
+        pending_match = conversation_turn.pending_match
+        pending_dialogue = conversation_turn.active_pending_dialogue
+        resume_mission_id = conversation_turn.resume_mission_id
         mission_id = str(resume_mission_id or uuid4())
-
-        # IUE Analysis
-        session_ctx_iue = {
-            "conversation_context": conversation_context,
-            "pending_dialogue": pending_dialogue,
-            "user_profile": saved.get("user_profile") or request.get("user_profile") or {},
-            "project_id": project_id,
-        }
-        structured_intent = (
-            self.iue.analyze(message, session_context=session_ctx_iue)
-            if pending_dialogue is not None
-            else independent_intent
-        )
+        structured_intent = conversation_turn.structured_intent
 
         context: dict[str, Any] = {
             "session_id": session_id,
             "project_id": project_id,
-            "mission_id": mission_id,
+            # A generated compatibility dialogue ID is not a Mission identity.
+            # Only an explicitly authorized resume may enter Kernel context.
+            "mission_id": resume_mission_id,
             "interface": "windows_product_alpha",
             "correlation_id": correlation_id,
             "conversation_context": conversation_context,
@@ -357,20 +340,17 @@ class ProductBridge:
             "resume_mission_id": resume_mission_id,
             "flow_event": self._flow_event,
         }
-        capability_decision = await self.components.cognitive_capability_runtime.analyze(
-            message,
-            structured_intent=structured_intent,
-            ame_context={"conversation_context": conversation_context},
-            project_context={
-                "project_id": project_id,
-                "pending_dialogue": pending_dialogue,
-                "pending_dialogue_match": self.last_pending_dialogue_match,
-            },
-            persistent_constraints=request.get("persistent_constraints", ()),
-            authorized_permissions=request.get("authorized_permissions", ()),
-        )
+        capability_decision = conversation_turn.capability_decision
         self.last_capability_analysis = capability_decision.to_dict()
         context["capability_analysis"] = self.last_capability_analysis
+
+        def persist_turn(record: dict[str, Any]) -> None:
+            merged = self.conversation_service.merge_session_update(
+                saved,
+                record,
+                conversation_turn,
+            )
+            self._save_session(session_id, merged)
 
         # Terminal and Mission decisions are authoritative over every
         # compatibility path, including pending dialogue and explicit fallback.
@@ -441,7 +421,7 @@ class ProductBridge:
                 "active_mission_id": None,
                 "updated_at": now,
             }
-            self._save_session(session_id, {
+            persist_turn({
                 "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
                 "mission_id": None, "conversation_state": conv_state,
                 "history": full_history, "updated_at": now,
@@ -473,7 +453,7 @@ class ProductBridge:
                 "active_mission_id": None,
                 "updated_at": now,
             }
-            self._save_session(session_id, {
+            persist_turn({
                 "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
                 "mission_id": None, "conversation_state": conv_state,
                 "history": full_history, "updated_at": now,
@@ -485,10 +465,10 @@ class ProductBridge:
             }
 
         # 4. Multi-Turn Field Filling for Finance & App domains
-        conv_state_prev = saved.get("conversation_state") or {}
-        known_kc = dict(conv_state_prev.get("known_context")) if isinstance(conv_state_prev.get("known_context"), dict) else {}
-        if not known_kc and isinstance(pending_dialogue, dict) and isinstance(pending_dialogue.get("known_context"), dict):
-            known_kc = dict(pending_dialogue.get("known_context"))
+        known_kc = self.conversation_service.compatibility_known_context(
+            saved,
+            conversation_turn,
+        )
 
         # A valid pending answer mutates exactly the typed target field. All other
         # utterances are analyzed independently and cannot leak marker collisions
@@ -591,6 +571,7 @@ class ProductBridge:
                     "Entendi: você quer criar uma planilha para controlar horas extras. "
                     "Vou tratar isso como uma planilha, não como um aplicativo."
                 ),
+                persist_session=persist_turn,
             )
 
         if is_fin and lower != "investir":
@@ -669,7 +650,7 @@ class ProductBridge:
                     if next_field == "recurrence" and known_kc.get("amount") == 23500.0
                     else "waiting_context"
                 )
-                self._save_session(session_id, {
+                persist_turn({
                     "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
                     "mission_id": mission_id, "mission_status": persisted_status,
                     "pending_dialogue": new_pending, "conversation_state": conv_state,
@@ -727,7 +708,7 @@ Estratégia completa registrada no histórico para execução."""
                     "updated_at": now,
                 }
                 self._record_local_flow(structured_intent, mission_id)
-                self._save_session(session_id, {
+                persist_turn({
                     "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
                     "mission_id": mission_id, "mission_status": "completed", "pending_dialogue": None,
                     "conversation_state": conv_state, "history": full_history, "updated_at": now,
@@ -784,7 +765,7 @@ Estratégia completa registrada no histórico para execução."""
                     "asked_at": now,
                     "correlation_id": correlation_id,
                 }
-                self._save_session(session_id, {
+                persist_turn({
                     "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
                     "mission_id": mission_id, "mission_status": "waiting_context", "pending_dialogue": new_pending,
                     "conversation_state": conv_state, "history": full_history, "updated_at": now,
@@ -829,7 +810,7 @@ Estratégia completa registrada no histórico para execução."""
                     "active_mission_id": mission_id,
                     "updated_at": now,
                 }
-                self._save_session(session_id, {
+                persist_turn({
                     "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
                     "mission_id": mission_id, "mission_status": "completed", "pending_dialogue": None,
                     "conversation_state": conv_state, "history": full_history, "updated_at": now,
@@ -855,7 +836,9 @@ Estratégia completa registrada no histórico para execução."""
             self.components.provider_manager.configure_fallback(False)
             await self._pause_failed_mission(context)
             response = self._provider_failure(
-                exc, session_id, message, history, context, failed_provider)
+                exc, session_id, message, history, context, failed_provider,
+                persist_session=persist_turn,
+            )
             self._flow_event("request_failed", stage=self.last_trace["lastCompletedStage"],
                              result="error", error=response["error_code"],
                              duration_ms=round((time.perf_counter() - started) * 1000, 2))
@@ -892,7 +875,7 @@ Estratégia completa registrada no histórico para execução."""
             "updated_at": now,
         }
 
-        self._save_session(session_id, {
+        persist_turn({
             "schema_version": "1.2", "session_id": session_id, "project_id": project_id,
             "mission_id": context.get("mission_id"), "mission_status": "completed",
             "pending_dialogue": None, "conversation_state": conv_state,
@@ -1198,6 +1181,7 @@ Estratégia completa registrada no histórico para execução."""
         structured_intent: Any,
         domain: str,
         text_out: str,
+        persist_session: Any | None = None,
     ) -> dict[str, Any]:
         now = utc_iso()
         self._record_local_flow(structured_intent, mission_id)
@@ -1219,7 +1203,7 @@ Estratégia completa registrada no histórico para execução."""
             "active_mission_id": mission_id,
             "updated_at": now,
         }
-        self._save_session(session_id, {
+        record = {
             "schema_version": "1.2",
             "session_id": session_id,
             "project_id": project_id,
@@ -1229,7 +1213,11 @@ Estratégia completa registrada no histórico para execução."""
             "conversation_state": state,
             "history": full_history,
             "updated_at": now,
-        })
+        }
+        if callable(persist_session):
+            persist_session(record)
+        else:
+            self._save_session(session_id, record)
         self._flow_event("response_persisted", mission_id=mission_id,
                          result="success")
         return {
@@ -1245,9 +1233,17 @@ Estratégia completa registrada no histórico para execução."""
             "trace": self.last_trace,
         }
 
-    def _provider_failure(self, exc: Exception, session_id: str, message: str,
-                          history: list[dict[str, Any]], context: dict[str, Any],
-                          provider: str | None) -> dict[str, Any]:
+    def _provider_failure(
+        self,
+        exc: Exception,
+        session_id: str,
+        message: str,
+        history: list[dict[str, Any]],
+        context: dict[str, Any],
+        provider: str | None,
+        *,
+        persist_session: Any | None = None,
+    ) -> dict[str, Any]:
         name = type(exc).__name__
         provider_code = getattr(exc, "code", "")
 
@@ -1259,13 +1255,17 @@ Estratégia completa registrada no histórico para execução."""
             tb_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
             self.last_trace["internalError"] = tb_str
             self.last_trace["errorType"] = name
-            self._save_session(session_id, {
+            record = {
                 "schema_version": "1.2", "session_id": session_id,
                 "mission_id": context.get("mission_id"), "mission_status": "failed_internal",
                 "intent": context.get("intent_model", {"text": message}),
                 "response": {"error_code": code, "error_type": name},
                 "history": history, "updated_at": utc_iso(),
-            })
+            }
+            if callable(persist_session):
+                persist_session(record)
+            else:
+                self._save_session(session_id, record)
             return {"ok": False, "error": text, "error_code": code,
                     "provider": None, "provider_status": status,
                     "mission_id": context.get("mission_id")}
@@ -1282,13 +1282,17 @@ Estratégia completa registrada no histórico para execução."""
         else:
             text = "Não foi possível concluir esta Mission. Você pode tentar novamente."
             code, status = "provider_error", "error"
-        self._save_session(session_id, {
+        record = {
             "schema_version": "1.2", "session_id": session_id,
             "mission_id": context.get("mission_id"), "mission_status": "failed_recoverable",
             "intent": context.get("intent_model", {"text": message}),
             "response": {"error_code": code, "provider": provider},
             "history": history, "updated_at": utc_iso(),
-        })
+        }
+        if callable(persist_session):
+            persist_session(record)
+        else:
+            self._save_session(session_id, record)
         return {"ok": False, "error": text, "error_code": code,
                 "provider": provider, "provider_status": status,
                 "mission_id": context.get("mission_id")}

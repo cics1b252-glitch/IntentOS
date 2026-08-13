@@ -29,6 +29,8 @@ from intent_kernel.constitution import (
     ConstitutionPipeline,
     create_default_constitution,
 )
+from intent_kernel.cdm import CognitiveDialogueManager
+from intent_kernel.conversation import CognitiveConversationService
 from intent_kernel.contracts import CapabilityExecutor, ConstitutionEngine
 from intent_kernel.cognition import (
     CapabilityFirstResolver,
@@ -42,6 +44,7 @@ from intent_kernel.core_apps import (
     OEMStudioCoreApp,
 )
 from intent_kernel.kernel import Kernel
+from intent_kernel.iue import IntentUnderstandingEngine
 from intent_kernel.modules.core import CoreModule
 from intent_kernel.modules.fin import FinanceModule
 from intent_kernel.orchestration import (
@@ -90,6 +93,9 @@ class ApplicationComponents:
     knowledge_pipeline: Any
     resource_manager: RegistryResourceManager
     cognitive_capability_runtime: CognitiveCapabilityRuntime
+    iue: IntentUnderstandingEngine
+    cdm: CognitiveDialogueManager
+    conversation_service: CognitiveConversationService
     mission_runtime: MissionRuntime
     migration_telemetry: MigrationTelemetry
     bootstrap_mode: str = "canonical"
@@ -278,6 +284,13 @@ class KernelBuilder:
                 constitution=constitution_engine,
             ),
         )
+        iue = IntentUnderstandingEngine(pkb=getattr(kernel, "pkb", None))
+        cdm = CognitiveDialogueManager()
+        conversation_service = CognitiveConversationService(
+            iue=iue,
+            cdm=cdm,
+            capability_runtime=cognitive_capability_runtime,
+        )
         capability_execution_service = CapabilityExecutionService(
             mission_engine=mission_engine,
             constitution=constitution_engine,
@@ -310,6 +323,7 @@ class KernelBuilder:
                 "capability_registry": "canonical",
                 "resource_authority": "RRM",
                 "capability_resolution": "canonical_non_executing",
+                "conversation_authority": "CognitiveConversationService",
                 "agent_orchestrator": "canonical",
                 "provider_manager": tuple(providers.available),
                 "core_apps": tuple(app.app_id for app in core_apps),
@@ -344,6 +358,9 @@ class KernelBuilder:
             knowledge_pipeline=kernel.knowledge.pipeline,
             resource_manager=resource_manager,
             cognitive_capability_runtime=cognitive_capability_runtime,
+            iue=iue,
+            cdm=cdm,
+            conversation_service=conversation_service,
             mission_runtime=mission_runtime,
             migration_telemetry=migration_telemetry,
         )

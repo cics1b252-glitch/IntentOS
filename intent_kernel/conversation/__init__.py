@@ -12,6 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from intent_kernel.conversation.runtime import (
+    CognitiveConversationService,
+    ConversationAuthorityDecision,
+    ConversationTurnRelation,
+)
+
 
 @dataclass
 class ConversationTurn:
@@ -32,7 +38,10 @@ class ConversationContext:
 
 
 class ConversationOrchestrator:
-    """Transforms Kernel execution into natural conversation.
+    """Legacy standalone compatibility conversation helper.
+
+    This class is not composed into the ProductBridge runtime. New product
+    conversation decisions belong to :class:`CognitiveConversationService`.
 
     Rules:
     1. User never sees technical messages
@@ -40,6 +49,8 @@ class ConversationOrchestrator:
     3. Each user response feeds the Knowledge Core
     4. Pipeline is completely invisible
     """
+
+    authority_classification = "COMPATIBILITY_ONLY"
 
     def __init__(self, kernel: Any = None):
         self.kernel = kernel

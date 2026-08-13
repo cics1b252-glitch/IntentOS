@@ -21,6 +21,8 @@ class ProviderManager:
         self._last_used: str | None = None
         self._last_attempted: str | None = None
         self._observer = None
+        self._resource_projection = None
+        self._selection_authority = None
 
     def set_observer(self, observer) -> None:
         """Attach a non-sensitive execution observer owned by the interface."""
@@ -36,10 +38,20 @@ class ProviderManager:
         self._last_attempted = None
 
     def register(self, name: str, provider: Provider) -> None:
-        """Register a provider."""
+        """Register an invocation binding; RRM still decides availability."""
         self._providers[name] = provider
         if self._default is None:
             self._default = name
+        if self._resource_projection is not None:
+            self._resource_projection(provider)
+
+    def set_resource_projection(self, projection) -> None:
+        """Project future bindings into RRM without granting them eligibility."""
+        self._resource_projection = projection
+
+    def set_selection_authority(self, authority) -> None:
+        """Attach the RRM authority that must revalidate canonical selections."""
+        self._selection_authority = authority
 
     def get(self, name: str | None = None) -> Provider:
         """Get a provider by name, or the default."""
@@ -77,12 +89,28 @@ class ProviderManager:
     def last_attempted(self) -> str | None:
         return self._last_attempted
 
-    async def route(self, mode: Mode) -> Provider:
-        """Route to the best provider based on mode.
-
-        Sprint 0: always returns the default (MockProvider).
-        Sprint 1: QUICK→fast/cheap, ARCHITECT→powerful.
-        """
+    async def route(self, mode: Mode, selection=None) -> Provider | None:
+        """Bind an RRM selection; direct calls retain a compatibility default."""
+        if selection is not None:
+            provider_id = getattr(selection, "provider_id", None)
+            if provider_id is None and isinstance(selection, dict):
+                provider_id = selection.get("provider_id")
+            if provider_id is None:
+                return None
+            if (
+                self._selection_authority is None
+                or not await self._selection_authority.revalidate(selection)
+            ):
+                return None
+            fallback = getattr(selection, "fallback_provider_id", None)
+            if fallback is None and isinstance(selection, dict):
+                fallback = selection.get("fallback_provider_id")
+            return ManagedProvider(
+                self,
+                provider_id=str(provider_id),
+                fallback_provider_id=str(fallback) if fallback else None,
+            )
+        # Direct Kernel callers retain the characterized compatibility default.
         return self.get()
 
     @property
@@ -98,19 +126,27 @@ class ProviderManager:
 class ManagedProvider:
     """Dynamic Provider Port bound to the manager's selected default."""
 
-    def __init__(self, manager: ProviderManager):
+    def __init__(
+        self,
+        manager: ProviderManager,
+        *,
+        provider_id: str | None = None,
+        fallback_provider_id: str | None = None,
+    ):
         self._manager = manager
+        self._provider_id = provider_id
+        self._fallback_provider_id = fallback_provider_id
 
     @property
     def name(self) -> str:
-        return self._manager.get().name
+        return self._manager.get(self._provider_id).name
 
     @property
     def capabilities(self) -> set[str]:
-        return self._manager.get().capabilities
+        return self._manager.get(self._provider_id).capabilities
 
     async def execute(self, request: ProviderRequest) -> ProviderResponse:
-        primary = self._manager.get()
+        primary = self._manager.get(self._provider_id)
         self._manager._last_attempted = primary.name
         self._manager.observe("provider_request_started", provider=primary.name,
                               model=getattr(primary, "model", "unknown"))
@@ -123,10 +159,17 @@ class ManagedProvider:
         except Exception as exc:
             self._manager.observe("provider_response_received", provider=primary.name,
                                   status="error", error=type(exc).__name__)
-            fallback = self._manager.fallback
+            fallback = self._fallback_provider_id or self._manager.fallback
             if not fallback or fallback == primary.name:
                 raise
             alternate = self._manager.get(fallback)
+            if (
+                self._manager._selection_authority is not None
+                and not await self._manager._selection_authority.is_eligible(
+                    fallback, {"text_completion"}
+                )
+            ):
+                raise
             self._manager._last_attempted = alternate.name
             self._manager.observe("provider_request_started", provider=alternate.name,
                                   model=getattr(alternate, "model", "unknown"), fallback=True)
@@ -137,4 +180,4 @@ class ManagedProvider:
             return response
 
     async def health(self) -> bool:
-        return bool(await self._manager.get().health())
+        return bool(await self._manager.get(self._provider_id).health())

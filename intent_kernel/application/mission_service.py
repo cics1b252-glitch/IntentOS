@@ -90,7 +90,7 @@ class CanonicalMissionService:
             ToolAuthorizationDecisionState.ALLOW: MissionAuthorizationBoundary(
                 decision=decision,
                 lifecycle_status=None,
-                response_status="AUTHORIZATION_REQUIRED",
+                response_status="WAITING_CONFIRMATION",
                 execution_mode="MISSION",
                 text="A ferramenta está autorizada para o runtime controlado.",
             ),
@@ -114,7 +114,7 @@ class CanonicalMissionService:
             ToolAuthorizationDecisionState.REQUEST_CONFIRMATION: MissionAuthorizationBoundary(
                 decision=decision,
                 lifecycle_status=MissionStatus.WAITING_FOR_DECISION,
-                response_status="AUTHORIZATION_REQUIRED",
+                response_status="WAITING_CONFIRMATION",
                 execution_mode="MISSION",
                 text="A ferramenta está elegível, mas esta ação específica aguarda confirmação.",
                 next_actions=("Confirmar a ação específica",),

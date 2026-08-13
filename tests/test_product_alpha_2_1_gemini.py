@@ -135,7 +135,7 @@ def test_fallback_requires_explicit_authorization(monkeypatch, tmp_path):
 
     async def process(text, context):
         context["mission_id"] = "11111111-1111-4111-8111-111111111111"
-        if not bridge.components.provider_manager.fallback:
+        if not context["provider_selection"].fallback_provider_id:
             raise RuntimeError("primary failed")
         bridge.components.provider_manager._last_used = "alternate"
         return Result()

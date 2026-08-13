@@ -424,10 +424,10 @@ async def test_ambiguous_pending_answer_does_not_mutate_dialogue(bridge):
 @pytest.mark.parametrize(
     "gate_state,expected_status,runtime_calls,action_gate_calls,mission_status",
     [
-        (ToolAuthorizationDecisionState.ALLOW, "AUTHORIZATION_REQUIRED", 1, 1, MissionStatus.WAITING_FOR_DECISION),
+        (ToolAuthorizationDecisionState.ALLOW, "WAITING_CONFIRMATION", 1, 1, MissionStatus.WAITING_FOR_DECISION),
         (ToolAuthorizationDecisionState.DENY, "BLOCKED", 0, 0, MissionStatus.BLOCKED),
         (ToolAuthorizationDecisionState.REQUEST_PERMISSION, "AUTHORIZATION_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_PERMISSION),
-        (ToolAuthorizationDecisionState.REQUEST_CONFIRMATION, "AUTHORIZATION_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_DECISION),
+        (ToolAuthorizationDecisionState.REQUEST_CONFIRMATION, "WAITING_CONFIRMATION", 0, 0, MissionStatus.WAITING_FOR_DECISION),
         (ToolAuthorizationDecisionState.WAIT_TOOL, "EXTERNAL_RESOURCE_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_INFORMATION),
         (ToolAuthorizationDecisionState.RESELECT_TOOL, "EXTERNAL_RESOURCE_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_DECISION),
     ],

@@ -30,9 +30,7 @@ from intent_kernel.bcc import BootstrapCognitiveCortex
 from intent_kernel.modules.fin.module import _extract_brl_amount
 from intent_kernel.cognition import CognitiveExecutionMode
 from intent_kernel.response import (
-    CognitiveResponse,
     CognitiveResponseAssembler,
-    ResponseStatus,
 )
 from intent_kernel.runtime.models import ActionContract, RuntimeNode, SideEffectLevel
 from intent_kernel.tools.models import (
@@ -207,9 +205,20 @@ class ProductBridge:
                 "app_version": APP_VERSION,
             }
         if action == "providers":
+            eligible = [
+                item.provider_id
+                for item in self.components.resource_manager.list_providers(
+                    only_eligible=True
+                )
+            ]
             return {
                 "ok": True,
+                # Protocol compatibility: `available` historically means a
+                # registered binding, not execution eligibility.
                 "available": self.components.provider_manager.available,
+                "eligible": eligible,
+                "registered_bindings": self.components.provider_manager.available,
+                "availability_authority": "RRM",
                 "default": getattr(self.components.provider_manager, "default", "gemini"),
                 "last_used": getattr(self.components.provider_manager, "last_used", None),
             }
@@ -834,14 +843,27 @@ Estratégia completa registrada no histórico para execução."""
         self.components.provider_manager.reset_execution_tracking()
         fallback = str(request.get("fallback_provider", ""))
         allow_fallback = request.get("allow_fallback") is True
-        self.components.provider_manager.configure_fallback(
-            allow_fallback, fallback if allow_fallback and fallback else None)
+        provider_selection = await self.components.provider_authority.select(
+            required_capabilities=("text_completion",),
+            preferred_provider_id=(
+                str(request.get("provider"))
+                if request.get("provider")
+                else default_provider
+            ),
+            fallback_provider_id=fallback or None,
+            allow_fallback=allow_fallback,
+        )
+        context["provider_selection"] = provider_selection
+        context["provider_selection_authority"] = "RRM"
 
         try:
             result = await self.kernel.process(message, context)
         except Exception as exc:
-            failed_provider = self.components.provider_manager.last_attempted or default_provider
-            self.components.provider_manager.configure_fallback(False)
+            failed_provider = (
+                self.components.provider_manager.last_attempted
+                or provider_selection.provider_id
+                or default_provider
+            )
             await self._pause_failed_mission(context)
             response = self._provider_failure(
                 exc, session_id, message, history, context, failed_provider,
@@ -854,8 +876,10 @@ Estratégia completa registrada no histórico para execução."""
             return response
 
         used_provider = self.components.provider_manager.last_used
-        used_fallback = bool(used_provider and used_provider != default_provider)
-        self.components.provider_manager.configure_fallback(False)
+        used_fallback = bool(
+            used_provider
+            and used_provider == provider_selection.fallback_provider_id
+        )
         response_provider = used_provider or "local"
         if response_provider == "mock":
             result.text = (
@@ -899,6 +923,10 @@ Estratégia completa registrada no histórico para execução."""
                 "fallback_used": used_fallback, "provider_called": bool(used_provider),
                 "provider_explanation": None if used_provider else
                     "A capability Atlas respondeu localmente; o Gemini não foi necessário.",
+                "provider_selection": provider_selection.to_dict(),
+                "resource_provenance": (
+                    [f"provider:{used_provider}"] if used_provider else ["RRM"]
+                ),
                 "status": "concluído", "domain": result.domain.value,
                 "mission_id": context.get("mission_id"),
                 "intent": context.get("intent_model"),
@@ -1063,7 +1091,7 @@ Estratégia completa registrada no histórico para execução."""
         return {
             "ok": True,
             "text": "A ação foi planejada e aguarda confirmação antes da execução simulada.",
-            "status": "AUTHORIZATION_REQUIRED",
+            "status": "WAITING_CONFIRMATION",
             "execution_mode": "MISSION",
             "epistemic_status": "fact",
             "confidence": 1.0,
@@ -1116,28 +1144,13 @@ Estratégia completa registrada no histórico para execução."""
                     "canonical_mission": False,
                     "completion_authority": None,
                 }
-        raw_status = str(response.get("status", "COMPLETED")).upper()
-        aliases = {"CONCLUÍDO": "COMPLETED", "CONCLUIDO": "COMPLETED"}
-        raw_status = aliases.get(raw_status, raw_status)
-        try:
-            status = ResponseStatus(raw_status)
-        except ValueError:
-            status = ResponseStatus.FAILED if not response.get("ok", True) else ResponseStatus.COMPLETED
-        canonical = CognitiveResponse(
-            text=str(response.get("text") or response.get("error") or ""),
-            status=status,
-            execution_mode=str(response.get("execution_mode") or self.last_capability_analysis and self.last_capability_analysis.get("mode") or "CONVERSATION"),
-            epistemic_status=str(response.get("epistemic_status", "conclusion")),
-            confidence=float(response.get("confidence", 1.0 if status is not ResponseStatus.COMPLETED else 0.5)),
-            provider=response.get("provider"),
-            provider_called=bool(response.get("provider_called", False)),
-            resource_provenance=list(response.get("resource_provenance", [])),
-            mission_id=response.get("mission_id"),
-            verification_evidence=list(response.get("verification_evidence", [])),
-            limitations=list(response.get("limitations", [])),
-            missing_capabilities=list(response.get("missing_capabilities", [])),
-            authorization_requirements=list(response.get("authorization_requirements", [])),
-            next_actions=list(response.get("next_actions", [])),
+        canonical = self.response_assembler.from_result(
+            response,
+            default_execution_mode=str(
+                self.last_capability_analysis
+                and self.last_capability_analysis.get("mode")
+                or "CONVERSATION"
+            ),
         )
         canonical = await self.response_assembler.assemble(
             canonical,
@@ -1153,6 +1166,7 @@ Estratégia completa registrada no histórico para execução."""
         normalized["provider"] = canonical.provider
         normalized["provider_called"] = canonical.provider_called
         normalized["mission_id"] = canonical.mission_id
+        normalized["response_authority"] = "CognitiveResponseAssembler"
         return normalized
 
     def _record_local_flow(self, structured_intent: Any, mission_id: str) -> None:

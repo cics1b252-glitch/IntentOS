@@ -250,7 +250,10 @@ class Kernel:
             flow_event("intent_validated", result="success")
 
         # 3. Get provider for pipeline
-        provider = await self.providers.route(parsed.mode)
+        provider = await self.providers.route(
+            parsed.mode,
+            selection=runtime_context.get("provider_selection"),
+        )
 
         session_id = str((context or {}).get("session_id") or new_id())
         canonical_result = await self._execute_canonical_route(

@@ -54,7 +54,12 @@ from intent_kernel.orchestration import (
     CapabilityExecutionService,
 )
 from intent_kernel.pkb import JsonFileStore
-from intent_kernel.providers import ManagedProvider, MockProvider, ProviderManager
+from intent_kernel.providers import (
+    CanonicalProviderAuthority,
+    ManagedProvider,
+    MockProvider,
+    ProviderManager,
+)
 from intent_kernel.router import ModuleRouter
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.service import RegistryResourceManager
@@ -94,6 +99,7 @@ class ApplicationComponents:
     mission_engine: MissionEngine
     mission_service: CanonicalMissionService
     provider_manager: ProviderManager
+    provider_authority: CanonicalProviderAuthority
     knowledge_pipeline: Any
     resource_manager: RegistryResourceManager
     cognitive_capability_runtime: CognitiveCapabilityRuntime
@@ -261,6 +267,7 @@ class KernelBuilder:
         capability_registry = CanonicalCapabilityRegistry()
         resource_manager = RegistryResourceManager(populate_defaults=False)
         projection = RuntimeResourceProjection(resource_manager)
+        providers.set_resource_projection(projection.project_provider)
         for app in core_apps:
             capability_registry.register_core_app(app)
             projection.project_core_app(app)
@@ -271,6 +278,9 @@ class KernelBuilder:
             provider = providers.get(provider_name)
             capability_registry.register_provider(provider)
             projection.project_provider(provider)
+        provider_authority = CanonicalProviderAuthority(
+            resource_manager, providers
+        )
         for capability_id in (
             "memory.write", "memory.retrieve", "productivity.spreadsheet"
         ):
@@ -343,6 +353,7 @@ class KernelBuilder:
                 "tool_authorization_authority": "ToolAuthorizationGate",
                 "agent_orchestrator": "canonical",
                 "provider_manager": tuple(providers.available),
+                "provider_selection_authority": "RRM",
                 "core_apps": tuple(app.app_id for app in core_apps),
                 "knowledge_pipeline": "canonical",
                 "mission_store": type(mission_store).__name__,
@@ -373,6 +384,7 @@ class KernelBuilder:
             mission_engine=mission_engine,
             mission_service=mission_service,
             provider_manager=providers,
+            provider_authority=provider_authority,
             knowledge_pipeline=kernel.knowledge.pipeline,
             resource_manager=resource_manager,
             cognitive_capability_runtime=cognitive_capability_runtime,

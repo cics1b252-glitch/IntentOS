@@ -68,17 +68,17 @@
         "context": "AUTHORITY_CONFLICT",
         "memory": "AUTHORITY_CONFLICT",
         "capability_selection": "AUTHORITY_CONFLICT",
-        "provider_selection": "AUTHORITY_CONFLICT",
+        "provider_selection": "PROJECTION",
         "mission_lifecycle": "AUTHORITY_CONFLICT",
         "authorization": "AUTHORITY_CONFLICT",
         "execution": "AUTHORITY_CONFLICT",
-        "response_construction": "AUTHORITY_CONFLICT",
+        "response_construction": "COMPATIBILITY_ONLY",
         "persistence": "AUTHORITY_CONFLICT"
       },
       "evidence": [
         "ProductBridge._chat orders IUE, CDM, cognitive capability analysis, memory, BCC, compatibility parsing, Kernel fallback and session writes.",
         "ProductBridge._run_controlled_mission constructs the tool candidate, ToolAuthorizationGate, RuntimeNode and MissionRuntime invocation.",
-        "ProductBridge._govern_response creates the CognitiveResponse before final assembly."
+        "ProductBridge._govern_response delegates status, epistemic defaults, confidence and provenance normalization to CognitiveResponseAssembler.from_result."
       ],
       "intended_disposition": "INTERFACE_AND_SESSION_TRANSPORT_ADAPTER"
     },
@@ -91,13 +91,13 @@
         "interpretation": "COMPATIBILITY_ONLY",
         "memory": "AUTHORITY_CONFLICT",
         "capability_selection": "AUTHORITY_CONFLICT",
-        "provider_selection": "AUTHORITY_CONFLICT",
+        "provider_selection": "EXECUTION_BINDING",
         "mission_lifecycle": "AUTHORITY_CONFLICT",
         "execution": "AUTHORITY_CONFLICT",
         "response_construction": "COMPATIBILITY_ONLY"
       },
       "evidence": [
-        "Kernel.process parses with IntentEngine, calls ProviderManager.route, invokes _execute_canonical_route and PipelineDAG, then ingests PKB events.",
+        "Kernel.process parses with IntentEngine, consumes an RRM-owned provider selection, invokes _execute_canonical_route and PipelineDAG, then ingests PKB events.",
         "Kernel._execute_canonical_route consumes capability_analysis but calls MissionEngine.complete directly."
       ],
       "intended_disposition": "CANONICAL_HOST_THAT_CONSUMES_DECISIONS_WITHOUT_REDECIDING"
@@ -323,13 +323,13 @@
       "component": "ProviderManager",
       "implementation": ["intent_kernel/providers/manager.py:ProviderManager", "intent_kernel/providers/manager.py:ManagedProvider"],
       "reachability": "ACTIVE_KERNEL_AND_CORE_APP_BINDING",
-      "primary_classification": "AUTHORITY_CONFLICT",
+      "primary_classification": "EXECUTION_BINDING",
       "authorities": {
-        "resource_truth": "AUTHORITY_CONFLICT",
-        "provider_selection": "AUTHORITY_CONFLICT",
+        "resource_truth": "PROJECTION",
+        "provider_selection": "EXECUTION_BINDING",
         "execution": "EXECUTION_BINDING"
       },
-      "evidence": ["ProviderManager owns registered/default/fallback providers; route currently returns the default without consulting RRM or the selected capability composition."],
+      "evidence": ["Canonical ProductBridge/Kernel execution supplies an immutable CanonicalProviderAuthority selection; ProviderManager revalidates it against RRM immediately before returning an invocation binding. Direct Kernel callers retain an explicit compatibility default."],
       "intended_disposition": "SELECTED_PROVIDER_INVOCATION_BINDING_ONLY"
     },
     {
@@ -518,7 +518,7 @@
       "authorities": {
         "response_construction": "CANONICAL_AUTHORITY"
       },
-      "evidence": ["ProductBridge.dispatch sends every chat response through _govern_response and assembler response.output evaluation."],
+      "evidence": ["ProductBridge.dispatch sends every chat response through assembler-owned from_result normalization and response.output evaluation."],
       "intended_disposition": "SOLE_SEMANTIC_RESPONSE_ENVELOPE_AND_FINAL_POLICY_AUTHORITY"
     },
     {
@@ -552,8 +552,8 @@
       "id": "AC-001",
       "dimension": "response_construction",
       "owners": ["ProductBridge", "BCC", "Kernel", "PipelineDAG", "CognitiveResponseAssembler"],
-      "finding": "The assembler governs the final envelope, but upstream components independently author semantic text, status, confidence, provenance and Mission meaning.",
-      "target_checkpoint": "11.2 and 11.6"
+      "finding": "Services retain content and evidence ownership; the assembler now normalizes status, epistemic/confidence defaults and provider provenance before governance.",
+      "target_checkpoint": "11.6 implemented"
     },
     {
       "id": "AC-002",
@@ -580,8 +580,8 @@
       "id": "AC-005",
       "dimension": "provider_selection",
       "owners": ["CapabilityFirstResolver", "ProviderManager", "CanonicalCapabilityRegistry", "COR", "ProductBridge"],
-      "finding": "The cognitive resolver can identify a provider strategy while Kernel and ProductBridge still use ProviderManager default/fallback selection.",
-      "target_checkpoint": "11.4 and 11.6"
+      "finding": "CanonicalProviderAuthority selects and revalidates eligible RRM providers; ProviderManager is an invocation binding on the product path.",
+      "target_checkpoint": "11.6 implemented"
     },
     {
       "id": "AC-006",
@@ -658,10 +658,10 @@
     },
     {
       "current_responsibility": "Provider default and fallback routing",
-      "canonical_owner": "Capability resolver over RRM; ProviderManager invocation binding",
-      "current_authority": "ProductBridge configures fallback and Kernel routes by legacy Mode",
+      "canonical_owner": "CanonicalProviderAuthority over RRM; ProviderManager invocation binding",
+      "current_authority": "ProductBridge supplies preferences; RRM authority returns the exact primary/fallback selection consumed by Kernel",
       "target_authority": "Resolver selects eligible provider; manager invokes exact selection",
-      "migration_status": "NOT_STARTED",
+      "migration_status": "IMPLEMENTED_PRODUCT_PATH",
       "required_parity_test": "Zero provider, unhealthy provider, explicit fallback, provenance and no fabricated success"
     },
     {
@@ -683,9 +683,9 @@
     {
       "current_responsibility": "Response semantic meaning",
       "canonical_owner": "Conversation or Mission runtime plus CognitiveResponseAssembler",
-      "current_authority": "ProductBridge authors text, status, mode, confidence, provenance and Mission meaning",
+      "current_authority": "Services author content/evidence; CognitiveResponseAssembler normalizes status, epistemic defaults, confidence and provenance",
       "target_authority": "Canonical services return CognitiveResponse; bridge serializes only",
-      "migration_status": "NOT_STARTED",
+      "migration_status": "IMPLEMENTED_PRODUCT_ENVELOPE",
       "required_parity_test": "All response sources share truthful status, epistemic state, provenance and limitations"
     },
     {
@@ -712,7 +712,7 @@
     "capability_discovery": "CapabilityRequirementDiscovery",
     "resource_truth": "RRM",
     "capability_selection": "CapabilityFirstResolver",
-    "provider_selection": "Resolver over RRM",
+    "provider_selection": "CanonicalProviderAuthority over RRM",
     "agent_selection": "Resolver over RRM",
     "mission_lifecycle": "MissionEngine",
     "authorization": "ToolAuthorizationGate then ActionGate",
@@ -726,7 +726,7 @@
     "11.3": "Make verified evidence the only path from runtime results to MissionEngine completion.",
     "11.4": "Require RRM eligibility at selection and immediately before execution; registries become bindings.",
     "11.5": "Implemented MemoryAuthorityContract and scoped supersession without destructive migration.",
-    "11.6": "Make CognitiveResponse the semantic result of every major path and ProviderManager invocation-only.",
+    "11.6": "Implemented canonical response normalization and RRM-selected ProviderManager invocation on the product path.",
     "11.7": "Make every remaining compatibility use explicit, observable and subordinate."
   }
 }

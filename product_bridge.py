@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from intent_kernel.application import ApplicationFactory, KernelBuilder
+from intent_kernel.application.memory_service import CanonicalMemoryService
 from intent_kernel.contracts import MissionContext, MissionId, MissionStatus
 from intent_kernel.cpe import CognitivePlanningEngine
 from intent_kernel.cor import CapabilityOrchestrator
@@ -22,9 +23,6 @@ from intent_kernel.ecc import ExecutiveCognitiveController
 from intent_kernel.time_utils import utc_iso
 from intent_kernel.ame import (
     AdaptiveMemoryEngine,
-    MemoryCandidate,
-    MemoryQuery,
-    ContextAssembler,
     LocalKnowledgeObjectRepository,
 )
 from intent_kernel.persistence import JsonFilePersistenceEngine
@@ -147,6 +145,7 @@ class ProductBridge:
         persistence_engine = JsonFilePersistenceEngine(file_path=str(ame_storage / "ame_store.json"))
         self.ame_repo = LocalKnowledgeObjectRepository(persistence_engine=persistence_engine)
         self.ame = AdaptiveMemoryEngine(repository=self.ame_repo)
+        self.memory_service = CanonicalMemoryService(self.ame)
         self.bcc = BootstrapCognitiveCortex(ame=self.ame)
         self.response_assembler = CognitiveResponseAssembler(
             self.components.constitution_engine
@@ -387,14 +386,11 @@ class ProductBridge:
                     "status": "BLOCKED", "execution_mode": "BLOCKED",
                     "provider": None, "provider_called": False, "mission_id": None,
                 }
-            candidate = MemoryCandidate(
-                proposed_content=memory_fact,
-                reason_to_remember=f"Memória informada no projeto {project_id}",
-                source="user_chat",
+            await self.memory_service.remember(
+                memory_fact,
                 project_id=project_id,
-                proposed_importance=0.9,
+                authority_key=self.memory_service.authority_key(memory_fact),
             )
-            await self.ame.process_candidate(candidate)
 
         # 2. Check Memory Queries ("como prefiro...", "qual tecnologia...", "qual é o meu objetivo...")
         is_memory_query = any(k in lower for k in ["como prefiro", "qual tecnologia", "qual é o meu objetivo", "qual meu objetivo", "o que sabemos sobre", "qual o projeto", "qual linguagem"])
@@ -408,7 +404,7 @@ class ProductBridge:
                     "status": "BLOCKED", "execution_mode": "BLOCKED",
                     "provider": None, "provider_called": False, "mission_id": None,
                 }
-            ret = await self.ame.retrieve_memory(MemoryQuery(query_text=message, project_id=project_id))
+            ret = await self.memory_service.recall(message, project_id=project_id)
             now = utc_iso()
             if ret.objects:
                 facts = [f"- {obj.content}" for obj in ret.objects]

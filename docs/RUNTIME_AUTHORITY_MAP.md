@@ -136,7 +136,7 @@ The detailed evidence and per-dimension classifications are in the JSON map.
 | ProductBridge vs conversation runtime | `_chat` owns memory query detection, BCC routing, finance/app parsing, status/Mission ID and session writes | Non-Mission semantic meaning has no single owner | 11.2 |
 | Mission completion has four writers | `MissionRuntime`, `Kernel._execute_canonical_route`, `LegacyCapabilityExecutorAdapter`, and ProductBridge session records | “completed” can mean verified runtime completion, direct lifecycle completion, or only a local response | 11.3 |
 | RRM vs binding registries | RRM is now enforced by `CanonicalResourceBindingAuthority`; invocation registries retain callable objects only | Registration, configuration, and executor health cannot upgrade RRM-unavailable resources | 11.4 implemented; provider lifecycle convergence remains 11.6 |
-| AME vs PKB vs session context | ProductBridge writes AME and session JSON; Kernel ingests PKB events | Durable/current fact ownership and supersession are not reconciled | 11.5 |
+| AME vs PKB vs session context | `CanonicalMemoryService` exposes AME/KOM as durable authority; PKB is curation/projection and session `known_context` is transient | Corrections use scoped authority keys, preserve history, and do not create a parallel PKB current truth | 11.5 implemented |
 | CognitiveResponseAssembler vs upstream authors | ProductBridge/BCC/Kernel/modules/providers construct text/status/provenance before assembly | Envelope is governed, but semantic response authority is distributed | 11.6 |
 | COR RegistryCatalog vs RRM | ProductBridge ECC/COR uses `RegistryCatalog(populate_defaults=True)` | Diagnostic plans can describe agents/providers that are not RRM runtime truth | 11.3/11.4 |
 | Core App Domain defaults | `core_apps.router.CapabilityRouter._DOMAIN_DEFAULTS` remains callable when capability is omitted | A future caller could reintroduce Domain-controlled selection | 11.4/11.7 |
@@ -191,8 +191,9 @@ The detailed evidence and per-dimension classifications are in the JSON map.
   completion evidence.
 - **11.4 must make RRM revalidation mandatory at execution time.** Registry
   membership or a configured provider must never imply eligibility.
-- **11.5 must define reconciliation before moving data.** No destructive memory
-  migration is justified by this map.
+- **11.5 defines reconciliation without moving data.** `MemoryAuthorityContract`
+  declares AME/KOM durable ownership, PKB curation, transient session projection,
+  and compatibility read-through; no destructive migration was performed.
 - Compatibility may remain only when it is explicit, observable, governed, and
   subordinate to terminal cognitive decisions.
 

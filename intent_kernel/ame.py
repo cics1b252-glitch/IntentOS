@@ -414,7 +414,7 @@ class MemoryDecisionEngine:
 
     # Words indicating explicit user correction
     CORRECTION_PATTERNS = [
-        re.compile(r"\b(corrigindo|correção|na verdade|mudei de ideia|correction|actually|instead|mudei para)\b", re.IGNORECASE)
+        re.compile(r"\b(corrigindo|correção|na verdade|agora prefiro|mudei de ideia|correction|actually|instead|mudei para)\b", re.IGNORECASE)
     ]
 
     # Words indicating explicit preference
@@ -484,7 +484,13 @@ class MemoryDecisionEngine:
         if is_correction and existing_objects:
             # Find closest related active memory in project
             for existing in existing_objects:
-                if existing.status == KnowledgeState.ACTIVE and existing.project_id == candidate.project_id:
+                same_authority_key = (
+                    existing.metadata.get("authority_key")
+                    == candidate.metadata.get("authority_key")
+                )
+                if (existing.status == KnowledgeState.ACTIVE
+                        and existing.project_id == candidate.project_id
+                        and same_authority_key):
                     # Check if candidate contradicts or updates existing
                     # Example: existing "React", candidate "Flutter"
                     return (
@@ -670,10 +676,14 @@ class AdaptiveMemoryEngine:
                     project_id=candidate.project_id,
                     source=candidate.source,
                     provenance=candidate.provenance,
+                    sensitivity=candidate.sensitivity,
                     confidence=candidate.confidence,
                     importance=0.95,  # High importance for user corrections
                     status=KnowledgeState.ACTIVE,
                     retention_policy=RetentionPolicy.LONG_TERM,
+                    version=target.version + 1,
+                    supersedes=target.object_id,
+                    metadata=dict(candidate.metadata),
                 )
                 ok = await self._repo.supersede(target.object_id, new_ko)
                 if not ok:
@@ -693,11 +703,13 @@ class AdaptiveMemoryEngine:
                     project_id=candidate.project_id,
                     source=candidate.source,
                     provenance=candidate.provenance,
+                    sensitivity=candidate.sensitivity,
                     confidence=candidate.confidence,
                     importance=0.4,
                     status=KnowledgeState.ACTIVE,
                     valid_until=valid_until_str,
                     retention_policy=RetentionPolicy.SHORT_TERM,
+                    metadata=dict(candidate.metadata),
                 )
                 ok = await self._repo.save(new_ko)
                 if not ok:
@@ -721,10 +733,12 @@ class AdaptiveMemoryEngine:
                 project_id=candidate.project_id,
                 source=candidate.source,
                 provenance=candidate.provenance,
+                sensitivity=candidate.sensitivity,
                 confidence=candidate.confidence,
                 importance=importance,
                 status=KnowledgeState.ACTIVE,
                 retention_policy=decision.retention,
+                metadata=dict(candidate.metadata),
             )
             ok = await self._repo.save(new_ko)
             if not ok:

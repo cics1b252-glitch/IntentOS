@@ -15,6 +15,10 @@ from intent_kernel.application.mission_service import (
     CanonicalMissionService,
     MissionAuthorizationBoundary,
 )
+from intent_kernel.application.memory_service import (
+    CanonicalMemoryService,
+    MemoryAuthorityContract,
+)
 
 __all__ = [
     "ApplicationComponents",
@@ -26,4 +30,6 @@ __all__ = [
     "CanonicalMissionService",
     "MissionAuthorizationBoundary",
     "MigrationTelemetry",
+    "CanonicalMemoryService",
+    "MemoryAuthorityContract",
 ]

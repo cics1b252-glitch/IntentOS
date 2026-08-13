@@ -154,7 +154,7 @@
         "persistence": "CANONICAL_AUTHORITY"
       },
       "evidence": [
-        "ProductBridge writes MemoryCandidate and queries AME by project_id.",
+        "ProductBridge delegates durable reads and writes to CanonicalMemoryService by project scope and authority key.",
         "AME repository persists KnowledgeObject state, supersession, sensitivity and temporal validity."
       ],
       "intended_disposition": "PERSISTENT_COGNITIVE_MEMORY_OWNER"
@@ -174,14 +174,14 @@
       "component": "ProductBridge Session Store",
       "implementation": ["product_bridge.py:ProductBridge._load_session", "product_bridge.py:ProductBridge._save_session"],
       "reachability": "ACTIVE_PRODUCT_PATH",
-      "primary_classification": "AUTHORITY_CONFLICT",
+      "primary_classification": "PERSISTENCE_ONLY",
       "authorities": {
-        "context": "AUTHORITY_CONFLICT",
-        "memory": "AUTHORITY_CONFLICT",
+        "context": "TRANSIENT_ONLY",
+        "memory": "TRANSIENT_ONLY",
         "mission_lifecycle": "AUTHORITY_CONFLICT",
         "persistence": "PERSISTENCE_ONLY"
       },
-      "evidence": ["Session JSON stores pending_dialogue, known_context, mission_id and mission_status and is read as input to later semantic decisions."],
+      "evidence": ["Session JSON stores derived pending_dialogue and known_context; Movement 11.5 proves these are not written to durable AME knowledge."],
       "intended_disposition": "TRANSIENT_DIALOGUE_AND_RUNTIME_PROJECTION_ONLY"
     },
     {
@@ -573,8 +573,8 @@
       "id": "AC-004",
       "dimension": "memory",
       "owners": ["AME", "PKB / KnowledgeManager", "ProductBridge Session Store"],
-      "finding": "Project facts and preferences may coexist in AME, PKB events and session known_context without one reconciliation/supersession contract.",
-      "target_checkpoint": "11.5"
+      "finding": "MemoryAuthorityContract assigns current durable truth to AME/KOM, PKB to curation/projection, and session known_context to transient dialogue only.",
+      "target_checkpoint": "11.5 implemented"
     },
     {
       "id": "AC-005",
@@ -725,7 +725,7 @@
     "11.2": "Move non-Mission semantic control behind one conversation service without copying a parallel pipeline.",
     "11.3": "Make verified evidence the only path from runtime results to MissionEngine completion.",
     "11.4": "Require RRM eligibility at selection and immediately before execution; registries become bindings.",
-    "11.5": "Define AME/PKB/session reconciliation before any non-destructive memory migration.",
+    "11.5": "Implemented MemoryAuthorityContract and scoped supersession without destructive migration.",
     "11.6": "Make CognitiveResponse the semantic result of every major path and ProviderManager invocation-only.",
     "11.7": "Make every remaining compatibility use explicit, observable and subordinate."
   }

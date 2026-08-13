@@ -58,6 +58,7 @@ from intent_kernel.providers import ManagedProvider, MockProvider, ProviderManag
 from intent_kernel.router import ModuleRouter
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.service import RegistryResourceManager
+from intent_kernel.rrm.binding import CanonicalResourceBindingAuthority
 from intent_kernel.rrm.models import CapabilityResource, ResourceOrigin, AvailabilitySource
 from intent_kernel.runtime import MissionRuntime
 from intent_kernel.tools.authorization import ToolAuthorizationGate
@@ -305,6 +306,9 @@ class KernelBuilder:
             knowledge_pipeline=kernel.knowledge.pipeline,
             event_publisher=event_publisher,
             idempotency_store=idempotency_store,
+            resource_authority=CanonicalResourceBindingAuthority(
+                resource_manager, capability_registry
+            ),
         )
         tool_authorization_gate = ToolAuthorizationGate(constitution_engine)
         mission_service = CanonicalMissionService(

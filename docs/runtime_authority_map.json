@@ -315,7 +315,7 @@
       },
       "evidence": [
         "KernelBuilder projects Core Apps, agents and providers into one RRM and passes it to CapabilityFirstResolver and MissionRuntime ActionGate.",
-        "RRM is in-memory at this snapshot and is not consulted by every binding selector."
+        "Movement 11.4 adds CanonicalResourceBindingAuthority: execution bindings require RRM eligibility at selection and are revalidated immediately before dispatch."
       ],
       "intended_disposition": "SINGLE_RESOURCE_EXISTENCE_ELIGIBILITY_HEALTH_AUTHORITY"
     },
@@ -336,12 +336,12 @@
       "component": "CanonicalCapabilityRegistry",
       "implementation": ["intent_kernel/orchestration/registry.py:CanonicalCapabilityRegistry"],
       "reachability": "ACTIVE_DIRECT_KERNEL_MISSION_ROUTE",
-      "primary_classification": "AUTHORITY_CONFLICT",
+      "primary_classification": "EXECUTION_BINDING",
       "authorities": {
-        "resource_truth": "AUTHORITY_CONFLICT",
+        "resource_truth": "PROJECTION",
         "capability_selection": "EXECUTION_BINDING"
       },
-      "evidence": ["CapabilityExecutionService calls registry.select and registry.available independently of RRM; select returns the first registration."],
+      "evidence": ["CapabilityExecutionService consumes CanonicalResourceBindingAuthority; registry membership and executor health cannot override RRM eligibility."],
       "intended_disposition": "EXECUTION_BINDING_LOOKUP_CONSTRAINED_BY_RRM"
     },
     {
@@ -566,8 +566,8 @@
       "id": "AC-003",
       "dimension": "resource_truth",
       "owners": ["RRM", "ProviderManager", "CanonicalCapabilityRegistry", "Core App CapabilityRouter", "ToolRegistry", "CanonicalAgentOrchestrator", "COR"],
-      "finding": "RRM is the resolver truth, but binding registries can independently report membership, default selection, health or availability.",
-      "target_checkpoint": "11.4"
+      "finding": "Canonical capability execution is RRM-gated and revalidated; provider lifecycle selection, ToolRegistry projection and COR catalog convergence remain bounded follow-up work.",
+      "target_checkpoint": "11.4 implemented; remaining provider lifecycle in 11.6"
     },
     {
       "id": "AC-004",

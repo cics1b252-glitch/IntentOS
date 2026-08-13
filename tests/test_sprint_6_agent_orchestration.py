@@ -27,6 +27,8 @@ from intent_kernel.orchestration import (
     CapabilityExecutionService,
     ExecutorKind,
 )
+from intent_kernel.rrm.models import AvailabilitySource, ProviderResource, ResourceOrigin
+from intent_kernel.rrm.projection import RuntimeResourceProjection
 
 
 async def _running_mission(components, domain=Domain.OTHER):
@@ -107,6 +109,12 @@ async def test_execution_through_core_app(tmp_path):
 @pytest.mark.asyncio
 async def test_execution_through_provider_port(tmp_path):
     components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
+    components.resource_manager.register_provider(ProviderResource(
+        provider_id="mock", name="mock", is_configured=True,
+        has_active_account=True, resource_origin=ResourceOrigin.MIGRATION,
+        availability_source=AvailabilitySource.RUNTIME_DISCOVERY,
+        metadata={"capabilities": ["text_completion"]},
+    ))
     mission = await _running_mission(components)
 
     outcome = await components.capability_execution_service.execute(
@@ -167,6 +175,7 @@ async def test_constitution_can_block_before_executor(tmp_path):
         knowledge_pipeline=components.kernel.knowledge.pipeline,
         event_publisher=components.event_publisher,
         idempotency_store=components.idempotency_store,
+        resource_authority=components.capability_execution_service.resource_authority,
     )
     outcome = await service.execute(
         mission.id,
@@ -211,6 +220,7 @@ async def test_external_effect_requires_confirmation_and_is_idempotent(
     app = ExternalApp()
     components.capability_router.register(app)
     components.capability_registry.register_core_app(app)
+    RuntimeResourceProjection(components.resource_manager).project_core_app(app)
     service = components.capability_execution_service
 
     missing_key = await service.execute(mission.id, "external.test")

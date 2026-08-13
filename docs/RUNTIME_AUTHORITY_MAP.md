@@ -135,7 +135,7 @@ The detailed evidence and per-dimension classifications are in the JSON map.
 | --- | --- | --- | --- |
 | ProductBridge vs conversation runtime | `_chat` owns memory query detection, BCC routing, finance/app parsing, status/Mission ID and session writes | Non-Mission semantic meaning has no single owner | 11.2 |
 | Mission completion has four writers | `MissionRuntime`, `Kernel._execute_canonical_route`, `LegacyCapabilityExecutorAdapter`, and ProductBridge session records | “completed” can mean verified runtime completion, direct lifecycle completion, or only a local response | 11.3 |
-| RRM vs binding registries | RRM resolver truth coexists with ProviderManager, CanonicalCapabilityRegistry, Core App router, ToolRegistry, and agent registry | A binding can exist or appear healthy independently of RRM | 11.4 |
+| RRM vs binding registries | RRM is now enforced by `CanonicalResourceBindingAuthority`; invocation registries retain callable objects only | Registration, configuration, and executor health cannot upgrade RRM-unavailable resources | 11.4 implemented; provider lifecycle convergence remains 11.6 |
 | AME vs PKB vs session context | ProductBridge writes AME and session JSON; Kernel ingests PKB events | Durable/current fact ownership and supersession are not reconciled | 11.5 |
 | CognitiveResponseAssembler vs upstream authors | ProductBridge/BCC/Kernel/modules/providers construct text/status/provenance before assembly | Envelope is governed, but semantic response authority is distributed | 11.6 |
 | COR RegistryCatalog vs RRM | ProductBridge ECC/COR uses `RegistryCatalog(populate_defaults=True)` | Diagnostic plans can describe agents/providers that are not RRM runtime truth | 11.3/11.4 |

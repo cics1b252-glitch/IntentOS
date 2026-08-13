@@ -32,6 +32,7 @@ from intent_kernel.orchestration.registry import (
 )
 from intent_kernel.pkb import KnowledgePipeline
 from intent_kernel.providers import ProviderManager
+from intent_kernel.rrm.binding import CanonicalResourceBindingAuthority
 
 
 @dataclass(slots=True)
@@ -62,6 +63,7 @@ class CapabilityExecutionService:
         knowledge_pipeline: KnowledgePipeline,
         event_publisher: EventPublisher,
         idempotency_store: IdempotencyStore,
+        resource_authority: CanonicalResourceBindingAuthority,
     ):
         self.mission_engine = mission_engine
         self.constitution = constitution
@@ -72,6 +74,7 @@ class CapabilityExecutionService:
         self.knowledge_pipeline = knowledge_pipeline
         self.event_publisher = event_publisher
         self.idempotency_store = idempotency_store
+        self.resource_authority = resource_authority
 
     async def execute(
         self,
@@ -90,13 +93,12 @@ class CapabilityExecutionService:
         if mission.status is not MissionStatus.RUNNING:
             return self._error(capability, ErrorCode.CONFLICT)
 
-        registration = self.registry.select(
+        resource_decision = await self.resource_authority.resolve(
             capability,
             preferred_kind=preferred_kind,
         )
-        if registration is None or not await self.registry.available(
-            registration
-        ):
+        registration = resource_decision.registration
+        if registration is None:
             return self._error(
                 capability,
                 ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -158,6 +160,8 @@ class CapabilityExecutionService:
                 idempotency_key,
             )
             return outcome
+        if not self.resource_authority.revalidate(resource_decision):
+            return self._error(capability, ErrorCode.CAPABILITY_UNAVAILABLE)
         cache_key = (str(mission.id), capability, idempotency_key)
         cached = await self.idempotency_store.get(cache_key)
         if cached is not None:

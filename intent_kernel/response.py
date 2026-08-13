@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 
 
 class ResponseStatus(str, Enum):
@@ -16,6 +16,283 @@ class ResponseStatus(str, Enum):
     EXTERNAL_RESOURCE_REQUIRED = "EXTERNAL_RESOURCE_REQUIRED"
     WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
     FAILED = "FAILED"
+
+
+class CanonicalResultKind(str, Enum):
+    """Typed outcome emitted by a canonical runtime owner.
+
+    This is deliberately smaller than :class:`CognitiveResponse`: callers
+    describe what actually happened and the assembler alone derives the
+    user-visible semantic envelope.
+    """
+
+    LOCAL_RESPONSE = "LOCAL_RESPONSE"
+    CONVERSATION = "CONVERSATION"
+    UNKNOWN = "UNKNOWN"
+    BLOCKED = "BLOCKED"
+    AUTHORIZATION_REQUIRED = "AUTHORIZATION_REQUIRED"
+    EXTERNAL_RESOURCE_REQUIRED = "EXTERNAL_RESOURCE_REQUIRED"
+    WAITING_CONTEXT = "WAITING_CONTEXT"
+    WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
+    MISSION_COMPLETED = "MISSION_COMPLETED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderInvocationEvidence:
+    """Observed provider invocation, not provider preference/configuration."""
+
+    provider_id: str
+    invoked: bool
+    resource_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalTurnResult:
+    """Non-presentational evidence consumed by CognitiveResponseAssembler."""
+
+    text: str
+    kind: CanonicalResultKind
+    local_source: bool = False
+    provider_evidence: ProviderInvocationEvidence | None = None
+    mission_id: str | None = None
+    verification_evidence: tuple[dict[str, Any], ...] = ()
+    limitations: tuple[str, ...] = ()
+    missing_capabilities: tuple[str, ...] = ()
+    authorization_requirements: tuple[str, ...] = ()
+    next_actions: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_cognitive_decision(cls, decision: Any) -> CanonicalTurnResult | None:
+        """Create a terminal result from authoritative cognitive evidence."""
+        mode = str(getattr(getattr(decision, "mode", None), "value", ""))
+        mapping = {
+            "UNKNOWN": (
+                CanonicalResultKind.UNKNOWN,
+                "Não há capacidade ou recurso elegível suficiente para atender esta solicitação com segurança.",
+            ),
+            "BLOCKED": (
+                CanonicalResultKind.BLOCKED,
+                "A solicitação foi bloqueada pela Constitution.",
+            ),
+            "AUTHORIZATION_REQUIRED": (
+                CanonicalResultKind.AUTHORIZATION_REQUIRED,
+                "Esta ação exige autorização explícita antes de qualquer execução.",
+            ),
+            "EXTERNAL_REASONING_REQUIRED": (
+                CanonicalResultKind.EXTERNAL_RESOURCE_REQUIRED,
+                "Não tenho conhecimento local suficiente e não há Provider externo elegível conectado.",
+            ),
+        }
+        outcome = mapping.get(mode)
+        if outcome is None:
+            return None
+        kind, text = outcome
+        composition = getattr(decision, "composition", None)
+        return cls(
+            text=text,
+            kind=kind,
+            missing_capabilities=tuple(
+                getattr(composition, "missing_capabilities", ()) or ()
+            ),
+            authorization_requirements=tuple(
+                getattr(composition, "authorization_requirements", ()) or ()
+            ),
+            metadata={
+                "domain": getattr(decision, "domain_hint", "general"),
+                "capability_analysis": decision.to_dict(),
+            },
+        )
+
+    @classmethod
+    def local(
+        cls,
+        text: str,
+        *,
+        kind: CanonicalResultKind = CanonicalResultKind.LOCAL_RESPONSE,
+        metadata: Mapping[str, Any] | None = None,
+        limitations: tuple[str, ...] = (),
+        missing_capabilities: tuple[str, ...] = (),
+        authorization_requirements: tuple[str, ...] = (),
+        next_actions: tuple[str, ...] = (),
+    ) -> CanonicalTurnResult:
+        return cls(
+            text=text,
+            kind=kind,
+            local_source=True,
+            limitations=limitations,
+            missing_capabilities=missing_capabilities,
+            authorization_requirements=authorization_requirements,
+            next_actions=next_actions,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def blocked(
+        cls,
+        text: str,
+        *,
+        reason: str,
+        mission_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> CanonicalTurnResult:
+        return cls(
+            text=text,
+            kind=CanonicalResultKind.BLOCKED,
+            local_source=True,
+            mission_id=mission_id,
+            limitations=(reason,),
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def memory(
+        cls,
+        text: str,
+        *,
+        found: bool,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> CanonicalTurnResult:
+        return cls(
+            text=text,
+            kind=(
+                CanonicalResultKind.LOCAL_RESPONSE
+                if found
+                else CanonicalResultKind.UNKNOWN
+            ),
+            local_source=True,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def waiting_context(
+        cls, text: str, *, metadata: Mapping[str, Any] | None = None
+    ) -> CanonicalTurnResult:
+        return cls(
+            text=text,
+            kind=CanonicalResultKind.WAITING_CONTEXT,
+            local_source=True,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def provider(
+        cls,
+        text: str,
+        *,
+        provider_id: str | None,
+        invoked: bool,
+        resource_ids: tuple[str, ...] = (),
+        metadata: Mapping[str, Any] | None = None,
+    ) -> CanonicalTurnResult:
+        evidence = (
+            ProviderInvocationEvidence(provider_id, invoked, resource_ids)
+            if provider_id
+            else None
+        )
+        return cls(
+            text=text,
+            kind=CanonicalResultKind.CONVERSATION,
+            local_source=not invoked,
+            provider_evidence=evidence,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def mission(
+        cls,
+        text: str,
+        *,
+        kind: CanonicalResultKind,
+        mission_id: str,
+        verification_evidence: tuple[dict[str, Any], ...] = (),
+        authorization_requirements: tuple[str, ...] = (),
+        next_actions: tuple[str, ...] = (),
+        metadata: Mapping[str, Any] | None = None,
+    ) -> CanonicalTurnResult:
+        return cls(
+            text=text,
+            kind=kind,
+            local_source=True,
+            mission_id=mission_id,
+            verification_evidence=verification_evidence,
+            authorization_requirements=authorization_requirements,
+            next_actions=next_actions,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def from_mission_authorization(
+        cls,
+        boundary: Any,
+        *,
+        mission_id: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> CanonicalTurnResult:
+        decision = str(getattr(getattr(boundary, "decision", None), "value", ""))
+        kind_by_decision = {
+            "DENY": CanonicalResultKind.BLOCKED,
+            "REQUEST_PERMISSION": CanonicalResultKind.AUTHORIZATION_REQUIRED,
+            "REQUEST_CONFIRMATION": CanonicalResultKind.WAITING_CONFIRMATION,
+            "WAIT_TOOL": CanonicalResultKind.EXTERNAL_RESOURCE_REQUIRED,
+            "RESELECT_TOOL": CanonicalResultKind.EXTERNAL_RESOURCE_REQUIRED,
+        }
+        if decision not in kind_by_decision:
+            raise ValueError(f"authorization state is not a waiting result: {decision}")
+        return cls.mission(
+            str(boundary.text),
+            kind=kind_by_decision[decision],
+            mission_id=mission_id,
+            authorization_requirements=tuple(
+                getattr(boundary, "authorization_requirements", ()) or ()
+            ),
+            next_actions=tuple(getattr(boundary, "next_actions", ()) or ()),
+            metadata=metadata,
+        )
+
+    @classmethod
+    def waiting_confirmation(
+        cls,
+        text: str,
+        *,
+        mission_id: str,
+        verification_evidence: tuple[dict[str, Any], ...] = (),
+        authorization_requirements: tuple[str, ...] = (),
+        next_actions: tuple[str, ...] = (),
+        metadata: Mapping[str, Any] | None = None,
+    ) -> CanonicalTurnResult:
+        return cls.mission(
+            text,
+            kind=CanonicalResultKind.WAITING_CONFIRMATION,
+            mission_id=mission_id,
+            verification_evidence=verification_evidence,
+            authorization_requirements=authorization_requirements,
+            next_actions=next_actions,
+            metadata=metadata,
+        )
+
+    @classmethod
+    def failed(
+        cls,
+        text: str,
+        *,
+        provider_id: str | None = None,
+        provider_invoked: bool = False,
+        mission_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> CanonicalTurnResult:
+        return cls(
+            text=text,
+            kind=CanonicalResultKind.FAILED,
+            provider_evidence=(
+                ProviderInvocationEvidence(provider_id, provider_invoked)
+                if provider_id
+                else None
+            ),
+            mission_id=mission_id,
+            metadata=dict(metadata or {}),
+        )
 
 
 @dataclass(slots=True)
@@ -38,6 +315,7 @@ class CognitiveResponse:
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["status"] = self.status.value
+        value["ok"] = self.status is not ResponseStatus.FAILED
         return value
 
 
@@ -49,34 +327,94 @@ class CognitiveResponseAssembler:
 
     @staticmethod
     def from_result(
-        result: dict[str, Any], *, default_execution_mode: str = "CONVERSATION"
+        result: CanonicalTurnResult | dict[str, Any],
+        *,
+        default_execution_mode: str = "CONVERSATION",
     ) -> CognitiveResponse:
-        """Translate a service/compatibility result into the canonical envelope.
+        """Translate typed runtime evidence into the canonical envelope.
 
-        Upstream services retain ownership of their text and evidence.  Status,
-        epistemic defaults and provider attribution are normalized here so an
-        interface adapter cannot independently invent their product meaning.
+        Dictionaries remain accepted only for direct legacy callers. Product
+        adapters use :class:`CanonicalTurnResult`, so their raw fields cannot
+        redefine canonical status, epistemology, confidence, Mission meaning,
+        or provider provenance.
         """
-        raw = dict(result)
-        raw_status = str(raw.get("status", "COMPLETED")).upper()
-        aliases = {
-            "CONCLUÍDO": "COMPLETED",
-            "CONCLUIDO": "COMPLETED",
-            "WAITING_USER_CONFIRMATION": "WAITING_CONFIRMATION",
-        }
-        raw_status = aliases.get(raw_status, raw_status)
-        try:
-            status = ResponseStatus(raw_status)
-        except ValueError:
-            status = (
-                ResponseStatus.FAILED
-                if not raw.get("ok", True)
-                else ResponseStatus.COMPLETED
+        if isinstance(result, CanonicalTurnResult):
+            canonical = result
+        else:
+            # Compatibility-only adapter for callers outside ProductBridge.
+            raw = dict(result)
+            raw_status = str(raw.get("status", "COMPLETED")).upper()
+            aliases = {
+                "CONCLUÍDO": CanonicalResultKind.CONVERSATION,
+                "CONCLUIDO": CanonicalResultKind.CONVERSATION,
+                "COMPLETED": CanonicalResultKind.CONVERSATION,
+                "WAITING_USER_CONFIRMATION": CanonicalResultKind.WAITING_CONFIRMATION,
+            }
+            try:
+                kind = CanonicalResultKind(aliases.get(raw_status, raw_status))
+            except ValueError:
+                kind = (
+                    CanonicalResultKind.FAILED
+                    if not raw.get("ok", True)
+                    else CanonicalResultKind.CONVERSATION
+                )
+            provider_id = raw.get("provider")
+            invoked = bool(raw.get("provider_called", False))
+            canonical = CanonicalTurnResult(
+                text=str(raw.get("text") or raw.get("error") or ""),
+                kind=kind,
+                local_source=provider_id == "local" and not invoked,
+                provider_evidence=(
+                    ProviderInvocationEvidence(
+                        str(provider_id), invoked,
+                        tuple(raw.get("resource_provenance", ())),
+                    )
+                    if provider_id
+                    else None
+                ),
+                mission_id=raw.get("mission_id"),
+                verification_evidence=tuple(raw.get("verification_evidence", ())),
+                limitations=tuple(raw.get("limitations", ())),
+                missing_capabilities=tuple(raw.get("missing_capabilities", ())),
+                authorization_requirements=tuple(
+                    raw.get("authorization_requirements", ())
+                ),
+                next_actions=tuple(raw.get("next_actions", ())),
             )
 
-        provider_called = bool(raw.get("provider_called", False))
-        provider = raw.get("provider")
-        provenance = list(raw.get("resource_provenance", []))
+        status_by_kind = {
+            CanonicalResultKind.LOCAL_RESPONSE: ResponseStatus.COMPLETED,
+            CanonicalResultKind.CONVERSATION: ResponseStatus.COMPLETED,
+            CanonicalResultKind.UNKNOWN: ResponseStatus.UNKNOWN,
+            CanonicalResultKind.BLOCKED: ResponseStatus.BLOCKED,
+            CanonicalResultKind.AUTHORIZATION_REQUIRED: ResponseStatus.AUTHORIZATION_REQUIRED,
+            CanonicalResultKind.EXTERNAL_RESOURCE_REQUIRED: ResponseStatus.EXTERNAL_RESOURCE_REQUIRED,
+            CanonicalResultKind.WAITING_CONTEXT: ResponseStatus.WAITING_CONTEXT,
+            CanonicalResultKind.WAITING_CONFIRMATION: ResponseStatus.WAITING_CONFIRMATION,
+            CanonicalResultKind.MISSION_COMPLETED: ResponseStatus.COMPLETED,
+            CanonicalResultKind.FAILED: ResponseStatus.FAILED,
+        }
+        status = status_by_kind[canonical.kind]
+        mode_by_kind = {
+            CanonicalResultKind.LOCAL_RESPONSE: "LOCAL_RESPONSE",
+            CanonicalResultKind.CONVERSATION: "CONVERSATION",
+            CanonicalResultKind.UNKNOWN: "UNKNOWN",
+            CanonicalResultKind.BLOCKED: "BLOCKED",
+            CanonicalResultKind.AUTHORIZATION_REQUIRED: "AUTHORIZATION_REQUIRED",
+            CanonicalResultKind.EXTERNAL_RESOURCE_REQUIRED: "EXTERNAL_REASONING_REQUIRED",
+            CanonicalResultKind.WAITING_CONTEXT: "CONVERSATION",
+            CanonicalResultKind.WAITING_CONFIRMATION: "MISSION",
+            CanonicalResultKind.MISSION_COMPLETED: "MISSION",
+            CanonicalResultKind.FAILED: "FAILED",
+        }
+        execution_mode = mode_by_kind.get(canonical.kind, default_execution_mode)
+
+        evidence = canonical.provider_evidence
+        provider_called = bool(evidence and evidence.invoked)
+        provider = evidence.provider_id if evidence else (
+            "local" if canonical.local_source else None
+        )
+        provenance = list(evidence.resource_ids if evidence else ())
         if provider_called and provider:
             provider_ref = f"provider:{provider}"
             if provider_ref not in provenance:
@@ -102,26 +440,20 @@ class CognitiveResponseAssembler:
             else 0.5
         )
         return CognitiveResponse(
-            text=str(raw.get("text") or raw.get("error") or ""),
+            text=canonical.text,
             status=status,
-            execution_mode=str(
-                raw.get("execution_mode") or default_execution_mode
-            ),
-            epistemic_status=str(
-                raw.get("epistemic_status", epistemic_default)
-            ),
-            confidence=float(raw.get("confidence", confidence_default)),
+            execution_mode=execution_mode,
+            epistemic_status=epistemic_default,
+            confidence=confidence_default,
             provider=provider,
             provider_called=provider_called,
             resource_provenance=provenance,
-            mission_id=raw.get("mission_id"),
-            verification_evidence=list(raw.get("verification_evidence", [])),
-            limitations=list(raw.get("limitations", [])),
-            missing_capabilities=list(raw.get("missing_capabilities", [])),
-            authorization_requirements=list(
-                raw.get("authorization_requirements", [])
-            ),
-            next_actions=list(raw.get("next_actions", [])),
+            mission_id=canonical.mission_id,
+            verification_evidence=list(canonical.verification_evidence),
+            limitations=list(canonical.limitations),
+            missing_capabilities=list(canonical.missing_capabilities),
+            authorization_requirements=list(canonical.authorization_requirements),
+            next_actions=list(canonical.next_actions),
         )
 
     async def assemble(self, response: CognitiveResponse, context: dict[str, Any]) -> CognitiveResponse:

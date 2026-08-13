@@ -200,9 +200,9 @@ The detailed evidence and per-dimension classifications are in the JSON map.
 ## Checkpoint 11.7 — compatibility containment
 
 Movement 11.7 standardizes every newly characterized compatibility observation
-with five non-sensitive fields: `compatibility_path_used`,
-`compatibility_component`, `reason`, `canonical_alternative_missing`, and
-`deprecation_candidate`. Product responses carry these fields in a nested
+with non-sensitive fields: `compatibility_path_used`,
+`compatibility_component`, `reason`, `entry_point`,
+`canonical_alternative_missing`, and `deprecation_candidate`. Product responses carry these fields in a nested
 `compatibility_trace` and remain governed by `CognitiveResponseAssembler` and
 `response.output`.
 
@@ -220,6 +220,23 @@ request text, memory values, provider payloads, credentials, or raw private data
 No compatibility trace grants execution authority: terminal cognition, RRM,
 ToolAuthorizationGate, MissionEngine/MissionRuntime, ActionGate, verification,
 and response governance continue to dominate.
+
+## Checkpoint 11.9 — response semantics and trace provenance
+
+ProductBridge now passes a typed `CanonicalTurnResult` to
+`CognitiveResponseAssembler`. The typed input contains observed runtime evidence
+but no final `status`, `execution_mode`, `epistemic_status`, `confidence`, or
+provider-called assertion. The assembler derives those semantic fields and
+applies `response.output`; ProductBridge merges only non-semantic transport and
+diagnostic metadata before serialization.
+
+Compatibility traces are emitted at the component execution boundary and are
+aggregated as `compatibility_traces`. The singular `compatibility_trace` remains
+a stable first-event projection for protocol migration. Domain hints, fallback
+eligibility, component registration, and paths considered but not executed no
+longer create compatibility telemetry. Consequently terminal XZ-91, Iceland,
+BLOCKED, AUTHORIZATION_REQUIRED, and EXTERNAL_RESOURCE_REQUIRED responses have
+no compatibility trace unless an actual compatibility event was recorded.
 
 ## Evidence index
 

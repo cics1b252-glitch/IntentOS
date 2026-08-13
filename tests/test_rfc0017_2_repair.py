@@ -16,6 +16,7 @@ import unittest
 from intent_kernel.iue import IntentUnderstandingEngine, is_financial_text
 from intent_kernel.engine.intent_engine import IntentEngine
 from intent_kernel.modules.fin.module import FinanceModule, _extract_brl_amount
+from intent_kernel.response import CanonicalResultKind
 from intent_kernel.types import Domain, IntentInput
 from product_bridge import ProductBridge
 
@@ -98,10 +99,12 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
             {"mission_id": "m1"},
             "gemini"
         )
-        self.assertFalse(res_internal["ok"])
-        self.assertEqual(res_internal["error_code"], "internal_kernel_error")
-        self.assertIsNone(res_internal["provider"])
-        self.assertIn("erro interno", res_internal["error"])
+        self.assertIs(res_internal.kind, CanonicalResultKind.FAILED)
+        self.assertEqual(
+            res_internal.metadata["error_code"], "internal_kernel_error"
+        )
+        self.assertIsNone(res_internal.provider_evidence)
+        self.assertIn("erro interno", res_internal.text)
 
         res_provider = self.bridge._provider_failure(
             RuntimeError("Provider connection error"),
@@ -111,9 +114,9 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
             {"mission_id": "m2"},
             "gemini"
         )
-        self.assertFalse(res_provider["ok"])
-        self.assertEqual(res_provider["error_code"], "provider_error")
-        self.assertEqual(res_provider["provider"], "gemini")
+        self.assertIs(res_provider.kind, CanonicalResultKind.FAILED)
+        self.assertEqual(res_provider.metadata["error_code"], "provider_error")
+        self.assertEqual(res_provider.provider_evidence.provider_id, "gemini")
 
     # 4. LIVE PRODUCT PATH TESTS
     async def test_live_path_test_a_quero_investir(self):

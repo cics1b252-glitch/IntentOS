@@ -60,6 +60,7 @@ class CapabilityRouter:
             self._last_compatibility_trace = compatibility_trace(
                 "CapabilityRouter",
                 "legacy_domain_default_used_without_explicit_capability",
+                entry_point="CapabilityRouter.select",
                 canonical_alternative_missing="explicit_capability_requirement",
             ).to_dict()
             requested = self._DOMAIN_DEFAULTS.get(mission.context.domain, "")
@@ -86,6 +87,7 @@ class CapabilityRouter:
             self._last_compatibility_trace = compatibility_trace(
                 "CapabilityRouter",
                 "legacy_domain_default_used_without_explicit_capability",
+                entry_point="CapabilityRouter.execute_mission",
                 canonical_alternative_missing="explicit_capability_requirement",
             ).to_dict()
         if app is None:

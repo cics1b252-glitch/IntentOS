@@ -44,6 +44,7 @@ class ModuleRouter:
         trace = compatibility_trace(
             "ModuleRouter",
             "legacy_domain_trigger_or_core_module_selection",
+            entry_point="ModuleRouter.route",
             canonical_alternative_missing="explicit_capability_binding",
         )
         self._last_compatibility_trace = trace.to_dict()

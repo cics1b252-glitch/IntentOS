@@ -69,6 +69,7 @@ class LegacyProviderAdapter:
             compatibility_trace(
                 "LegacyProviderAdapter",
                 "legacy_provider_invocation_binding",
+                entry_point="LegacyProviderAdapter.execute",
                 canonical_alternative_missing="native_provider_binding",
             ),
         )
@@ -309,6 +310,7 @@ class LegacyCapabilityExecutorAdapter:
             trace = compatibility_trace(
                 "LegacyCapabilityExecutorAdapter",
                 "legacy_domain_was_translated_to_canonical_capability",
+                entry_point="LegacyCapabilityExecutorAdapter.execute.canonical",
                 canonical_alternative_missing="native_capability_request",
             )
             attach_compatibility_trace(outcome.result.metadata, trace)
@@ -343,6 +345,7 @@ class LegacyCapabilityExecutorAdapter:
         trace = compatibility_trace(
             "LegacyCapabilityExecutorAdapter",
             "direct_legacy_module_execution",
+            entry_point="LegacyCapabilityExecutorAdapter.execute.direct",
             canonical_alternative_missing="canonical_capability_binding",
         )
         attach_compatibility_trace(metadata, trace)
@@ -410,6 +413,7 @@ class LegacyAgentAdapter:
             compatibility_trace(
                 "LegacyAgentAdapter",
                 "legacy_agent_invocation_binding",
+                entry_point="LegacyAgentAdapter.execute",
                 canonical_alternative_missing="canonical_agent_binding",
             ),
         )

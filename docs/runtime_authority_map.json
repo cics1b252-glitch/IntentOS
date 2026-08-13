@@ -72,13 +72,14 @@
         "mission_lifecycle": "AUTHORITY_CONFLICT",
         "authorization": "AUTHORITY_CONFLICT",
         "execution": "AUTHORITY_CONFLICT",
-        "response_construction": "COMPATIBILITY_ONLY",
+        "response_construction": "TRANSPORT_ONLY",
         "persistence": "AUTHORITY_CONFLICT"
       },
       "evidence": [
         "ProductBridge._chat orders IUE, CDM, cognitive capability analysis, memory, BCC, compatibility parsing, Kernel fallback and session writes.",
         "ProductBridge._run_controlled_mission constructs the tool candidate, ToolAuthorizationGate, RuntimeNode and MissionRuntime invocation.",
-        "ProductBridge._govern_response delegates status, epistemic defaults, confidence and provenance normalization to CognitiveResponseAssembler.from_result."
+        "ProductBridge passes typed CanonicalTurnResult evidence to CognitiveResponseAssembler and serializes the governed CognitiveResponse without supplying final semantic fields.",
+        "Compatibility participation is attached only where a compatibility component actually executes; domain metadata does not infer participation."
       ],
       "intended_disposition": "INTERFACE_AND_SESSION_TRANSPORT_ADAPTER"
     },
@@ -518,7 +519,7 @@
       "authorities": {
         "response_construction": "CANONICAL_AUTHORITY"
       },
-      "evidence": ["ProductBridge.dispatch sends every chat response through assembler-owned from_result normalization and response.output evaluation."],
+      "evidence": ["ProductBridge.dispatch sends typed CanonicalTurnResult evidence through assembler-owned semantic derivation and response.output evaluation."],
       "intended_disposition": "SOLE_SEMANTIC_RESPONSE_ENVELOPE_AND_FINAL_POLICY_AUTHORITY"
     },
     {
@@ -683,9 +684,9 @@
     {
       "current_responsibility": "Response semantic meaning",
       "canonical_owner": "Conversation or Mission runtime plus CognitiveResponseAssembler",
-      "current_authority": "Services author content/evidence; CognitiveResponseAssembler normalizes status, epistemic defaults, confidence and provenance",
+      "current_authority": "Canonical services produce typed evidence; CognitiveResponseAssembler exclusively derives status, execution mode, epistemic state, confidence and provider provenance",
       "target_authority": "Canonical services return CognitiveResponse; bridge serializes only",
-      "migration_status": "IMPLEMENTED_PRODUCT_ENVELOPE",
+      "migration_status": "IMPLEMENTED_TYPED_SEMANTIC_AUTHORITY",
       "required_parity_test": "All response sources share truthful status, epistemic state, provenance and limitations"
     },
     {

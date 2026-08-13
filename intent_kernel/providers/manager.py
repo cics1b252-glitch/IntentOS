@@ -117,6 +117,7 @@ class ProviderManager:
         self._last_compatibility_trace = compatibility_trace(
             "ProviderManager",
             "direct_caller_used_registered_default_without_rrm_selection",
+            entry_point="ProviderManager.route.direct_default",
             canonical_alternative_missing="canonical_provider_selection",
         ).to_dict()
         return self.get()

@@ -9,6 +9,7 @@ import shutil
 import sys
 import time
 import traceback
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from intent_kernel.modules.fin.module import _extract_brl_amount
 from intent_kernel.cognition import CognitiveExecutionMode
 from intent_kernel.compatibility import attach_compatibility_trace, compatibility_trace
 from intent_kernel.response import (
+    CanonicalTurnResult,
     CognitiveResponseAssembler,
 )
 from intent_kernel.runtime.models import ActionContract, RuntimeNode, SideEffectLevel
@@ -244,14 +246,6 @@ class ProductBridge:
             if "text" in request and "message" not in request:
                 request["message"] = request["text"]
             response = await self._chat(request)
-            if self.last_pending_dialogue_match is not None:
-                response.setdefault(
-                    "pending_dialogue_match", self.last_pending_dialogue_match
-                )
-            if self.last_conversation_authority is not None:
-                response.setdefault(
-                    "conversation_authority", self.last_conversation_authority
-                )
             return await self._govern_response(response, request)
         if action == "diagnostics" or action == "flow_diagnostics":
             return {
@@ -277,7 +271,7 @@ class ProductBridge:
             return {"ok": True, "session": self._load_session(session_id)}
         return {"ok": False, "error": "Ação interna desconhecida."}
 
-    async def _chat(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _chat(self, request: dict[str, Any]) -> CanonicalTurnResult:
         correlation_id = str(request.get("correlation_id") or uuid4())
         started = time.perf_counter()
         self.last_pending_dialogue_match = None
@@ -287,8 +281,10 @@ class ProductBridge:
         self._flow_event("bridge_request_received")
         message = str(request.get("message", "")).strip()
         if not message:
-            return self._fail("bridge_request_received", "empty_message",
-                              "Escreva uma mensagem antes de enviar.", started)
+            return self._fail(
+                "bridge_request_received", "empty_message",
+                "Escreva uma mensagem antes de enviar.", started,
+            )
 
         input_verdict = await self.components.constitution_engine.evaluate(
             "product.input", message, {
@@ -297,12 +293,10 @@ class ProductBridge:
             }
         )
         if not input_verdict.allowed:
-            return {
-                "ok": True, "text": f"Solicitação bloqueada pela Constitution: {input_verdict.reason}",
-                "status": "BLOCKED", "execution_mode": "BLOCKED",
-                "epistemic_status": "fact", "confidence": 1.0,
-                "provider": None, "provider_called": False, "mission_id": None,
-            }
+            return CanonicalTurnResult.blocked(
+                f"Solicitação bloqueada pela Constitution: {input_verdict.reason}",
+                reason=input_verdict.reason,
+            )
 
         session_id = str(request.get("session_id", "product-alpha"))
         project_id = str(request.get("project_id") or request.get("projectId") or "GLOBAL")
@@ -391,11 +385,10 @@ class ProductBridge:
                 "memory.write", {"content": memory_fact}, {"project_id": project_id}
             )
             if not memory_verdict.allowed:
-                return {
-                    "ok": True, "text": "A gravação de memória foi bloqueada pela Constitution.",
-                    "status": "BLOCKED", "execution_mode": "BLOCKED",
-                    "provider": None, "provider_called": False, "mission_id": None,
-                }
+                return CanonicalTurnResult.blocked(
+                    "A gravação de memória foi bloqueada pela Constitution.",
+                    reason=memory_verdict.reason,
+                )
             await self.memory_service.remember(
                 memory_fact,
                 project_id=project_id,
@@ -409,11 +402,10 @@ class ProductBridge:
                 "memory.read", {"query": message}, {"project_id": project_id}
             )
             if not memory_read_verdict.allowed:
-                return {
-                    "ok": True, "text": "A leitura de memória foi bloqueada pela Constitution.",
-                    "status": "BLOCKED", "execution_mode": "BLOCKED",
-                    "provider": None, "provider_called": False, "mission_id": None,
-                }
+                return CanonicalTurnResult.blocked(
+                    "A leitura de memória foi bloqueada pela Constitution.",
+                    reason=memory_read_verdict.reason,
+                )
             ret = await self.memory_service.recall(message, project_id=project_id)
             now = utc_iso()
             if ret.objects:
@@ -444,11 +436,16 @@ class ProductBridge:
                 "mission_id": None, "conversation_state": conv_state,
                 "history": full_history, "updated_at": now,
             })
-            return {
-                "ok": True, "text": text_out, "provider": "local", "provider_called": False, "status": "concluído",
-                "mission_id": None, "domain": "memory", "conversation_state": conv_state, "inspector": conv_state,
-                "trace": self.last_trace
-            }
+            return CanonicalTurnResult.memory(
+                text_out,
+                found=bool(ret.objects),
+                metadata={
+                    "domain": "memory",
+                    "conversation_state": conv_state,
+                    "inspector": conv_state,
+                    "trace": self.last_trace,
+                },
+            )
 
         # 3. Check Zero Provider / Capabilities Query
         is_cap_query = any(p.search(message) for p in self.bcc.FIRST_RUN_PATTERNS)
@@ -476,11 +473,15 @@ class ProductBridge:
                 "mission_id": None, "conversation_state": conv_state,
                 "history": full_history, "updated_at": now,
             })
-            return {
-                "ok": True, "text": bcc_res.summary, "provider": "local", "provider_called": False, "status": "concluído",
-                "mission_id": None, "domain": "system", "conversation_state": conv_state, "inspector": conv_state,
-                "trace": self.last_trace
-            }
+            return CanonicalTurnResult.local(
+                bcc_res.summary,
+                metadata={
+                    "domain": "system",
+                    "conversation_state": conv_state,
+                    "inspector": conv_state,
+                    "trace": self.last_trace,
+                },
+            )
 
         # 4. Multi-Turn Field Filling for Finance & App domains
         known_kc = self.conversation_service.compatibility_known_context(
@@ -676,17 +677,35 @@ class ProductBridge:
                 })
                 self._flow_event("response_persisted", mission_id=mission_id,
                                  result="success")
-                return {
-                    "ok": True, "text": pending_q, "provider": "local", "provider_called": False, "status": "waiting_context",
-                    "dialogue_state": "WAITING_CONTEXT", "target_field": next_field,
-                    "pending_dialogue": new_pending, "conversation_state": conv_state,
-                    "mission_id": mission_id, "inspector": conv_state,
-                    "domain": "finance", "trace": self.last_trace,
-                    "provider_explanation": (
-                        "A capability Atlas respondeu localmente; "
-                        "o Gemini não foi necessário."
-                    ),
-                }
+                result = CanonicalTurnResult.waiting_context(
+                    pending_q,
+                    metadata={
+                        "dialogue_state": "WAITING_CONTEXT",
+                        "target_field": next_field,
+                        "pending_dialogue": new_pending,
+                        "conversation_state": conv_state,
+                        "compatibility_dialogue_id": mission_id,
+                        "compatibility_lifecycle": {
+                            "classification": "COMPATIBILITY_ONLY",
+                            "canonical_mission": False,
+                            "completion_authority": None,
+                        },
+                        "inspector": conv_state,
+                        "domain": "finance",
+                        "trace": self.last_trace,
+                        "provider_explanation": (
+                            "A capability Atlas respondeu localmente; "
+                            "o Gemini não foi necessário."
+                        ),
+                    },
+                )
+                return self._compatibility_response(
+                    result,
+                    component="ProductBridgeFieldFilling",
+                    reason="legacy_typed_field_filling_or_local_product_flow",
+                    entry_point="ProductBridge.finance_field_filling",
+                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                )
             else:
                 # All required finance fields present! Render complete summary.
                 now = utc_iso()
@@ -731,11 +750,28 @@ Estratégia completa registrada no histórico para execução."""
                     "mission_id": mission_id, "mission_status": "completed", "pending_dialogue": None,
                     "conversation_state": conv_state, "history": full_history, "updated_at": now,
                 })
-                return {
-                    "ok": True, "text": fin_summary, "provider": "local", "provider_called": False, "status": "concluído",
-                    "mission_id": mission_id, "domain": "finance", "conversation_state": conv_state, "inspector": conv_state,
-                    "trace": self.last_trace
-                }
+                result = CanonicalTurnResult.local(
+                    fin_summary,
+                    metadata={
+                        "compatibility_dialogue_id": mission_id,
+                        "compatibility_lifecycle": {
+                            "classification": "COMPATIBILITY_ONLY",
+                            "canonical_mission": False,
+                            "completion_authority": None,
+                        },
+                        "domain": "finance",
+                        "conversation_state": conv_state,
+                        "inspector": conv_state,
+                        "trace": self.last_trace,
+                    },
+                )
+                return self._compatibility_response(
+                    result,
+                    component="ProductBridgeFieldFilling",
+                    reason="legacy_typed_field_filling_or_local_product_flow",
+                    entry_point="ProductBridge.finance_field_filling",
+                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                )
 
         if is_app:
             missing = []
@@ -788,12 +824,31 @@ Estratégia completa registrada no histórico para execução."""
                     "mission_id": mission_id, "mission_status": "waiting_context", "pending_dialogue": new_pending,
                     "conversation_state": conv_state, "history": full_history, "updated_at": now,
                 })
-                return {
-                    "ok": True, "text": pending_q, "provider": "local", "provider_called": False, "status": "waiting_context",
-                    "dialogue_state": "WAITING_CONTEXT", "target_field": next_field,
-                    "pending_dialogue": new_pending, "conversation_state": conv_state,
-                    "mission_id": mission_id, "inspector": conv_state, "domain": "coding", "trace": self.last_trace
-                }
+                result = CanonicalTurnResult.waiting_context(
+                    pending_q,
+                    metadata={
+                        "dialogue_state": "WAITING_CONTEXT",
+                        "target_field": next_field,
+                        "pending_dialogue": new_pending,
+                        "conversation_state": conv_state,
+                        "compatibility_dialogue_id": mission_id,
+                        "compatibility_lifecycle": {
+                            "classification": "COMPATIBILITY_ONLY",
+                            "canonical_mission": False,
+                            "completion_authority": None,
+                        },
+                        "inspector": conv_state,
+                        "domain": "coding",
+                        "trace": self.last_trace,
+                    },
+                )
+                return self._compatibility_response(
+                    result,
+                    component="ProductBridgeFieldFilling",
+                    reason="legacy_typed_field_filling_or_local_product_flow",
+                    entry_point="ProductBridge.application_field_filling",
+                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                )
             else:
                 # All app fields present! Render complete app spec.
                 now = utc_iso()
@@ -833,11 +888,28 @@ Estratégia completa registrada no histórico para execução."""
                     "mission_id": mission_id, "mission_status": "completed", "pending_dialogue": None,
                     "conversation_state": conv_state, "history": full_history, "updated_at": now,
                 })
-                return {
-                    "ok": True, "text": app_summary, "provider": "local", "provider_called": False, "status": "concluído",
-                    "mission_id": mission_id, "domain": "coding", "conversation_state": conv_state, "inspector": conv_state,
-                    "trace": self.last_trace
-                }
+                result = CanonicalTurnResult.local(
+                    app_summary,
+                    metadata={
+                        "compatibility_dialogue_id": mission_id,
+                        "compatibility_lifecycle": {
+                            "classification": "COMPATIBILITY_ONLY",
+                            "canonical_mission": False,
+                            "completion_authority": None,
+                        },
+                        "domain": "coding",
+                        "conversation_state": conv_state,
+                        "inspector": conv_state,
+                        "trace": self.last_trace,
+                    },
+                )
+                return self._compatibility_response(
+                    result,
+                    component="ProductBridgeFieldFilling",
+                    reason="legacy_typed_field_filling_or_local_product_flow",
+                    entry_point="ProductBridge.application_field_filling",
+                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                )
 
         # 5. Default Fallback through Kernel Engine
         default_provider = self.components.provider_manager.default
@@ -871,10 +943,19 @@ Estratégia completa registrada no histórico para execução."""
                 persist_session=persist_turn,
             )
             self._flow_event("request_failed", stage=self.last_trace["lastCompletedStage"],
-                             result="error", error=response["error_code"],
+                             result="error", error=response.metadata["error_code"],
                              duration_ms=round((time.perf_counter() - started) * 1000, 2))
-            response["trace"] = self.last_trace
-            return response
+            response = replace(
+                response,
+                metadata={**response.metadata, "trace": self.last_trace},
+            )
+            return self._compatibility_response(
+                response,
+                component="Kernel/PipelineDAG",
+                reason="non_mission_conversation_used_legacy_kernel_pipeline",
+                entry_point="ProductBridge.kernel_fallback",
+                canonical_alternative_missing="canonical_conversation_content_runtime",
+            )
 
         used_provider = self.components.provider_manager.last_used
         used_fallback = bool(
@@ -920,21 +1001,45 @@ Estratégia completa registrada no histórico para execução."""
         self._flow_event("response_persisted", mission_id=context.get("mission_id"),
                          result="success",
                          duration_ms=round((time.perf_counter() - started) * 1000, 2))
-        return {"ok": True, "text": result.text, "provider": response_provider,
-                "fallback_used": used_fallback, "provider_called": bool(used_provider),
-                "provider_explanation": None if used_provider else
-                    "A capability Atlas respondeu localmente; o Gemini não foi necessário.",
-                "provider_selection": provider_selection.to_dict(),
-                "resource_provenance": (
-                    [f"provider:{used_provider}"] if used_provider else ["RRM"]
-                ),
-                "status": "concluído", "domain": result.domain.value,
-                "mission_id": context.get("mission_id"),
-                "intent": context.get("intent_model"),
-                "structured_intent": structured_intent.to_dict(),
-                "iqi": structured_intent.intent_quality_index,
-                "conversation_state": conv_state, "inspector": conv_state,
-                "trace": self.last_trace}
+        metadata = {
+            "fallback_used": used_fallback,
+            "provider_explanation": None if used_provider else (
+                "A capability Atlas respondeu localmente; o Gemini não foi necessário."
+            ),
+            "provider_selection": provider_selection.to_dict(),
+            "domain": result.domain.value,
+            "intent": context.get("intent_model"),
+            "structured_intent": structured_intent.to_dict(),
+            "iqi": structured_intent.intent_quality_index,
+            "conversation_state": conv_state,
+            "inspector": conv_state,
+            "trace": self.last_trace,
+        }
+        if context.get("mission_id"):
+            metadata.update({
+                "compatibility_dialogue_id": str(context["mission_id"]),
+                "compatibility_lifecycle": {
+                    "classification": "COMPATIBILITY_ONLY",
+                    "canonical_mission": False,
+                    "completion_authority": None,
+                },
+            })
+        canonical_result = CanonicalTurnResult.provider(
+            result.text,
+            provider_id=response_provider,
+            invoked=bool(used_provider),
+            resource_ids=(
+                (f"provider:{used_provider}",) if used_provider else ("RRM",)
+            ),
+            metadata=metadata,
+        )
+        return self._compatibility_response(
+            canonical_result,
+            component="Kernel/PipelineDAG",
+            reason="non_mission_conversation_used_legacy_kernel_pipeline",
+            entry_point="ProductBridge.kernel_fallback",
+            canonical_alternative_missing="canonical_conversation_content_runtime",
+        )
 
     @staticmethod
     def _recognize_memory_fact(message: str, structured_intent: Any) -> str | None:
@@ -953,54 +1058,35 @@ Estratégia completa registrada no histórico para execução."""
         declarative = not getattr(structured_intent, "clarifying_question", None)
         return normalized if declarative and (preference or project_fact) else None
 
-    def _terminal_cognitive_response(self, decision: Any) -> dict[str, Any] | None:
-        mode = decision.mode
-        composition = decision.composition
-        missing = list(composition.missing_capabilities if composition else [])
-        authorization = list(
-            composition.authorization_requirements if composition else []
-        )
-        common = {
-            "ok": True,
-            "execution_mode": mode.value,
-            "provider": None,
-            "provider_called": False,
-            "mission_id": None,
-            "missing_capabilities": missing,
-            "authorization_requirements": authorization,
-            "capability_analysis": decision.to_dict(),
-        }
-        if mode is CognitiveExecutionMode.UNKNOWN:
-            return {**common, "text": "Não há capacidade ou recurso elegível suficiente para atender esta solicitação com segurança.", "status": "UNKNOWN", "domain": decision.domain_hint, "epistemic_status": "unknown", "confidence": 1.0}
-        if mode is CognitiveExecutionMode.BLOCKED:
-            return {**common, "text": "A solicitação foi bloqueada pela Constitution.", "status": "BLOCKED", "domain": decision.domain_hint, "epistemic_status": "fact", "confidence": 1.0}
-        if mode is CognitiveExecutionMode.AUTHORIZATION_REQUIRED:
-            return {**common, "text": "Esta ação exige autorização explícita antes de qualquer execução.", "status": "AUTHORIZATION_REQUIRED", "domain": decision.domain_hint, "epistemic_status": "fact", "confidence": 1.0}
-        if mode is CognitiveExecutionMode.EXTERNAL_REASONING_REQUIRED:
-            return {**common, "text": "Não tenho conhecimento local suficiente e não há Provider externo elegível conectado.", "status": "EXTERNAL_RESOURCE_REQUIRED", "domain": decision.domain_hint, "epistemic_status": "unknown", "confidence": 1.0}
-        return None
+    def _terminal_cognitive_response(
+        self, decision: Any
+    ) -> CanonicalTurnResult | None:
+        return CanonicalTurnResult.from_cognitive_decision(decision)
 
     @staticmethod
     def _compatibility_response(
-        response: dict[str, Any],
+        response: CanonicalTurnResult,
         *,
         component: str,
         reason: str,
         canonical_alternative_missing: str | None,
-    ) -> dict[str, Any]:
+        entry_point: str,
+    ) -> CanonicalTurnResult:
+        metadata = dict(response.metadata)
         attach_compatibility_trace(
-            response,
+            metadata,
             compatibility_trace(
                 component,
                 reason,
+                entry_point=entry_point,
                 canonical_alternative_missing=canonical_alternative_missing,
             ),
         )
-        return response
+        return replace(response, metadata=metadata)
 
     async def _run_controlled_mission(
         self, message: str, decision: Any, context: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> CanonicalTurnResult:
         """Reach the governed MissionRuntime with a non-executing synthetic action."""
         mission = await self.components.mission_service.create_started(
             message,
@@ -1014,12 +1100,12 @@ Estratégia completa registrada no histórico para execução."""
         )
         if not planning_verdict.allowed:
             await self.components.mission_service.block_planning(mission)
-            return {
-                "ok": True, "text": "O planejamento foi bloqueado pela Constitution.",
-                "status": "BLOCKED", "execution_mode": "BLOCKED",
-                "provider": None, "provider_called": False,
-                "mission_id": str(mission.id),
-            }
+            return CanonicalTurnResult.blocked(
+                "O planejamento foi bloqueado pela Constitution.",
+                reason=planning_verdict.reason,
+                mission_id=str(mission.id),
+                metadata={"domain": decision.domain_hint},
+            )
         # CPE/COR/ECC supervise plan construction; their result is diagnostic and
         # MissionRuntime remains the sole action execution authority.
         executive = self.ecc.process_intent(
@@ -1050,24 +1136,13 @@ Estratégia completa registrada no histórico para execução."""
         )
         authorization = authorization_boundary.decision
         if authorization is not ToolAuthorizationDecisionState.ALLOW:
-            return {
-                "ok": True,
-                "text": authorization_boundary.text,
-                "status": authorization_boundary.response_status,
-                "execution_mode": authorization_boundary.execution_mode,
-                "epistemic_status": "fact",
-                "confidence": 1.0,
-                "provider": None,
-                "provider_called": False,
-                "mission_id": str(mission.id),
+            return CanonicalTurnResult.from_mission_authorization(
+                authorization_boundary,
+                mission_id=str(mission.id),
+                metadata={
                 "runtime_id": None,
                 "runtime_status": None,
                 "authorization_gate": authorization.value,
-                "authorization_requirements": list(
-                    authorization_boundary.authorization_requirements
-                ),
-                "next_actions": list(authorization_boundary.next_actions),
-                "verification_evidence": [],
                 "mission_authority": {
                     "identity_owner": "MissionEngine",
                     "lifecycle_owner": "MissionEngine",
@@ -1086,7 +1161,8 @@ Estratégia completa registrada no histórico para execução."""
                     {"confirmation_state": authorization_boundary.confirmation_state}
                     if authorization_boundary.confirmation_state else {}
                 ),
-            }
+                },
+            )
         contract = ActionContract(
             capability="test.echo",
             action_type="SIMULATED",
@@ -1107,22 +1183,16 @@ Estratégia completa registrada no histórico para execução."""
             project_id=context["project_id"],
         )
         instance = await self.components.mission_runtime.run_mission(instance.runtime_id)
-        return {
-            "ok": True,
-            "text": "A ação foi planejada e aguarda confirmação antes da execução simulada.",
-            "status": "WAITING_CONFIRMATION",
-            "execution_mode": "MISSION",
-            "epistemic_status": "fact",
-            "confidence": 1.0,
-            "provider": None,
-            "provider_called": False,
-            "mission_id": str(mission.id),
+        return CanonicalTurnResult.waiting_confirmation(
+            "A ação foi planejada e aguarda confirmação antes da execução simulada.",
+            mission_id=str(mission.id),
+            verification_evidence=tuple(instance.completion_evidence),
+            authorization_requirements=("user.confirmation",),
+            next_actions=("Confirmar a ação simulada",),
+            metadata={
             "runtime_id": instance.runtime_id,
             "runtime_status": instance.status.value,
             "authorization_gate": authorization.value,
-            "authorization_requirements": ["user.confirmation"],
-            "next_actions": ["Confirmar a ação simulada"],
-            "verification_evidence": list(instance.completion_evidence),
             "mission_authority": {
                 "identity_owner": "MissionEngine",
                 "lifecycle_owner": "MissionEngine",
@@ -1137,30 +1207,30 @@ Estratégia completa registrada no histórico para execução."""
                 "canonical_state": instance.lifecycle_status,
             },
             "domain": decision.domain_hint,
-        }
+            },
+        )
 
     async def _govern_response(
-        self, response: dict[str, Any], request: dict[str, Any]
+        self, response: CanonicalTurnResult, request: dict[str, Any]
     ) -> dict[str, Any]:
-        """Normalize every product response and apply the canonical output gate."""
-        response = dict(response)
-        execution_mode = str(response.get("execution_mode", ""))
-        if not response.get("compatibility_path_used") and execution_mode != "MISSION":
-            if response.get("provider_selection") is not None:
-                self._compatibility_response(
-                    response,
-                    component="Kernel/PipelineDAG",
-                    reason="non_mission_conversation_used_legacy_kernel_pipeline",
-                    canonical_alternative_missing="canonical_conversation_content_runtime",
-                )
-            elif response.get("domain") in {"finance", "coding", "productivity"}:
-                self._compatibility_response(
-                    response,
-                    component="ProductBridgeFieldFilling",
-                    reason="legacy_typed_field_filling_or_local_product_flow",
-                    canonical_alternative_missing="canonical_typed_conversation_policy",
-                )
-        response_mission_id = response.get("mission_id")
+        """Serialize a typed result after canonical response/output governance."""
+        metadata = dict(response.metadata)
+        if self.last_pending_dialogue_match is not None:
+            metadata.setdefault(
+                "pending_dialogue_match", self.last_pending_dialogue_match
+            )
+        if self.last_conversation_authority is not None:
+            metadata.setdefault(
+                "conversation_authority", self.last_conversation_authority
+            )
+        participation = list(metadata.get("compatibility_traces", ()))
+        metadata["compatibility_path_used"] = bool(participation)
+        metadata["compatibility_traces"] = participation
+        if not participation:
+            metadata.pop("compatibility_trace", None)
+
+        response_mission_id = response.mission_id
+        canonical_result = response
         if response_mission_id:
             canonical_mission = None
             try:
@@ -1172,42 +1242,34 @@ Estratégia completa registrada no histórico para execução."""
             if canonical_mission is None:
                 # Preserve the compatibility correlation token without
                 # representing it as canonical Mission identity or lifecycle.
-                response["compatibility_dialogue_id"] = str(response_mission_id)
-                response["mission_id"] = None
-                response["compatibility_lifecycle"] = {
+                metadata["compatibility_dialogue_id"] = str(response_mission_id)
+                metadata["compatibility_lifecycle"] = {
                     "classification": "COMPATIBILITY_ONLY",
                     "canonical_mission": False,
                     "completion_authority": None,
                 }
-                if not response.get("compatibility_path_used"):
-                    self._compatibility_response(
-                        response,
-                        component="ProductBridgeDialogueLifecycle",
-                        reason="legacy_dialogue_identifier_was_not_a_canonical_mission",
+                attach_compatibility_trace(
+                    metadata,
+                    compatibility_trace(
+                        "ProductBridgeDialogueLifecycle",
+                        "legacy_dialogue_identifier_was_not_a_canonical_mission",
+                        entry_point="ProductBridge._govern_response.mission_identity",
                         canonical_alternative_missing="canonical_dialogue_identity",
-                    )
+                    ),
+                )
+                canonical_result = replace(response, mission_id=None)
+        canonical_result = replace(canonical_result, metadata=metadata)
         canonical = self.response_assembler.from_result(
-            response,
-            default_execution_mode=str(
-                self.last_capability_analysis
-                and self.last_capability_analysis.get("mode")
-                or "CONVERSATION"
-            ),
+            canonical_result,
         )
         canonical = await self.response_assembler.assemble(
             canonical,
             {"project_id": request.get("project_id", "GLOBAL"), "session_id": request.get("session_id", "product-alpha")},
         )
         normalized = canonical.to_dict()
-        normalized.update({key: value for key, value in response.items() if key not in normalized})
-        normalized["text"] = canonical.text
-        normalized["status"] = canonical.status.value
-        normalized["execution_mode"] = canonical.execution_mode
-        normalized["epistemic_status"] = canonical.epistemic_status
-        normalized["confidence"] = canonical.confidence
-        normalized["provider"] = canonical.provider
-        normalized["provider_called"] = canonical.provider_called
-        normalized["mission_id"] = canonical.mission_id
+        normalized.update(
+            {key: value for key, value in metadata.items() if key not in normalized}
+        )
         normalized["response_authority"] = "CognitiveResponseAssembler"
         return normalized
 
@@ -1229,7 +1291,7 @@ Estratégia completa registrada no histórico para execução."""
         domain: str,
         text_out: str,
         persist_session: Any | None = None,
-    ) -> dict[str, Any]:
+    ) -> CanonicalTurnResult:
         now = utc_iso()
         self._record_local_flow(structured_intent, mission_id)
         full_history = [
@@ -1267,18 +1329,28 @@ Estratégia completa registrada no histórico para execução."""
             self._save_session(session_id, record)
         self._flow_event("response_persisted", mission_id=mission_id,
                          result="success")
-        return {
-            "ok": True,
-            "text": text_out,
-            "provider": "local",
-            "provider_called": False,
-            "status": "concluído",
-            "mission_id": mission_id,
-            "domain": domain,
-            "conversation_state": state,
-            "inspector": state,
-            "trace": self.last_trace,
-        }
+        result = CanonicalTurnResult.local(
+            text_out,
+            metadata={
+                "compatibility_dialogue_id": mission_id,
+                "compatibility_lifecycle": {
+                    "classification": "COMPATIBILITY_ONLY",
+                    "canonical_mission": False,
+                    "completion_authority": None,
+                },
+                "domain": domain,
+                "conversation_state": state,
+                "inspector": state,
+                "trace": self.last_trace,
+            },
+        )
+        return self._compatibility_response(
+            result,
+            component="ProductBridgeFieldFilling",
+            reason="legacy_typed_field_filling_or_local_product_flow",
+            entry_point="ProductBridge._complete_local_request",
+            canonical_alternative_missing="canonical_typed_conversation_policy",
+        )
 
     def _provider_failure(
         self,
@@ -1290,7 +1362,7 @@ Estratégia completa registrada no histórico para execução."""
         provider: str | None,
         *,
         persist_session: Any | None = None,
-    ) -> dict[str, Any]:
+    ) -> CanonicalTurnResult:
         name = type(exc).__name__
         provider_code = getattr(exc, "code", "")
 
@@ -1313,9 +1385,15 @@ Estratégia completa registrada no histórico para execução."""
                 persist_session(record)
             else:
                 self._save_session(session_id, record)
-            return {"ok": False, "error": text, "error_code": code,
-                    "provider": None, "provider_status": status,
-                    "mission_id": context.get("mission_id")}
+            return CanonicalTurnResult.failed(
+                text,
+                mission_id=context.get("mission_id"),
+                metadata={
+                    "error": text,
+                    "error_code": code,
+                    "provider_status": status,
+                },
+            )
 
         if name == "RateLimitError" or provider_code == "quota_reached":
             text = f"O Provider {provider or 'selecionado'} atingiu seu limite. Aguarde a renovação da cota ou revise os limites da conta."
@@ -1340,9 +1418,17 @@ Estratégia completa registrada no histórico para execução."""
             persist_session(record)
         else:
             self._save_session(session_id, record)
-        return {"ok": False, "error": text, "error_code": code,
-                "provider": provider, "provider_status": status,
-                "mission_id": context.get("mission_id")}
+        return CanonicalTurnResult.failed(
+            text,
+            provider_id=provider,
+            provider_invoked=bool(provider),
+            mission_id=context.get("mission_id"),
+            metadata={
+                "error": text,
+                "error_code": code,
+                "provider_status": status,
+            },
+        )
 
     async def _pause_failed_mission(self, context: dict[str, Any]) -> None:
         mission_id = context.get("mission_id")
@@ -1417,10 +1503,19 @@ Estratégia completa registrada no histórico para execução."""
     def _provider_event(self, event: str, metadata: dict[str, Any]) -> None:
         self._flow_event(event, metadata)
 
-    def _fail(self, stage: str, code: str, message: str, started: float) -> dict[str, Any]:
+    def _fail(
+        self, stage: str, code: str, message: str, started: float
+    ) -> CanonicalTurnResult:
         self._flow_event("request_failed", stage=stage, error=code, result="error",
                          duration_ms=round((time.perf_counter() - started) * 1000, 2))
-        return {"ok": False, "error": message, "error_code": code, "trace": self.last_trace}
+        return CanonicalTurnResult.failed(
+            message,
+            metadata={
+                "error": message,
+                "error_code": code,
+                "trace": self.last_trace,
+            },
+        )
 
     def _normalize_session(self, value: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(value)

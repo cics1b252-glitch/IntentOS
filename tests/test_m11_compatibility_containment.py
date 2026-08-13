@@ -17,6 +17,7 @@ TRACE_KEYS = {
     "compatibility_path_used",
     "compatibility_component",
     "reason",
+    "entry_point",
     "canonical_alternative_missing",
     "deprecation_candidate",
 }
@@ -54,7 +55,9 @@ async def test_terminal_decisions_never_enter_or_report_compatibility(
     })
     assert response["status"] == status
     assert response["mission_id"] is None
-    assert "compatibility_path_used" not in response
+    assert response["compatibility_path_used"] is False
+    assert response["compatibility_traces"] == []
+    assert "compatibility_trace" not in response
 
 
 @pytest.mark.asyncio

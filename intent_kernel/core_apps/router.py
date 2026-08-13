@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from intent_kernel.compatibility import compatibility_trace
 from intent_kernel.contracts import (
     Capability,
     CapabilityRequest,
@@ -37,6 +38,7 @@ class CapabilityRouter:
     def __init__(self):
         self._apps: dict[str, CoreApp] = {}
         self._capability_map: dict[str, str] = {}
+        self._last_compatibility_trace = None
 
     def register(self, app: CoreApp) -> None:
         for descriptor in app.capabilities:
@@ -54,10 +56,16 @@ class CapabilityRouter:
         mission: Mission,
         capability: str | None = None,
     ) -> CoreApp | None:
-        requested = capability or self._DOMAIN_DEFAULTS.get(
-            mission.context.domain,
-            "",
-        )
+        if capability is None:
+            self._last_compatibility_trace = compatibility_trace(
+                "CapabilityRouter",
+                "legacy_domain_default_used_without_explicit_capability",
+                canonical_alternative_missing="explicit_capability_requirement",
+            ).to_dict()
+            requested = self._DOMAIN_DEFAULTS.get(mission.context.domain, "")
+        else:
+            self._last_compatibility_trace = None
+            requested = capability
         owner = self._capability_map.get(requested)
         return self._apps.get(owner) if owner else None
 
@@ -68,11 +76,18 @@ class CapabilityRouter:
         payload: dict[str, Any] | None = None,
         context: dict[str, Any] | None = None,
     ) -> CapabilityResult:
-        requested = capability or self._DOMAIN_DEFAULTS.get(
-            mission.context.domain,
-            "",
-        )
+        used_domain_default = capability is None
+        if used_domain_default:
+            requested = self._DOMAIN_DEFAULTS.get(mission.context.domain, "")
+        else:
+            requested = capability
         app = self.select(mission, requested)
+        if used_domain_default:
+            self._last_compatibility_trace = compatibility_trace(
+                "CapabilityRouter",
+                "legacy_domain_default_used_without_explicit_capability",
+                canonical_alternative_missing="explicit_capability_requirement",
+            ).to_dict()
         if app is None:
             return CapabilityResult(
                 capability=requested,
@@ -103,6 +118,10 @@ class CapabilityRouter:
     @property
     def registered_apps(self) -> tuple[str, ...]:
         return tuple(self._apps)
+
+    @property
+    def last_compatibility_trace(self) -> dict[str, Any] | None:
+        return dict(self._last_compatibility_trace) if self._last_compatibility_trace else None
 
     async def execute(
         self,

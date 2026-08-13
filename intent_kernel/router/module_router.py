@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from intent_kernel.compatibility import compatibility_trace
 from intent_kernel.types import Domain, IntentInput
 
 
@@ -20,6 +21,7 @@ class ModuleRouter:
         self._domain_map: dict[Domain, str] = {}  # domain → module name
         self._trigger_map: dict[str, str] = {}  # trigger word → module name
         self._telemetry = telemetry
+        self._last_compatibility_trace = None
 
     def register(self, module: Any) -> None:
         """Register a module with the router."""
@@ -39,9 +41,16 @@ class ModuleRouter:
         2. Trigger word match
         3. CORE module (fallback)
         """
+        trace = compatibility_trace(
+            "ModuleRouter",
+            "legacy_domain_trigger_or_core_module_selection",
+            canonical_alternative_missing="explicit_capability_binding",
+        )
+        self._last_compatibility_trace = trace.to_dict()
         if self._telemetry is not None:
             self._telemetry.record_fallback(intent.domain.value)
             self._telemetry.record_legacy("ModuleRouter")
+            self._telemetry.record_compatibility(trace)
 
         # Try domain match first
         if intent.domain in self._domain_map:
@@ -65,3 +74,7 @@ class ModuleRouter:
     def registered_modules(self) -> list[str]:
         """List of registered module names."""
         return list(self._modules.keys())
+
+    @property
+    def last_compatibility_trace(self) -> dict[str, Any] | None:
+        return dict(self._last_compatibility_trace) if self._last_compatibility_trace else None

@@ -197,6 +197,30 @@ The detailed evidence and per-dimension classifications are in the JSON map.
 - Compatibility may remain only when it is explicit, observable, governed, and
   subordinate to terminal cognitive decisions.
 
+## Checkpoint 11.7 — compatibility containment
+
+Movement 11.7 standardizes every newly characterized compatibility observation
+with five non-sensitive fields: `compatibility_path_used`,
+`compatibility_component`, `reason`, `canonical_alternative_missing`, and
+`deprecation_candidate`. Product responses carry these fields in a nested
+`compatibility_trace` and remain governed by `CognitiveResponseAssembler` and
+`response.output`.
+
+| Reachable compatibility owner | Containment after 11.7 |
+| --- | --- |
+| ProductBridge finance/app field filling | Explicit `ProductBridgeFieldFilling` trace; terminal decisions and Mission routing still return before this path. |
+| Kernel / PipelineDAG conversation fallback | Explicit trace on the canonical response envelope; RRM provider selection and final output governance remain authoritative. |
+| ModuleRouter | Records a bounded standard trace in migration telemetry before Domain/trigger/Core compatibility selection. |
+| Core App CapabilityRouter Domain default | Retained for characterized callers only and emits an explicit trace; an explicit capability clears compatibility state. |
+| ProviderManager direct default | Retained for direct legacy callers only and emits an explicit trace; RRM-selected product invocation clears it. |
+| Legacy capability/provider/agent adapters | Results carry the standard trace; adapters cannot grant resource eligibility or Mission completion. |
+
+The trace contains component and authority metadata only. It never contains the
+request text, memory values, provider payloads, credentials, or raw private data.
+No compatibility trace grants execution authority: terminal cognition, RRM,
+ToolAuthorizationGate, MissionEngine/MissionRuntime, ActionGate, verification,
+and response governance continue to dominate.
+
 ## Evidence index
 
 - Composition and reachability: `intent_kernel/application/composition.py`

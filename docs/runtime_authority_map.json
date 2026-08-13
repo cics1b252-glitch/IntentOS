@@ -392,7 +392,7 @@
         "capability_selection": "COMPATIBILITY_ONLY",
         "execution": "COMPATIBILITY_ONLY"
       },
-      "evidence": ["ModuleRouter prioritizes Domain, then trigger words, then Core fallback and records legacy telemetry."],
+      "evidence": ["ModuleRouter prioritizes Domain, then trigger words, then Core fallback and records a standard non-sensitive compatibility trace."],
       "intended_disposition": "EXPLICIT_OBSERVABLE_FALLBACK_ONLY"
     },
     {
@@ -405,7 +405,7 @@
         "mission_lifecycle": "AUTHORITY_CONFLICT",
         "execution": "COMPATIBILITY_ONLY"
       },
-      "evidence": ["Adapter contains a hardcoded Domain-to-capability map and calls MissionEngine.complete after execution service output."],
+      "evidence": ["Adapter contains a compatibility Domain-to-capability translation, emits the standard compatibility trace, and cannot complete MissionEngine without canonical verification evidence."],
       "intended_disposition": "ISOLATED_COMPATIBILITY_ADAPTER_WITHOUT_COMPLETION_AUTHORITY"
     },
     {
@@ -587,8 +587,8 @@
       "id": "AC-006",
       "dimension": "capability_selection",
       "owners": ["CapabilityFirstResolver", "Core App CapabilityRouter", "ModuleRouter", "LegacyCapabilityExecutorAdapter"],
-      "finding": "Explicit canonical capability selection is active, but Core App Domain defaults and legacy Domain/trigger mapping remain callable compatibility authorities.",
-      "target_checkpoint": "11.4 and 11.7"
+      "finding": "Explicit canonical capability selection is active. Callable Core App Domain defaults and legacy Domain/trigger mapping are now characterized compatibility paths with the standard non-sensitive trace.",
+      "target_checkpoint": "11.4 and 11.7 implemented"
     }
   ],
   "product_bridge_migration_ledger": [

@@ -8,6 +8,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from intent_kernel.compatibility import attach_compatibility_trace, compatibility_trace
+
 from intent_kernel.contracts import (
     AgentId,
     AgentLimits,
@@ -55,13 +57,22 @@ class LegacyProviderAdapter:
             temperature=request.temperature,
             max_tokens=request.max_tokens,
         )
-        return ProviderResponse(
+        response = ProviderResponse(
             text=result.text,
             provider=self.name,
             model=result.model,
             usage=dict(result.usage),
             finish_reason=result.finish_reason,
         )
+        attach_compatibility_trace(
+            response.metadata,
+            compatibility_trace(
+                "LegacyProviderAdapter",
+                "legacy_provider_invocation_binding",
+                canonical_alternative_missing="native_provider_binding",
+            ),
+        )
+        return response
 
     async def health(self) -> bool:
         return bool(await self._provider.health_check())
@@ -295,10 +306,17 @@ class LegacyCapabilityExecutorAdapter:
             outcome.result.metadata.setdefault(
                 "compatibility_path_used", True
             )
+            trace = compatibility_trace(
+                "LegacyCapabilityExecutorAdapter",
+                "legacy_domain_was_translated_to_canonical_capability",
+                canonical_alternative_missing="native_capability_request",
+            )
+            attach_compatibility_trace(outcome.result.metadata, trace)
             if self._telemetry is not None:
                 self._telemetry.record_legacy(
                     "LegacyCapabilityExecutorAdapter"
                 )
+                self._telemetry.record_compatibility(trace)
             return outcome.result
 
         from intent_kernel.types import Domain as LegacyDomain
@@ -321,12 +339,22 @@ class LegacyCapabilityExecutorAdapter:
             domain=legacy_domain,
         )
         result = await module.execute(intent, context)
+        metadata = {"legacy_result": result}
+        trace = compatibility_trace(
+            "LegacyCapabilityExecutorAdapter",
+            "direct_legacy_module_execution",
+            canonical_alternative_missing="canonical_capability_binding",
+        )
+        attach_compatibility_trace(metadata, trace)
+        if self._telemetry is not None:
+            self._telemetry.record_legacy("LegacyCapabilityExecutorAdapter")
+            self._telemetry.record_compatibility(trace)
         return CapabilityResult(
             capability=capability,
             success=True,
             output=result.get("text", result),
             confidence=float(result.get("confidence", 0.0)),
-            metadata={"legacy_result": result},
+            metadata=metadata,
         )
 
 
@@ -372,16 +400,25 @@ class LegacyAgentAdapter:
             execution_context = context or {}
             capability = str(self.agent_id)
         result = await self._agent.process(task, execution_context)
+        metadata = {
+            "agent_id": str(self.agent_id),
+            "domain": result.domain,
+            "events_created": result.events_created,
+        }
+        attach_compatibility_trace(
+            metadata,
+            compatibility_trace(
+                "LegacyAgentAdapter",
+                "legacy_agent_invocation_binding",
+                canonical_alternative_missing="canonical_agent_binding",
+            ),
+        )
         return CapabilityResult(
             capability=capability,
             success=True,
             output=result.content,
             confidence=result.confidence,
-            metadata={
-                "agent_id": str(self.agent_id),
-                "domain": result.domain,
-                "events_created": result.events_created,
-            },
+            metadata=metadata,
         )
 
 

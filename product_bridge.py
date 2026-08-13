@@ -29,6 +29,7 @@ from intent_kernel.persistence import JsonFilePersistenceEngine
 from intent_kernel.bcc import BootstrapCognitiveCortex
 from intent_kernel.modules.fin.module import _extract_brl_amount
 from intent_kernel.cognition import CognitiveExecutionMode
+from intent_kernel.compatibility import attach_compatibility_trace, compatibility_trace
 from intent_kernel.response import (
     CognitiveResponseAssembler,
 )
@@ -979,6 +980,24 @@ Estratégia completa registrada no histórico para execução."""
             return {**common, "text": "Não tenho conhecimento local suficiente e não há Provider externo elegível conectado.", "status": "EXTERNAL_RESOURCE_REQUIRED", "domain": decision.domain_hint, "epistemic_status": "unknown", "confidence": 1.0}
         return None
 
+    @staticmethod
+    def _compatibility_response(
+        response: dict[str, Any],
+        *,
+        component: str,
+        reason: str,
+        canonical_alternative_missing: str | None,
+    ) -> dict[str, Any]:
+        attach_compatibility_trace(
+            response,
+            compatibility_trace(
+                component,
+                reason,
+                canonical_alternative_missing=canonical_alternative_missing,
+            ),
+        )
+        return response
+
     async def _run_controlled_mission(
         self, message: str, decision: Any, context: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1125,6 +1144,22 @@ Estratégia completa registrada no histórico para execução."""
     ) -> dict[str, Any]:
         """Normalize every product response and apply the canonical output gate."""
         response = dict(response)
+        execution_mode = str(response.get("execution_mode", ""))
+        if not response.get("compatibility_path_used") and execution_mode != "MISSION":
+            if response.get("provider_selection") is not None:
+                self._compatibility_response(
+                    response,
+                    component="Kernel/PipelineDAG",
+                    reason="non_mission_conversation_used_legacy_kernel_pipeline",
+                    canonical_alternative_missing="canonical_conversation_content_runtime",
+                )
+            elif response.get("domain") in {"finance", "coding", "productivity"}:
+                self._compatibility_response(
+                    response,
+                    component="ProductBridgeFieldFilling",
+                    reason="legacy_typed_field_filling_or_local_product_flow",
+                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                )
         response_mission_id = response.get("mission_id")
         if response_mission_id:
             canonical_mission = None
@@ -1144,6 +1179,13 @@ Estratégia completa registrada no histórico para execução."""
                     "canonical_mission": False,
                     "completion_authority": None,
                 }
+                if not response.get("compatibility_path_used"):
+                    self._compatibility_response(
+                        response,
+                        component="ProductBridgeDialogueLifecycle",
+                        reason="legacy_dialogue_identifier_was_not_a_canonical_mission",
+                        canonical_alternative_missing="canonical_dialogue_identity",
+                    )
         canonical = self.response_assembler.from_result(
             response,
             default_execution_mode=str(

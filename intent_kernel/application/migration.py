@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from threading import Lock
+
+from intent_kernel.compatibility import CompatibilityTrace
 
 
 class MigrationTelemetry:
@@ -17,6 +20,7 @@ class MigrationTelemetry:
         self._canonical: Counter[str] = Counter()
         self._fallback: Counter[str] = Counter()
         self._legacy_calls: Counter[str] = Counter()
+        self._compatibility_traces: list[dict] = []
         self._dependency_counts = dict(dependency_counts or {})
         self._lock = Lock()
 
@@ -32,11 +36,18 @@ class MigrationTelemetry:
         with self._lock:
             self._legacy_calls[component] += 1
 
+    def record_compatibility(self, trace: CompatibilityTrace) -> None:
+        """Record bounded authority metadata, never request or memory payloads."""
+        with self._lock:
+            self._compatibility_traces.append(trace.to_dict())
+            self._compatibility_traces = self._compatibility_traces[-50:]
+
     def snapshot(self) -> dict:
         with self._lock:
             canonical = dict(self._canonical)
             fallback = dict(self._fallback)
             legacy = dict(self._legacy_calls)
+            traces = deepcopy(self._compatibility_traces)
         canonical_total = sum(canonical.values())
         fallback_total = sum(fallback.values())
         total = canonical_total + fallback_total
@@ -54,5 +65,6 @@ class MigrationTelemetry:
             "canonical_by_domain": canonical,
             "fallback_by_domain": fallback,
             "legacy_component_calls": legacy,
+            "compatibility_traces": traces,
             "direct_dependencies": dict(self._dependency_counts),
         }

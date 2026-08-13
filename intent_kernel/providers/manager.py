@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from intent_kernel.contracts import Provider, ProviderRequest, ProviderResponse
+from intent_kernel.compatibility import compatibility_trace
 from intent_kernel.types import Mode
 
 
@@ -23,6 +24,7 @@ class ProviderManager:
         self._observer = None
         self._resource_projection = None
         self._selection_authority = None
+        self._last_compatibility_trace = None
 
     def set_observer(self, observer) -> None:
         """Attach a non-sensitive execution observer owned by the interface."""
@@ -92,6 +94,7 @@ class ProviderManager:
     async def route(self, mode: Mode, selection=None) -> Provider | None:
         """Bind an RRM selection; direct calls retain a compatibility default."""
         if selection is not None:
+            self._last_compatibility_trace = None
             provider_id = getattr(selection, "provider_id", None)
             if provider_id is None and isinstance(selection, dict):
                 provider_id = selection.get("provider_id")
@@ -111,6 +114,11 @@ class ProviderManager:
                 fallback_provider_id=str(fallback) if fallback else None,
             )
         # Direct Kernel callers retain the characterized compatibility default.
+        self._last_compatibility_trace = compatibility_trace(
+            "ProviderManager",
+            "direct_caller_used_registered_default_without_rrm_selection",
+            canonical_alternative_missing="canonical_provider_selection",
+        ).to_dict()
         return self.get()
 
     @property
@@ -121,6 +129,10 @@ class ProviderManager:
     def available(self) -> list[str]:
         """List of registered provider names."""
         return list(self._providers.keys())
+
+    @property
+    def last_compatibility_trace(self) -> dict | None:
+        return dict(self._last_compatibility_trace) if self._last_compatibility_trace else None
 
 
 class ManagedProvider:

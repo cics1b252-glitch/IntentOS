@@ -43,7 +43,9 @@ def test_first_intent_uses_kernel_and_persists_session(monkeypatch, tmp_path):
     response = asyncio.run(bridge.dispatch({"action": "chat",
         "message": "Explique qual é sua função.", "session_id": "product-alpha",
         "allow_compatibility_fallback": True}))
-    assert response["ok"] and response["mission_id"]
+    assert response["ok"] and response["mission_id"] is None
+    assert response["compatibility_dialogue_id"] == "11111111-1111-4111-8111-111111111111"
+    assert response["compatibility_lifecycle"]["canonical_mission"] is False
     saved = json.loads((tmp_path / "missions" / "product-alpha.json").read_text(encoding="utf-8"))
     assert saved["intent"]["domain"] == "other"
     assert saved["mission_status"] == "completed"

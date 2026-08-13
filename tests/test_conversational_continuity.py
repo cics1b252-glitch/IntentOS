@@ -35,8 +35,9 @@ class TestConversationalContinuity(unittest.TestCase):
         self.assertTrue(res1.get("ok"))
         self.assertEqual(res1.get("status"), "WAITING_CONTEXT")
         self.assertEqual(res1.get("dialogue_state"), "WAITING_CONTEXT")
-        mission_id = res1.get("mission_id")
-        self.assertIsNotNone(mission_id)
+        self.assertIsNone(res1.get("mission_id"))
+        dialogue_id = res1.get("compatibility_dialogue_id")
+        self.assertIsNotNone(dialogue_id)
         self.assertIn("investimento único ou para um aporte mensal", res1.get("text", ""))
 
         # Verify session file on disk
@@ -53,13 +54,14 @@ class TestConversationalContinuity(unittest.TestCase):
             "message": "com aportes mensais",
             "session_id": session_id,
             "correlation_id": "corr-turn-2",
-            "resume_mission_id": mission_id,
+            "resume_mission_id": dialogue_id,
         }
         res2 = asyncio.run(self.bridge.dispatch(req2))
 
         self.assertTrue(res2.get("ok"))
         self.assertEqual(res2.get("status"), "WAITING_CONTEXT")
-        self.assertEqual(res2.get("mission_id"), mission_id)  # Mission ID preserved!
+        self.assertIsNone(res2.get("mission_id"))
+        self.assertEqual(res2.get("compatibility_dialogue_id"), dialogue_id)
         self.assertEqual(res2.get("target_field"), "goal")
         self.assertIn("objetivo principal", res2.get("text", ""))
 
@@ -82,7 +84,7 @@ class TestConversationalContinuity(unittest.TestCase):
             "session_id": session_id,
         }
         res1 = asyncio.run(self.bridge.dispatch(req1))
-        mission_id = res1.get("mission_id")
+        dialogue_id = res1.get("compatibility_dialogue_id")
         self.assertEqual(res1.get("status"), "WAITING_CONTEXT")
 
         # Simulate process restart by instantiating a brand new ProductBridge
@@ -98,7 +100,8 @@ class TestConversationalContinuity(unittest.TestCase):
 
         self.assertTrue(res2.get("ok"))
         self.assertEqual(res2.get("status"), "WAITING_CONTEXT")
-        self.assertEqual(res2.get("mission_id"), mission_id)  # Auto-resumed from disk session!
+        self.assertIsNone(res2.get("mission_id"))
+        self.assertEqual(res2.get("compatibility_dialogue_id"), dialogue_id)
         self.assertEqual(res2.get("target_field"), "goal")
 
 

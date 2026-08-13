@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-import product_bridge as product_bridge_module
 
 from intent_kernel.cognition.runtime import (
     CognitiveExecutionDecision,
@@ -233,10 +232,13 @@ async def test_valid_recurrence_and_goal_answers_continue_pending_finance(bridge
     assert first["target_field"] == "recurrence"
     assert recurrence["status"] == "WAITING_CONTEXT"
     assert recurrence["target_field"] == "goal"
-    assert recurrence["mission_id"] == first["mission_id"]
+    assert first["mission_id"] is None
+    assert recurrence["mission_id"] is None
+    assert recurrence["compatibility_dialogue_id"] == first["compatibility_dialogue_id"]
     assert goal["status"] == "WAITING_CONTEXT"
     assert goal["target_field"] == "risk_profile"
-    assert goal["mission_id"] == first["mission_id"]
+    assert goal["mission_id"] is None
+    assert goal["compatibility_dialogue_id"] == first["compatibility_dialogue_id"]
 
 
 @pytest.mark.asyncio
@@ -296,7 +298,8 @@ async def test_local_response_interrupts_pending_finance(bridge):
     assert response["status"] == "COMPLETED"
     assert response["execution_mode"] == "LOCAL_RESPONSE"
     assert response["mission_id"] is None
-    assert first["mission_id"] != response["mission_id"]
+    assert first["mission_id"] is None
+    assert first["compatibility_dialogue_id"]
 
 
 @pytest.mark.asyncio
@@ -371,7 +374,8 @@ async def test_marker_collision_is_not_pending_continuation(
     assert response["mission_id"] is None
     assert saved_after["pending_dialogue"] == saved_before["pending_dialogue"]
     assert saved_after["conversation_state"]["known_context"] == saved_before["conversation_state"]["known_context"]
-    assert pending_response["mission_id"] == saved_before["mission_id"]
+    assert pending_response["mission_id"] is None
+    assert pending_response["compatibility_dialogue_id"] == saved_before["mission_id"]
 
 
 @pytest.mark.asyncio
@@ -395,7 +399,8 @@ async def test_typed_pending_answers_remain_valid_continuations(
 
     assert response["pending_dialogue_match"]["match_status"] == "VALID_CONTINUATION"
     assert response["pending_dialogue_match"]["candidate_value"] == candidate
-    assert response["mission_id"] == pending_response["mission_id"]
+    assert response["mission_id"] is None
+    assert response["compatibility_dialogue_id"] == pending_response["compatibility_dialogue_id"]
 
 
 @pytest.mark.asyncio
@@ -419,7 +424,7 @@ async def test_ambiguous_pending_answer_does_not_mutate_dialogue(bridge):
 @pytest.mark.parametrize(
     "gate_state,expected_status,runtime_calls,action_gate_calls,mission_status",
     [
-        (ToolAuthorizationDecisionState.ALLOW, "AUTHORIZATION_REQUIRED", 1, 1, MissionStatus.WAITING_FOR_PERMISSION),
+        (ToolAuthorizationDecisionState.ALLOW, "AUTHORIZATION_REQUIRED", 1, 1, MissionStatus.WAITING_FOR_DECISION),
         (ToolAuthorizationDecisionState.DENY, "BLOCKED", 0, 0, MissionStatus.BLOCKED),
         (ToolAuthorizationDecisionState.REQUEST_PERMISSION, "AUTHORIZATION_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_PERMISSION),
         (ToolAuthorizationDecisionState.REQUEST_CONFIRMATION, "AUTHORIZATION_REQUIRED", 0, 0, MissionStatus.WAITING_FOR_DECISION),
@@ -436,12 +441,8 @@ async def test_only_allow_crosses_tool_authorization_boundary(
         "action_gate": 0, "executor": 0,
     }
 
-    class InstrumentedAuthorizationGate:
-        def __init__(self, _constitution):
-            pass
-
-        async def evaluate_tool(self, *_args, **_kwargs):
-            return gate_state
+    async def evaluate_tool(*_args, **_kwargs):
+        return gate_state
 
     runtime = bridge.components.mission_runtime
     original_create = runtime.create_instance
@@ -466,8 +467,9 @@ async def test_only_allow_crosses_tool_authorization_boundary(
         return await original_execute(*args, **kwargs)
 
     monkeypatch.setattr(
-        product_bridge_module, "ToolAuthorizationGate",
-        InstrumentedAuthorizationGate,
+        bridge.components.tool_authorization_gate,
+        "evaluate_tool",
+        evaluate_tool,
     )
     monkeypatch.setattr(runtime, "create_instance", counted_create)
     monkeypatch.setattr(runtime, "run_mission", counted_run)
@@ -504,15 +506,13 @@ async def test_only_allow_crosses_tool_authorization_boundary(
 async def test_authorization_confirmation_is_distinct_from_tool_permission(
     bridge, monkeypatch
 ):
-    class ConfirmationGate:
-        def __init__(self, _constitution):
-            pass
-
-        async def evaluate_tool(self, *_args, **_kwargs):
-            return ToolAuthorizationDecisionState.REQUEST_CONFIRMATION
+    async def evaluate_tool(*_args, **_kwargs):
+        return ToolAuthorizationDecisionState.REQUEST_CONFIRMATION
 
     monkeypatch.setattr(
-        product_bridge_module, "ToolAuthorizationGate", ConfirmationGate
+        bridge.components.tool_authorization_gate,
+        "evaluate_tool",
+        evaluate_tool,
     )
     response = await bridge.dispatch({
         "action": "chat",

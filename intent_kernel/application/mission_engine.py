@@ -17,10 +17,15 @@ from intent_kernel.contracts import (
     MissionStore,
 )
 from intent_kernel.contracts.models import utcnow
+from intent_kernel.runtime.verification import MissionCompletionDecision
 
 
 class MissionTransitionError(ValueError):
     """Raised when a lifecycle transition is not currently valid."""
+
+
+class MissionCompletionEvidenceError(MissionTransitionError):
+    """Raised when a caller attempts completion without canonical evidence."""
 
 
 class MissionEngine:
@@ -99,12 +104,30 @@ class MissionEngine:
         self,
         mission_id: MissionId,
         *,
+        completion_decision: MissionCompletionDecision | None = None,
         output: str = "",
         artifacts: list[str] | None = None,
     ) -> MissionResult:
+        """Complete only with an allowed MissionCompletionGate decision."""
         mission = await self._require(mission_id)
         if mission.status is not MissionStatus.RUNNING:
             self._reject(mission, MissionStatus.COMPLETED)
+        if not isinstance(completion_decision, MissionCompletionDecision):
+            raise MissionCompletionEvidenceError(
+                "Mission completion requires a MissionCompletionGate decision"
+            )
+        if completion_decision.authority != "MissionCompletionGate":
+            raise MissionCompletionEvidenceError(
+                "Mission completion decision has an invalid authority"
+            )
+        if completion_decision.mission_id != str(mission.id):
+            raise MissionCompletionEvidenceError(
+                "Mission completion decision identity does not match lifecycle record"
+            )
+        if not completion_decision.evidence_complete:
+            raise MissionCompletionEvidenceError(
+                "Mission completion requires execution, verification and completion evidence"
+            )
         mission.artifacts.extend(artifacts or [])
         mission = await self._transition(
             mission,
@@ -115,7 +138,64 @@ class MissionEngine:
             status=mission.status,
             output=output,
             success=True,
+            evidence=[
+                *completion_decision.execution_evidence,
+                *completion_decision.verification_evidence,
+                *completion_decision.completion_evidence,
+            ],
             artifacts=list(mission.artifacts),
+            metadata={"completion_authority": completion_decision.authority},
+        )
+
+    async def await_verification(self, mission_id: MissionId) -> Mission:
+        """Record that execution returned but canonical verification is pending."""
+        mission = await self._require(mission_id)
+        if mission.status is not MissionStatus.RUNNING:
+            self._reject(mission, MissionStatus.VERIFYING)
+        return await self._transition(mission, MissionStatus.VERIFYING)
+
+    async def synchronize_runtime_state(
+        self,
+        mission_id: MissionId,
+        runtime_state: str,
+        *,
+        completion_decision: MissionCompletionDecision | None = None,
+        output: str = "",
+    ) -> Mission | MissionResult:
+        """Apply a controlled-runtime report to the canonical lifecycle record."""
+        normalized = str(runtime_state).upper()
+        if normalized == "COMPLETED":
+            if completion_decision is None:
+                raise MissionCompletionEvidenceError(
+                    "Runtime completion requires a canonical completion decision"
+                )
+            return await self.complete(
+                mission_id,
+                completion_decision=completion_decision,
+                output=output,
+            )
+
+        targets = {
+            "WAITING_USER_CONFIRMATION": MissionStatus.WAITING_FOR_DECISION,
+            "WAITING_RESOURCE": MissionStatus.WAITING_FOR_INFORMATION,
+            "BLOCKED": MissionStatus.BLOCKED,
+            "PAUSED": MissionStatus.PAUSED,
+            "FAILED": MissionStatus.FAILED_RECOVERABLE,
+        }
+        target = targets.get(normalized)
+        mission = await self._require(mission_id)
+        if target is None or mission.status is target:
+            return deepcopy(mission)
+        if mission.status is not MissionStatus.RUNNING:
+            self._reject(mission, target)
+        return await self.pause(
+            mission_id,
+            status=target,
+            blocker={
+                "source": "MissionRuntime",
+                "runtime_state": normalized,
+                "transition_authority": "MissionEngine",
+            },
         )
 
     async def get(self, mission_id: MissionId) -> Mission | None:

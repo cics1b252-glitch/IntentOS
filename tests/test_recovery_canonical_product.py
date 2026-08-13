@@ -34,7 +34,7 @@ def test_unrelated_numbers_are_not_financial_amounts(text):
     assert _financial_amount(text) is None
 
 
-def test_multi_turn_finance_advances_and_preserves_mission(monkeypatch, tmp_path):
+def test_multi_turn_finance_advances_and_preserves_compatibility_dialogue(monkeypatch, tmp_path):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
     bridge = ProductBridge()
     first = asyncio.run(bridge.dispatch({
@@ -48,7 +48,9 @@ def test_multi_turn_finance_advances_and_preserves_mission(monkeypatch, tmp_path
 
     assert first["target_field"] == "recurrence"
     assert second["status"] == "WAITING_CONTEXT"
-    assert second["mission_id"] == first["mission_id"]
+    assert first["mission_id"] is None
+    assert second["mission_id"] is None
+    assert second["compatibility_dialogue_id"] == first["compatibility_dialogue_id"]
     restored = bridge._load_session("finance")
     assert restored["pending_dialogue"]["target_field"] == "goal"
     assert restored["conversation_state"]["known_context"]["recurrence"] == "mensal"

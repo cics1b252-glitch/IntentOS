@@ -32,6 +32,7 @@ from intent_kernel.runtime.models import (
 from intent_kernel.runtime.verification import (
     ActionVerificationPort,
     InMemoryActionVerificationAdapter,
+    MissionCompletionDecision,
     MissionCompletionGate,
     VerificationGate,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "ActionVerificationPort",
     "InMemoryActionVerificationAdapter",
     "VerificationGate",
+    "MissionCompletionDecision",
     "MissionCompletionGate",
     "MissionCheckpointRepositoryPort",
     "InMemoryCheckpointRepository",

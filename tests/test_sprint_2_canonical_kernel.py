@@ -20,6 +20,7 @@ from intent_kernel.contracts import (
     Provider,
 )
 from intent_kernel.providers import MockProvider
+from intent_kernel.runtime import ActionContract, MissionRuntime, RuntimeNode
 from intent_os_desktop import create_app
 
 
@@ -43,22 +44,28 @@ async def test_mission_engine_persists_basic_lifecycle():
     resumed_by_new_engine = await MissionEngine(
         components.mission_store
     ).resume(created.id)
-    result = await engine.complete(
-        created.id,
-        output="done",
-        artifacts=["report"],
+    runtime = MissionRuntime(mission_engine=engine)
+    instance = runtime.create_instance(
+        str(created.id),
+        "verified-lifecycle",
+        [RuntimeNode(action_contract=ActionContract(
+            inputs_reference={"message": "done"},
+            expected_output="done",
+        ))],
     )
+    result = await runtime.run_mission(instance.runtime_id, final_output_candidate="done")
     stored = await engine.get(created.id)
 
     assert created.status is MissionStatus.CREATED
     assert running.status is MissionStatus.RUNNING
     assert paused.status is MissionStatus.WAITING_FOR_INFORMATION
     assert resumed_by_new_engine.status is MissionStatus.RUNNING
-    assert result.success is True
-    assert result.status is MissionStatus.COMPLETED
+    assert result.status.value == "COMPLETED"
+    assert result.completion_authority == "MissionCompletionGate"
+    assert result.lifecycle_status == MissionStatus.COMPLETED.value
     assert stored is not None
     assert stored.status is MissionStatus.COMPLETED
-    assert stored.artifacts == ["report"]
+    assert stored.artifacts == []
 
 
 @pytest.mark.asyncio

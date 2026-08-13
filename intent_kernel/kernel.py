@@ -27,6 +27,7 @@ from intent_kernel.contracts import (
     IntentMode as CanonicalIntentMode,
     KnowledgeStore,
     MissionContext,
+    MissionStatus,
 )
 from intent_kernel.bus import EventBus
 from intent_kernel.pkb import KnowledgeManager, JsonFileStore
@@ -318,7 +319,7 @@ class Kernel:
         resume_id = context.get("resume_mission_id")
         mission = None
         if resume_id:
-            from intent_kernel.contracts import MissionId, MissionStatus
+            from intent_kernel.contracts import MissionId
             mission = await self.mission_engine.get(MissionId(str(resume_id)))
             if mission is not None and mission.status in {
                 MissionStatus.PAUSED, MissionStatus.BLOCKED,
@@ -364,10 +365,15 @@ class Kernel:
             context={key: value for key, value in context.items()
                      if key != "flow_event"},
         )
-        output_str = str(outcome.result.output or "")
-        await self.mission_engine.complete(
-            mission.id,
-            output=output_str,
+        # A capability result is execution output, not verified Mission
+        # completion. The lifecycle remains VERIFYING until MissionRuntime and
+        # MissionCompletionGate supply canonical completion evidence.
+        await self.mission_engine.await_verification(mission.id)
+        outcome.result.metadata.setdefault(
+            "mission_lifecycle_status", MissionStatus.VERIFYING.value
+        )
+        outcome.result.metadata.setdefault(
+            "completion_authority", "MissionCompletionGate"
         )
         if self.migration_telemetry is not None:
             self.migration_telemetry.record_canonical(parsed.domain.value)

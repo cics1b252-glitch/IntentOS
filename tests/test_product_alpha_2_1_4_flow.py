@@ -57,11 +57,13 @@ def test_legacy_session_is_backed_up_and_migrated(monkeypatch, tmp_path):
     "Quero investir R$ 23.500",
     "Quero uma sugestão para investir vinte e três mil e quinhentos reais",
 ])
-def test_ambiguous_first_financial_intent_creates_mission_and_asks_frequency(monkeypatch, tmp_path, message):
+def test_ambiguous_first_financial_intent_creates_compatibility_dialogue_and_asks_frequency(monkeypatch, tmp_path, message):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
     response = asyncio.run(ProductBridge().dispatch({"action": "chat", "message": message,
                                                        "session_id": "first"}))
-    assert response["ok"] and response["mission_id"]
+    assert response["ok"] and response["mission_id"] is None
+    assert response["compatibility_dialogue_id"]
+    assert response["compatibility_lifecycle"]["canonical_mission"] is False
     assert response["domain"] == "finance"
     assert "único ou para um aporte mensal" in response["text"]
     assert response["provider_called"] is False
@@ -113,7 +115,8 @@ def test_failure_updates_trace_and_preserves_created_mission(monkeypatch, tmp_pa
     response = asyncio.run(bridge.dispatch({"action": "chat", "message": "investir",
                                              "session_id": "failure"}))
     assert not response["ok"]
-    assert response["mission_id"] == "11111111-1111-4111-8111-111111111111"
+    assert response["mission_id"] is None
+    assert response["compatibility_dialogue_id"] == "11111111-1111-4111-8111-111111111111"
     assert response["trace"]["lastFailedStage"] == "mission_persisted"
     assert "secret" not in json.dumps(response)
 
@@ -146,10 +149,11 @@ def test_retry_forwards_same_mission_to_canonical_kernel(monkeypatch, tmp_path):
                                          "session_id": "retry",
                                          "allow_compatibility_fallback": True}))
     second = asyncio.run(bridge.dispatch({"action": "chat", "message": "teste",
-        "session_id": "retry", "resume_mission_id": first["mission_id"],
+        "session_id": "retry", "resume_mission_id": first["compatibility_dialogue_id"],
         "allow_compatibility_fallback": True}))
     assert not first["ok"] and second["ok"]
-    assert first["mission_id"] == second["mission_id"] == mission_id
+    assert first["mission_id"] is None and second["mission_id"] is None
+    assert first["compatibility_dialogue_id"] == second["compatibility_dialogue_id"] == mission_id
     assert seen == [None, mission_id]
 
 

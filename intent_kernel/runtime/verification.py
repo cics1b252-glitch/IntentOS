@@ -7,6 +7,7 @@ gates to ensure ACTION_EXECUTED != ACTION_SUCCEEDED and AGENT_CLAIM != VERIFIED_
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from intent_kernel.instructions import (
@@ -24,6 +25,42 @@ from intent_kernel.runtime.models import (
     RuntimeNodeState,
     VerificationStatus,
 )
+
+
+_COMPLETION_AUTHORITY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class MissionCompletionDecision:
+    """Evidence-bearing authorization for the lifecycle COMPLETED transition.
+
+    Executor, provider and response text are deliberately absent as authorities.
+    Only :class:`MissionCompletionGate` produces this canonical decision after
+    examining execution and verification evidence for the whole runtime DAG.
+    """
+
+    mission_id: str
+    allowed: bool
+    execution_evidence: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    verification_evidence: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    completion_evidence: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    violations: tuple[str, ...] = field(default_factory=tuple)
+    authority: str = "MissionCompletionGate"
+    _authority_token: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def evidence_complete(self) -> bool:
+        return bool(
+            self.allowed
+            and self.execution_evidence
+            and self.verification_evidence
+            and self.completion_evidence
+            and self._authority_token is _COMPLETION_AUTHORITY_TOKEN
+        )
 
 
 class ActionVerificationPort(ABC):
@@ -112,16 +149,67 @@ class MissionCompletionGate:
         constraints: Optional[List[MissionConstraint]] = None,
     ) -> Tuple[bool, List[CompletionEvidence], List[str]]:
         """Evaluate if a mission is allowed to transition to COMPLETED."""
+        decision = await self.decide(
+            instance,
+            final_output=final_output,
+            output_contract=output_contract,
+            constraints=constraints,
+        )
+        return (
+            decision.allowed,
+            [
+                CompletionEvidence(**evidence)
+                for evidence in decision.completion_evidence
+            ],
+            list(decision.violations),
+        )
+
+    async def decide(
+        self,
+        instance: MissionRuntimeInstance,
+        final_output: Optional[str] = None,
+        output_contract: Optional[OutputContract] = None,
+        constraints: Optional[List[MissionConstraint]] = None,
+    ) -> MissionCompletionDecision:
+        """Produce the only decision eligible to complete a canonical Mission."""
         evidence_list: List[CompletionEvidence] = []
         violations: List[str] = []
+        execution_evidence: List[dict[str, Any]] = []
+        verification_evidence: List[dict[str, Any]] = []
+
+        if not instance.nodes:
+            violations.append("Mission has no executable nodes or execution evidence.")
 
         # 1. Check Mandatory Nodes Completion & Verification
         for node_id, node in instance.nodes.items():
+            if node.attempt_count <= 0:
+                violations.append(
+                    f"Mandatory node '{node_id}' has no execution attempt evidence."
+                )
+            else:
+                execution_evidence.append({
+                    "node_id": node_id,
+                    "attempt_count": node.attempt_count,
+                    "state": node.state.value,
+                })
             if node.state != RuntimeNodeState.SUCCEEDED:
                 violations.append(f"Mandatory node '{node_id}' is in state {node.state.value}, not SUCCEEDED.")
 
             if node.verification_result != VerificationStatus.VERIFIED_SUCCESS:
                 violations.append(f"Node '{node_id}' verification status is {node.verification_result}, not VERIFIED_SUCCESS.")
+
+            node_evidence = [
+                evidence for evidence in instance.completion_evidence
+                if evidence.get("source") == "VerificationGate"
+                and evidence.get("verified") is True
+                and evidence.get("details", {}).get("node_id") == node_id
+            ]
+            if not node_evidence:
+                violations.append(
+                    f"Mandatory node '{node_id}' has no verified VerificationGate evidence."
+                )
+            else:
+                verification_evidence.extend(node_evidence)
 
         # 2. Evaluate OutputContract if required
         if output_contract and output_contract.validation_required:
@@ -153,4 +241,13 @@ class MissionCompletionGate:
         )
         evidence_list.append(mission_evidence)
 
-        return is_completed, evidence_list, violations
+        serialized_completion = tuple(evidence.to_dict() for evidence in evidence_list)
+        return MissionCompletionDecision(
+            mission_id=instance.mission_id,
+            allowed=is_completed,
+            execution_evidence=tuple(execution_evidence),
+            verification_evidence=tuple(verification_evidence),
+            completion_evidence=serialized_completion,
+            violations=tuple(violations),
+            _authority_token=_COMPLETION_AUTHORITY_TOKEN,
+        )

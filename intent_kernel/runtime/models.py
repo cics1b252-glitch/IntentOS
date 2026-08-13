@@ -243,6 +243,8 @@ class MissionRuntimeInstance:
     recovery_count: int = 0
     verification_status: VerificationStatus = VerificationStatus.INCONCLUSIVE
     completion_evidence: List[Dict[str, Any]] = field(default_factory=list)
+    completion_authority: Optional[str] = None
+    lifecycle_status: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         res = asdict(self)

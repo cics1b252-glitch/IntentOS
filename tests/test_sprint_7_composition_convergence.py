@@ -82,7 +82,7 @@ async def test_atlas_official_path_preserves_fin_output(tmp_path, text):
 
 
 @pytest.mark.asyncio
-async def test_canonical_finance_mission_is_completed(tmp_path):
+async def test_non_mission_kernel_turn_does_not_create_lifecycle(tmp_path):
     components = _factory(tmp_path).get_components()
 
     await components.kernel.process("quero investir 5000")

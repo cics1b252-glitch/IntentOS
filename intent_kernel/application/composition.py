@@ -21,6 +21,7 @@ from intent_kernel.agents import (
     KnowledgeAgent,
 )
 from intent_kernel.application.mission_engine import MissionEngine
+from intent_kernel.application.mission_service import CanonicalMissionService
 from intent_kernel.application.migration import MigrationTelemetry
 from intent_kernel.bus import EventBus
 from intent_kernel.constitution import (
@@ -59,6 +60,7 @@ from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.service import RegistryResourceManager
 from intent_kernel.rrm.models import CapabilityResource, ResourceOrigin, AvailabilitySource
 from intent_kernel.runtime import MissionRuntime
+from intent_kernel.tools.authorization import ToolAuthorizationGate
 
 LEGACY_ADAPTERS = (
     "ModuleRouter",
@@ -89,6 +91,7 @@ class ApplicationComponents:
     constitution_engine: ConstitutionEngine
     constitution_pipeline: ConstitutionPipeline
     mission_engine: MissionEngine
+    mission_service: CanonicalMissionService
     provider_manager: ProviderManager
     knowledge_pipeline: Any
     resource_manager: RegistryResourceManager
@@ -96,6 +99,7 @@ class ApplicationComponents:
     iue: IntentUnderstandingEngine
     cdm: CognitiveDialogueManager
     conversation_service: CognitiveConversationService
+    tool_authorization_gate: ToolAuthorizationGate
     mission_runtime: MissionRuntime
     migration_telemetry: MigrationTelemetry
     bootstrap_mode: str = "canonical"
@@ -302,9 +306,15 @@ class KernelBuilder:
             event_publisher=event_publisher,
             idempotency_store=idempotency_store,
         )
+        tool_authorization_gate = ToolAuthorizationGate(constitution_engine)
+        mission_service = CanonicalMissionService(
+            mission_engine,
+            tool_authorization_gate,
+        )
         mission_runtime = MissionRuntime(
             rrm_service=resource_manager,
             constitution=constitution_engine,
+            mission_engine=mission_engine,
         )
         legacy_capability_executor = LegacyCapabilityExecutorAdapter(
             router,
@@ -324,6 +334,9 @@ class KernelBuilder:
                 "resource_authority": "RRM",
                 "capability_resolution": "canonical_non_executing",
                 "conversation_authority": "CognitiveConversationService",
+                "mission_lifecycle_authority": "MissionEngine",
+                "mission_completion_authority": "MissionCompletionGate",
+                "tool_authorization_authority": "ToolAuthorizationGate",
                 "agent_orchestrator": "canonical",
                 "provider_manager": tuple(providers.available),
                 "core_apps": tuple(app.app_id for app in core_apps),
@@ -354,6 +367,7 @@ class KernelBuilder:
             constitution_engine=constitution_engine,
             constitution_pipeline=constitution_pipeline,
             mission_engine=mission_engine,
+            mission_service=mission_service,
             provider_manager=providers,
             knowledge_pipeline=kernel.knowledge.pipeline,
             resource_manager=resource_manager,
@@ -361,6 +375,7 @@ class KernelBuilder:
             iue=iue,
             cdm=cdm,
             conversation_service=conversation_service,
+            tool_authorization_gate=tool_authorization_gate,
             mission_runtime=mission_runtime,
             migration_telemetry=migration_telemetry,
         )

@@ -37,7 +37,6 @@ from intent_kernel.response import (
     ResponseStatus,
 )
 from intent_kernel.runtime.models import ActionContract, RuntimeNode, SideEffectLevel
-from intent_kernel.tools.authorization import ToolAuthorizationGate
 from intent_kernel.tools.models import (
     PermissionDecisionState,
     ToolAuthorizationDecisionState,
@@ -345,6 +344,19 @@ class ProductBridge:
         context["capability_analysis"] = self.last_capability_analysis
 
         def persist_turn(record: dict[str, Any]) -> None:
+            record = dict(record)
+            if record.get("mission_id"):
+                # The session schema retains this historical key for migration
+                # compatibility. It is dialogue correlation, not canonical
+                # MissionEngine identity or lifecycle truth.
+                record.setdefault(
+                    "compatibility_dialogue_id", str(record["mission_id"])
+                )
+                record.setdefault("mission_lifecycle", {
+                    "classification": "COMPATIBILITY_ONLY",
+                    "canonical_mission": False,
+                    "completion_authority": None,
+                })
             merged = self.conversation_service.merge_session_update(
                 saved,
                 record,
@@ -947,23 +959,18 @@ Estratégia completa registrada no histórico para execução."""
         self, message: str, decision: Any, context: dict[str, Any]
     ) -> dict[str, Any]:
         """Reach the governed MissionRuntime with a non-executing synthetic action."""
-        mission = await self.components.mission_engine.create(
+        mission = await self.components.mission_service.create_started(
             message,
             context=MissionContext(
                 session_id=context["session_id"],
                 correlation_id=context["correlation_id"],
             ),
         )
-        mission = await self.components.mission_engine.start(mission.id)
         planning_verdict = await self.components.constitution_engine.evaluate(
             "mission.plan", {"objective": message}, {"project_id": context["project_id"]}
         )
         if not planning_verdict.allowed:
-            await self.components.mission_engine.pause(
-                mission.id,
-                status=MissionStatus.BLOCKED,
-                blocker={"source": "constitution", "phase": "planning"},
-            )
+            await self.components.mission_service.block_planning(mission)
             return {
                 "ok": True, "text": "O planejamento foi bloqueado pela Constitution.",
                 "status": "BLOCKED", "execution_mode": "BLOCKED",
@@ -991,74 +998,20 @@ Estratégia completa registrada no histórico para execução."""
             status=ToolStatus.AVAILABLE,
             required_permissions=list(permission),
         )
-        authorization = await ToolAuthorizationGate(
-            self.components.constitution_engine
-        ).evaluate_tool(candidate, tool, project_id=context["project_id"])
+        authorization_boundary = await self.components.mission_service.authorize_tool(
+            mission,
+            candidate,
+            tool,
+            project_id=context["project_id"],
+            required_permissions=list(permission),
+        )
+        authorization = authorization_boundary.decision
         if authorization is not ToolAuthorizationDecisionState.ALLOW:
-            boundary = {
-                ToolAuthorizationDecisionState.DENY: {
-                    "mission_status": MissionStatus.BLOCKED,
-                    "status": "BLOCKED",
-                    "execution_mode": "BLOCKED",
-                    "text": "A ferramenta selecionada foi bloqueada pela política de autorização.",
-                    "next_actions": ["Selecionar um recurso autorizado"],
-                    "authorization_requirements": [],
-                },
-                ToolAuthorizationDecisionState.REQUEST_PERMISSION: {
-                    "mission_status": MissionStatus.WAITING_FOR_PERMISSION,
-                    "status": "AUTHORIZATION_REQUIRED",
-                    "execution_mode": "MISSION",
-                    "text": "A missão aguarda autorização para usar a ferramenta selecionada.",
-                    "next_actions": ["Autorizar o uso da ferramenta"],
-                    "authorization_requirements": list(permission),
-                },
-                ToolAuthorizationDecisionState.REQUEST_CONFIRMATION: {
-                    "mission_status": MissionStatus.WAITING_FOR_DECISION,
-                    "status": "AUTHORIZATION_REQUIRED",
-                    "execution_mode": "MISSION",
-                    "text": "A ferramenta está elegível, mas esta ação específica aguarda confirmação.",
-                    "next_actions": ["Confirmar a ação específica"],
-                    "authorization_requirements": ["user.confirmation"],
-                    "confirmation_state": "WAITING_USER_CONFIRMATION",
-                },
-                ToolAuthorizationDecisionState.WAIT_TOOL: {
-                    "mission_status": MissionStatus.WAITING_FOR_INFORMATION,
-                    "status": "EXTERNAL_RESOURCE_REQUIRED",
-                    "execution_mode": "MISSION",
-                    "text": "A missão aguarda a disponibilidade da ferramenta selecionada.",
-                    "next_actions": ["Aguardar recurso elegível"],
-                    "authorization_requirements": [],
-                },
-                ToolAuthorizationDecisionState.RESELECT_TOOL: {
-                    "mission_status": MissionStatus.WAITING_FOR_DECISION,
-                    "status": "EXTERNAL_RESOURCE_REQUIRED",
-                    "execution_mode": "MISSION",
-                    "text": "A ferramenta atual não pode executar esta ação e deve ser substituída.",
-                    "next_actions": ["Selecionar outra ferramenta elegível"],
-                    "authorization_requirements": [],
-                },
-            }.get(authorization, {
-                "mission_status": MissionStatus.BLOCKED,
-                "status": "BLOCKED",
-                "execution_mode": "BLOCKED",
-                "text": "A decisão de autorização não permite execução.",
-                "next_actions": ["Reavaliar a autorização"],
-                "authorization_requirements": [],
-            })
-            await self.components.mission_engine.pause(
-                mission.id,
-                status=boundary["mission_status"],
-                blocker={
-                    "source": "tool_authorization_gate",
-                    "decision": authorization.value,
-                    "execution_eligible": False,
-                },
-            )
             return {
                 "ok": True,
-                "text": boundary["text"],
-                "status": boundary["status"],
-                "execution_mode": boundary["execution_mode"],
+                "text": authorization_boundary.text,
+                "status": authorization_boundary.response_status,
+                "execution_mode": authorization_boundary.execution_mode,
                 "epistemic_status": "fact",
                 "confidence": 1.0,
                 "provider": None,
@@ -1067,13 +1020,28 @@ Estratégia completa registrada no histórico para execução."""
                 "runtime_id": None,
                 "runtime_status": None,
                 "authorization_gate": authorization.value,
-                "authorization_requirements": boundary["authorization_requirements"],
-                "next_actions": boundary["next_actions"],
+                "authorization_requirements": list(
+                    authorization_boundary.authorization_requirements
+                ),
+                "next_actions": list(authorization_boundary.next_actions),
                 "verification_evidence": [],
+                "mission_authority": {
+                    "identity_owner": "MissionEngine",
+                    "lifecycle_owner": "MissionEngine",
+                    "execution_runtime": "MissionRuntime",
+                    "transition_authority": "MissionEngine",
+                    "completion_authority": "MissionCompletionGate",
+                    "runtime_entered": False,
+                    "authorization_state": authorization.value,
+                    "confirmation_state": authorization_boundary.confirmation_state,
+                    "execution_evidence_present": False,
+                    "verification_evidence_present": False,
+                    "canonical_state": authorization_boundary.lifecycle_status.value,
+                },
                 "domain": decision.domain_hint,
                 **(
-                    {"confirmation_state": boundary["confirmation_state"]}
-                    if "confirmation_state" in boundary else {}
+                    {"confirmation_state": authorization_boundary.confirmation_state}
+                    if authorization_boundary.confirmation_state else {}
                 ),
             }
         contract = ActionContract(
@@ -1096,12 +1064,6 @@ Estratégia completa registrada no histórico para execução."""
             project_id=context["project_id"],
         )
         instance = await self.components.mission_runtime.run_mission(instance.runtime_id)
-        if instance.status.value == "WAITING_USER_CONFIRMATION":
-            await self.components.mission_engine.pause(
-                mission.id,
-                status=MissionStatus.WAITING_FOR_PERMISSION,
-                blocker={"source": "action_gate", "requires": "user.confirmation"},
-            )
         return {
             "ok": True,
             "text": "A ação foi planejada e aguarda confirmação antes da execução simulada.",
@@ -1118,6 +1080,19 @@ Estratégia completa registrada no histórico para execução."""
             "authorization_requirements": ["user.confirmation"],
             "next_actions": ["Confirmar a ação simulada"],
             "verification_evidence": list(instance.completion_evidence),
+            "mission_authority": {
+                "identity_owner": "MissionEngine",
+                "lifecycle_owner": "MissionEngine",
+                "execution_runtime": "MissionRuntime",
+                "transition_authority": "MissionEngine",
+                "completion_authority": "MissionCompletionGate",
+                "runtime_entered": True,
+                "authorization_state": authorization.value,
+                "confirmation_state": instance.status.value,
+                "execution_evidence_present": bool(instance.completed_nodes),
+                "verification_evidence_present": bool(instance.completion_evidence),
+                "canonical_state": instance.lifecycle_status,
+            },
             "domain": decision.domain_hint,
         }
 
@@ -1125,6 +1100,26 @@ Estratégia completa registrada no histórico para execução."""
         self, response: dict[str, Any], request: dict[str, Any]
     ) -> dict[str, Any]:
         """Normalize every product response and apply the canonical output gate."""
+        response = dict(response)
+        response_mission_id = response.get("mission_id")
+        if response_mission_id:
+            canonical_mission = None
+            try:
+                canonical_mission = await self.components.mission_engine.get(
+                    MissionId(str(response_mission_id))
+                )
+            except (KeyError, TypeError, ValueError):
+                canonical_mission = None
+            if canonical_mission is None:
+                # Preserve the compatibility correlation token without
+                # representing it as canonical Mission identity or lifecycle.
+                response["compatibility_dialogue_id"] = str(response_mission_id)
+                response["mission_id"] = None
+                response["compatibility_lifecycle"] = {
+                    "classification": "COMPATIBILITY_ONLY",
+                    "canonical_mission": False,
+                    "completion_authority": None,
+                }
         raw_status = str(response.get("status", "COMPLETED")).upper()
         aliases = {"CONCLUÍDO": "COMPLETED", "CONCLUIDO": "COMPLETED"}
         raw_status = aliases.get(raw_status, raw_status)

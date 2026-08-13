@@ -97,7 +97,7 @@ async def test_independent_nonterminal_turn_cannot_inherit_pending_finance(
         "message": "Este projeto usa Kotlin.",
         "session_id": "independent-memory-write",
         "project_id": "PROJECT_A",
-        "resume_mission_id": first["mission_id"],
+        "resume_mission_id": first["compatibility_dialogue_id"],
     })
     after = bridge._load_session("independent-memory-write")
 
@@ -137,7 +137,8 @@ async def test_interrupted_pending_dialogue_remains_explicitly_resumable(bridge)
         "VALID_PENDING_CONTINUATION"
     )
     assert resumed["target_field"] == "goal"
-    assert resumed["mission_id"] == first["mission_id"]
+    assert resumed["mission_id"] is None
+    assert resumed["compatibility_dialogue_id"] == first["compatibility_dialogue_id"]
 
 
 @pytest.mark.asyncio
@@ -158,7 +159,7 @@ async def test_local_response_during_pending_preserves_suspended_dialogue(bridge
     assert response["conversation_authority"]["preserves_pending_dialogue"]
     assert response["conversation_authority"]["resume_mission_id"] is None
     assert after["pending_dialogue"] == before["pending_dialogue"]
-    assert after["mission_id"] == first["mission_id"]
+    assert after["mission_id"] == first["compatibility_dialogue_id"]
 
 
 @pytest.mark.asyncio
@@ -243,7 +244,7 @@ async def test_terminal_or_authorization_turns_never_resume_pending_mission(
         "message": message,
         "session_id": f"terminal-{message[:8]}",
         "project_id": "PROJECT_A",
-        "resume_mission_id": first["mission_id"],
+        "resume_mission_id": first["compatibility_dialogue_id"],
     })
 
     assert response["status"] in {"UNKNOWN", "AUTHORIZATION_REQUIRED"}

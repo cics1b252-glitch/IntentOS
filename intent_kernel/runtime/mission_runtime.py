@@ -56,12 +56,14 @@ class MissionRuntime:
         checkpoint_repo: Optional[MissionCheckpointRepositoryPort] = None,
         rrm_service: Optional[Any] = None,
         constitution: Optional[Any] = None,
+        mission_engine: Optional[Any] = None,
     ) -> None:
         self.executor = executor or InMemoryActionExecutor()
         self.checkpoint_repo = checkpoint_repo or InMemoryCheckpointRepository()
         self.action_gate = ActionGate(rrm_service=rrm_service, constitution=constitution)
         self.verification_gate = VerificationGate()
         self.completion_gate = MissionCompletionGate()
+        self.mission_engine = mission_engine
 
         self._instances: Dict[str, MissionRuntimeInstance] = {}
         self._confirmations: Dict[str, ExecutionConfirmationRequest] = {}
@@ -114,6 +116,7 @@ class MissionRuntime:
         if instance.status in (MissionRuntimeState.COMPLETED, MissionRuntimeState.FAILED, MissionRuntimeState.CANCELLED):
             return instance
 
+        await self._ensure_lifecycle_running(instance)
         instance.status = MissionRuntimeState.RUNNING
         if not instance.started_at:
             instance.started_at = utc_iso()
@@ -154,6 +157,7 @@ class MissionRuntime:
                     self._failure_reports.append(report)
                     instance.status = MissionRuntimeState.BLOCKED
                     await self.save_checkpoint(instance)
+                    await self._sync_lifecycle(instance)
                     return instance
 
                 elif gate_decision == ActionGateDecision.REQUIRE_CONFIRMATION:
@@ -173,6 +177,7 @@ class MissionRuntime:
                         self._confirmations[conf_req.confirmation_id] = conf_req
 
                     await self.save_checkpoint(instance)
+                    await self._sync_lifecycle(instance)
                     return instance
 
                 elif gate_decision == ActionGateDecision.WAIT_RESOURCE:
@@ -189,6 +194,7 @@ class MissionRuntime:
                     )
                     self._failure_reports.append(report)
                     await self.save_checkpoint(instance)
+                    await self._sync_lifecycle(instance)
                     return instance
 
                 # Proceed to Execute
@@ -271,20 +277,23 @@ class MissionRuntime:
             instance.status = MissionRuntimeState.FAILED
             self._failed_missions_count += 1
             await self.save_checkpoint(instance)
+            await self._sync_lifecycle(instance)
             return instance
 
         if len(instance.completed_nodes) == len(instance.nodes):
-            is_completed, evidences, violations = await self.completion_gate.evaluate_mission_completion(
+            completion_decision = await self.completion_gate.decide(
                 instance=instance,
                 final_output=final_output_candidate,
                 output_contract=output_contract,
                 constraints=mission_constraints,
             )
 
-            for ev in evidences:
-                instance.completion_evidence.append(ev.to_dict())
+            instance.completion_evidence.extend(
+                completion_decision.completion_evidence
+            )
+            instance.completion_authority = completion_decision.authority
 
-            if is_completed:
+            if completion_decision.allowed:
                 instance.status = MissionRuntimeState.COMPLETED
                 instance.completed_at = utc_iso()
                 instance.verification_status = VerificationStatus.VERIFIED_SUCCESS
@@ -294,8 +303,60 @@ class MissionRuntime:
                 instance.verification_status = VerificationStatus.VERIFIED_FAILURE
 
             await self.save_checkpoint(instance)
+            await self._sync_lifecycle(
+                instance,
+                completion_decision=completion_decision,
+                output=final_output_candidate or "",
+            )
 
         return instance
+
+    async def _sync_lifecycle(
+        self,
+        instance: MissionRuntimeInstance,
+        *,
+        completion_decision: Any | None = None,
+        output: str = "",
+    ) -> None:
+        if self.mission_engine is None:
+            return
+        lifecycle = await self.mission_engine.synchronize_runtime_state(
+            self._mission_id(instance.mission_id),
+            instance.status.value,
+            completion_decision=completion_decision,
+            output=output,
+        )
+        instance.lifecycle_status = lifecycle.status.value
+
+    async def _ensure_lifecycle_running(
+        self,
+        instance: MissionRuntimeInstance,
+    ) -> None:
+        """Resume only the canonical record before a controlled runtime retry."""
+        if self.mission_engine is None:
+            return
+        mission_id = self._mission_id(instance.mission_id)
+        lifecycle = await self.mission_engine.get(mission_id)
+        if lifecycle is None:
+            raise ValueError(
+                f"Canonical Mission {instance.mission_id} not found for runtime"
+            )
+        if lifecycle.status.value in {
+            "paused",
+            "blocked",
+            "waiting_for_information",
+            "waiting_for_decision",
+            "waiting_for_permission",
+            "failed_recoverable",
+        }:
+            lifecycle = await self.mission_engine.resume(mission_id)
+        instance.lifecycle_status = lifecycle.status.value
+
+    @staticmethod
+    def _mission_id(value: str) -> Any:
+        from intent_kernel.contracts import MissionId
+
+        return MissionId(value)
 
     def submit_confirmation(self, confirmation_id: str, approved: bool) -> Optional[ExecutionConfirmationRequest]:
         """Submit user confirmation or refusal for a pending action node."""
@@ -398,6 +459,8 @@ class MissionRuntime:
             "waiting_resource": sum(1 for inst in self._instances.values() if inst.status == MissionRuntimeState.WAITING_RESOURCE),
             "failed_nodes": sum(len(inst.failed_nodes) for inst in self._instances.values()),
             "completed_missions": self._completed_missions_count,
+            "completion_authority": "MissionCompletionGate",
+            "lifecycle_authority": "MissionEngine",
             "failed_missions": self._failed_missions_count,
             "failure_reports_count": len(self._failure_reports),
             "trace_records_count": len(self._traces),

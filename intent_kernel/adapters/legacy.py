@@ -282,9 +282,18 @@ class LegacyCapabilityExecutorAdapter:
                 payload=payload,
                 context=context,
             )
-            await self._mission_engine.complete(
-                mission.id,
-                output=str(outcome.result.output or ""),
+            # Compatibility execution cannot complete the canonical lifecycle.
+            # Its output awaits MissionRuntime verification and the canonical
+            # MissionCompletionGate decision.
+            await self._mission_engine.await_verification(mission.id)
+            outcome.result.metadata.setdefault(
+                "mission_lifecycle_status", "verifying"
+            )
+            outcome.result.metadata.setdefault(
+                "completion_authority", "MissionCompletionGate"
+            )
+            outcome.result.metadata.setdefault(
+                "compatibility_path_used", True
             )
             if self._telemetry is not None:
                 self._telemetry.record_legacy(

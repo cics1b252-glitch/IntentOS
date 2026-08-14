@@ -72,6 +72,10 @@ const STATUSES = new Set<CognitiveResponseStatus>([
   'FAILED',
 ]);
 
+// Contract 1.0 mirror of the canonical Python outcome classification.
+// The gateway validates this derived signal; it does not define success.
+const SUCCESSFUL_STATUSES = new Set<CognitiveResponseStatus>(['COMPLETED']);
+
 const ORIGINS = new Set<ResponseOrigin>([
   'COGNITIVE_RUNTIME',
   'LOCAL_RESPONSE',
@@ -214,7 +218,7 @@ export function preserveCognitiveProductResponse(
   if (typeof raw.text !== 'string' || typeof raw.execution_mode !== 'string') throw new Error('invalid_text_or_mode');
   if (!EXECUTION_MODES_BY_STATUS[status].has(raw.execution_mode)) throw new Error('execution_mode_status_mismatch');
   if (typeof raw.epistemic_status !== 'string' || typeof raw.confidence !== 'number' || !Number.isFinite(raw.confidence) || raw.confidence < 0 || raw.confidence > 1) throw new Error('invalid_epistemic_fields');
-  if (typeof raw.ok !== 'boolean' || raw.ok !== (status !== 'FAILED')) throw new Error('ok_status_mismatch');
+  if (typeof raw.ok !== 'boolean' || raw.ok !== SUCCESSFUL_STATUSES.has(status)) throw new Error('ok_status_mismatch');
   if (typeof raw.provider_called !== 'boolean') throw new Error('invalid_provider_called');
   if (raw.provider !== null && typeof raw.provider !== 'string') throw new Error('invalid_provider');
   if (raw.mission_id !== null && typeof raw.mission_id !== 'string') throw new Error('invalid_mission_id');

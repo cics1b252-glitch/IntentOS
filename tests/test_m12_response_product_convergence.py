@@ -10,7 +10,12 @@ from intent_kernel.product_response import (
     CognitiveProductPresenter,
     transport_failure_product_response,
 )
-from intent_kernel.response import CognitiveResponse, ResponseOrigin, ResponseStatus
+from intent_kernel.response import (
+    CognitiveResponse,
+    ResponseOrigin,
+    ResponseStatus,
+    response_status_is_ok,
+)
 from product_bridge import ProductBridge
 
 
@@ -71,6 +76,59 @@ def test_product_contract_preserves_canonical_matrix(status, mode, origin):
     assert product["response_authority"] == "CognitiveResponseAssembler"
     assert product["product_presentation_authority"] == "CognitiveProductPresenter"
     assert product["presentation"]["interactive_actions"] == []
+
+
+@pytest.mark.parametrize(
+    "status,expected_ok",
+    [
+        (ResponseStatus.COMPLETED, True),
+        (ResponseStatus.WAITING_CONTEXT, False),
+        (ResponseStatus.UNKNOWN, False),
+        (ResponseStatus.BLOCKED, False),
+        (ResponseStatus.AUTHORIZATION_REQUIRED, False),
+        (ResponseStatus.EXTERNAL_RESOURCE_REQUIRED, False),
+        (ResponseStatus.WAITING_CONFIRMATION, False),
+        (ResponseStatus.FAILED, False),
+    ],
+)
+def test_canonical_ok_means_successful_fulfillment_only(status, expected_ok):
+    response = _response(
+        status,
+        execution_mode={
+            ResponseStatus.COMPLETED: "CONVERSATION",
+            ResponseStatus.WAITING_CONTEXT: "CONVERSATION",
+            ResponseStatus.UNKNOWN: "UNKNOWN",
+            ResponseStatus.BLOCKED: "BLOCKED",
+            ResponseStatus.AUTHORIZATION_REQUIRED: "AUTHORIZATION_REQUIRED",
+            ResponseStatus.EXTERNAL_RESOURCE_REQUIRED: "EXTERNAL_REASONING_REQUIRED",
+            ResponseStatus.WAITING_CONFIRMATION: "MISSION",
+            ResponseStatus.FAILED: "FAILED",
+        }[status],
+        origin=ResponseOrigin.COGNITIVE_RUNTIME,
+        mission_id=(
+            "mission-waiting"
+            if status is ResponseStatus.WAITING_CONFIRMATION
+            else None
+        ),
+    )
+
+    assert response_status_is_ok(status) is expected_ok
+    assert response.to_dict()["ok"] is expected_ok
+    assert CognitiveProductPresenter.present(response).to_dict()["ok"] is expected_ok
+
+
+def test_local_conversation_and_memory_are_ok_only_as_completed_outcomes():
+    for mode, origin in (
+        ("LOCAL_RESPONSE", ResponseOrigin.LOCAL_RESPONSE),
+        ("CONVERSATION", ResponseOrigin.CONVERSATION),
+        ("LOCAL_RESPONSE", ResponseOrigin.MEMORY),
+    ):
+        product = CognitiveProductPresenter.present(
+            _response(ResponseStatus.COMPLETED, execution_mode=mode, origin=origin)
+        ).to_dict()
+
+        assert product["status"] == "COMPLETED"
+        assert product["ok"] is True
 
 
 def test_verified_mission_completion_and_compatibility_facets_are_preserved():
@@ -157,6 +215,7 @@ def test_metadata_cannot_override_product_semantics():
     assert product["provider"] is None
     assert product["provider_called"] is False
     assert product["mission_id"] is None
+    assert product["ok"] is False
     assert product["presentation"]["visible_state"] == "UNKNOWN"
     assert product["domain"] == "finance"  # diagnostic only
 
@@ -172,6 +231,7 @@ def test_transport_failure_has_one_truthful_product_shape():
     assert product["mission_id"] is None
     assert product["transport_failure"] is True
     assert product["presentation"]["visible_state"] == "FAILED"
+    assert product["ok"] is False
 
 
 @pytest.mark.parametrize(
@@ -279,6 +339,7 @@ async def test_real_product_path_preserves_terminal_visible_state(
     assert response["mission_id"] is None
     assert response["response_authority"] == "CognitiveResponseAssembler"
     assert response["product_presentation_authority"] == "CognitiveProductPresenter"
+    assert response["ok"] is False
     if "XZ-91" in message:
         assert response["compatibility_path_used"] is False
         assert "R$ 91" not in response["text"]

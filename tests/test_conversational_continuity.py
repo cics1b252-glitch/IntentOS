@@ -32,7 +32,7 @@ class TestConversationalContinuity(unittest.TestCase):
         }
         res1 = asyncio.run(self.bridge.dispatch(req1))
 
-        self.assertTrue(res1.get("ok"))
+        self.assertFalse(res1.get("ok"))
         self.assertEqual(res1.get("status"), "WAITING_CONTEXT")
         self.assertEqual(res1.get("dialogue_state"), "WAITING_CONTEXT")
         self.assertIsNone(res1.get("mission_id"))
@@ -58,7 +58,7 @@ class TestConversationalContinuity(unittest.TestCase):
         }
         res2 = asyncio.run(self.bridge.dispatch(req2))
 
-        self.assertTrue(res2.get("ok"))
+        self.assertFalse(res2.get("ok"))
         self.assertEqual(res2.get("status"), "WAITING_CONTEXT")
         self.assertIsNone(res2.get("mission_id"))
         self.assertEqual(res2.get("compatibility_dialogue_id"), dialogue_id)
@@ -98,7 +98,7 @@ class TestConversationalContinuity(unittest.TestCase):
         }
         res2 = asyncio.run(new_bridge.dispatch(req2))
 
-        self.assertTrue(res2.get("ok"))
+        self.assertFalse(res2.get("ok"))
         self.assertEqual(res2.get("status"), "WAITING_CONTEXT")
         self.assertIsNone(res2.get("mission_id"))
         self.assertEqual(res2.get("compatibility_dialogue_id"), dialogue_id)

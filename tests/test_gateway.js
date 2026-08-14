@@ -21,6 +21,16 @@ function canonicalProductResponse(overrides = {}) {
     WAITING_CONFIRMATION: ['Confirmação necessária', 'confirmation'],
     FAILED: ['Falha de execução', 'error'],
   };
+  const expectedOkByStatus = {
+    COMPLETED: true,
+    WAITING_CONTEXT: false,
+    UNKNOWN: false,
+    BLOCKED: false,
+    AUTHORIZATION_REQUIRED: false,
+    EXTERNAL_RESOURCE_REQUIRED: false,
+    WAITING_CONFIRMATION: false,
+    FAILED: false,
+  };
   const missingCapabilities = overrides.missing_capabilities || ['knowledge.lookup'];
   const nextActions = overrides.next_actions || [];
   const base = {
@@ -40,7 +50,7 @@ function canonicalProductResponse(overrides = {}) {
     missing_capabilities: missingCapabilities,
     authorization_requirements: [],
     next_actions: nextActions,
-    ok: status !== 'FAILED',
+    ok: expectedOkByStatus[status],
     presentation: {
       visible_state: status,
       title: presentationByStatus[status][0],
@@ -201,11 +211,39 @@ describe('Intent Gateway Adapter & Transport Tests', () => {
       const raw = canonicalProductResponse({
         status,
         execution_mode: executionMode,
-        ok: status !== 'FAILED',
+        ok: status === 'COMPLETED',
         mission_id: status === 'WAITING_CONFIRMATION' ? 'mission-matrix' : null,
         presentation: status === 'WAITING_CONFIRMATION' ? {show_mission: true} : {},
       });
       assert.strictEqual(preserveCognitiveProductResponse(raw).status, status);
+    }
+  });
+
+  it('enforces the complete canonical successful-fulfillment ok matrix', () => {
+    const modes = {
+      COMPLETED: 'CONVERSATION',
+      WAITING_CONTEXT: 'CONVERSATION',
+      UNKNOWN: 'UNKNOWN',
+      BLOCKED: 'BLOCKED',
+      AUTHORIZATION_REQUIRED: 'AUTHORIZATION_REQUIRED',
+      EXTERNAL_RESOURCE_REQUIRED: 'EXTERNAL_REASONING_REQUIRED',
+      WAITING_CONFIRMATION: 'MISSION',
+      FAILED: 'FAILED',
+    };
+    for (const status of Object.keys(modes)) {
+      const expectedOk = status === 'COMPLETED';
+      const valid = canonicalProductResponse({
+        status,
+        execution_mode: modes[status],
+        ok: expectedOk,
+        mission_id: status === 'WAITING_CONFIRMATION' ? 'mission-ok-matrix' : null,
+        presentation: status === 'WAITING_CONFIRMATION' ? {show_mission: true} : {},
+      });
+      assert.strictEqual(preserveCognitiveProductResponse(valid).ok, expectedOk);
+      assert.throws(
+        () => preserveCognitiveProductResponse({...valid, ok: !expectedOk}),
+        /ok_status_mismatch/,
+      );
     }
   });
 

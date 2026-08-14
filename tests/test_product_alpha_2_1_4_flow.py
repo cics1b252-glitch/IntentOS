@@ -61,7 +61,8 @@ def test_ambiguous_first_financial_intent_creates_compatibility_dialogue_and_ask
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
     response = asyncio.run(ProductBridge().dispatch({"action": "chat", "message": message,
                                                        "session_id": "first"}))
-    assert response["ok"] and response["mission_id"] is None
+    assert response["ok"] is False and response["mission_id"] is None
+    assert response["status"] == "WAITING_CONTEXT"
     assert response["compatibility_dialogue_id"]
     assert response["compatibility_lifecycle"]["canonical_mission"] is False
     assert response["domain"] == "finance"

@@ -125,7 +125,8 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
             "message": "quero investir",
             "session_id": "live_a"
         })
-        self.assertTrue(res["ok"])
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["status"], "WAITING_CONTEXT")
         self.assertEqual(res["domain"], "finance")
         self.assertFalse(res["provider_called"])
         self.assertIn("text", res)
@@ -136,7 +137,7 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
             "message": "o que eu faço com 24 mil?",
             "session_id": "live_b"
         })
-        self.assertTrue(res["ok"])
+        self.assertFalse(res["ok"])
         self.assertEqual(res["domain"], "finance")
         self.assertEqual(res["status"], "WAITING_CONTEXT")
         self.assertFalse(res["provider_called"])
@@ -148,7 +149,7 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
             "message": "quero investir 24 mil",
             "session_id": "live_c"
         })
-        self.assertTrue(res1["ok"])
+        self.assertFalse(res1["ok"])
         self.assertEqual(res1["domain"], "finance")
         self.assertEqual(res1["status"], "WAITING_CONTEXT")
         mission_id_1 = res1["mission_id"]
@@ -158,7 +159,7 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
             "message": "com aportes mensais",
             "session_id": "live_c"
         })
-        self.assertTrue(res2["ok"])
+        self.assertFalse(res2["ok"])
         self.assertEqual(res2["domain"], "finance")
         self.assertEqual(res2["status"], "WAITING_CONTEXT")
         self.assertEqual(res2["mission_id"], mission_id_1)

@@ -18,6 +18,15 @@ class ResponseStatus(str, Enum):
     FAILED = "FAILED"
 
 
+SUCCESSFUL_RESPONSE_STATUSES = frozenset({ResponseStatus.COMPLETED})
+
+
+def response_status_is_ok(status: ResponseStatus) -> bool:
+    """Return whether the canonical outcome fulfilled the user-visible request."""
+
+    return status in SUCCESSFUL_RESPONSE_STATUSES
+
+
 class CanonicalResultKind(str, Enum):
     """Typed outcome emitted by a canonical runtime owner.
 
@@ -348,7 +357,7 @@ class CognitiveResponse:
         value = asdict(self)
         value["status"] = self.status.value
         value["response_origin"] = self.response_origin.value
-        value["ok"] = self.status is not ResponseStatus.FAILED
+        value["ok"] = response_status_is_ok(self.status)
         return value
 
 

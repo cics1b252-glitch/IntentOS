@@ -44,7 +44,12 @@
     "missing_capabilities": {"authority": "CapabilityFirstResolver", "risk": "frontend_hidden"},
     "limitations": {"authority": "canonical_result_and_constitution", "risk": "text_only"},
     "compatibility": {"authority": "execution_boundary_trace", "risk": "future_inference"},
-    "ok": {"authority": "protocol_processing_outcome", "risk": "misused_as_semantic_success"}
+    "ok": {
+      "authority": "CognitiveResponse.status",
+      "derivation": "true_only_when_status_is_COMPLETED",
+      "role": "derived_convenience_signal",
+      "semantic_authority": false
+    }
   },
   "target": {
     "semantic_authority": "CognitiveResponseAssembler",

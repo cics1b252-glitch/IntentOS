@@ -68,3 +68,24 @@ compatibility behavior.
 
 The machine-readable companion is
 [`movement_12_response_product_map.json`](movement_12_response_product_map.json).
+
+## Movement 12.2 canonical `ok` contract
+
+`ok` is a derived convenience signal for successful fulfillment. It is not an
+independent semantic authority; canonical `status` remains authoritative.
+
+| Canonical status | `ok` | Product meaning |
+| --- | --- | --- |
+| `COMPLETED` | `true` | The user-visible operation was fulfilled successfully. |
+| `WAITING_CONTEXT` | `false` | More context is required. |
+| `UNKNOWN` | `false` | The request was not fulfilled with known evidence. |
+| `BLOCKED` | `false` | Governance blocked fulfillment. |
+| `AUTHORIZATION_REQUIRED` | `false` | Authorization is still required. |
+| `EXTERNAL_RESOURCE_REQUIRED` | `false` | A required resource is unavailable. |
+| `WAITING_CONFIRMATION` | `false` | Action confirmation is still required. |
+| `FAILED` | `false` | Processing failed. |
+
+Local, conversation and memory responses have `ok=true` only when their
+canonical status is `COMPLETED`. Origin and execution mode do not independently
+define success. Python owns this classification; TypeScript only validates the
+serialized canonical result.

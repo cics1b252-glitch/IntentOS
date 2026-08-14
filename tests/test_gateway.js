@@ -4,6 +4,50 @@ import fs from 'fs';
 import path from 'path';
 import { IntentGatewayAdapter } from '../dist/gateway/adapter.js';
 import { LocalProcessTransport } from '../dist/gateway/transport.js';
+import {
+  preserveCognitiveProductResponse,
+  transportFailureProductResponse,
+} from '../dist/gateway/product-response.js';
+
+function canonicalProductResponse(overrides = {}) {
+  const base = {
+    product_contract_version: '1.0',
+    text: 'canonical',
+    status: 'UNKNOWN',
+    execution_mode: 'UNKNOWN',
+    epistemic_status: 'unknown',
+    confidence: 1,
+    response_origin: 'COGNITIVE_RUNTIME',
+    provider: null,
+    provider_called: false,
+    resource_provenance: [],
+    mission_id: null,
+    verification_evidence: [],
+    limitations: [],
+    missing_capabilities: ['knowledge.lookup'],
+    authorization_requirements: [],
+    next_actions: [],
+    ok: true,
+    presentation: {
+      visible_state: 'UNKNOWN',
+      title: 'Informação desconhecida',
+      tone: 'uncertain',
+      response_origin: 'COGNITIVE_RUNTIME',
+      show_provider_execution: false,
+      show_mission: false,
+      show_missing_capabilities: true,
+      requires_authorization: false,
+      requires_confirmation: false,
+      suggested_actions: [],
+      interactive_actions: [],
+    },
+    response_authority: 'CognitiveResponseAssembler',
+    product_presentation_authority: 'CognitiveProductPresenter',
+    compatibility_path_used: false,
+    compatibility_traces: [],
+  };
+  return { ...base, ...overrides };
+}
 
 describe('Intent Gateway Adapter & Transport Tests', () => {
   it('should initialize LocalProcessTransport and complete handshake', async () => {
@@ -119,5 +163,89 @@ describe('Intent Gateway Adapter & Transport Tests', () => {
     assert.match(serverContent, /\/api\/constitution/);
     assert.match(serverContent, /\/api\/diagnostics/);
     assert.match(serverContent, /gatewayAdapter/);
+  });
+
+  it('preserves canonical statuses instead of collapsing them into ok/error', () => {
+    for (const status of [
+      'COMPLETED', 'WAITING_CONTEXT', 'UNKNOWN', 'BLOCKED',
+      'AUTHORIZATION_REQUIRED', 'EXTERNAL_RESOURCE_REQUIRED',
+      'WAITING_CONFIRMATION', 'FAILED',
+    ]) {
+      const raw = canonicalProductResponse({
+        status,
+        execution_mode: status === 'COMPLETED' ? 'CONVERSATION' : status,
+        ok: status !== 'FAILED',
+        presentation: {
+          ...canonicalProductResponse().presentation,
+          visible_state: status,
+          requires_authorization: status === 'AUTHORIZATION_REQUIRED',
+          requires_confirmation: status === 'WAITING_CONFIRMATION',
+        },
+      });
+      assert.strictEqual(preserveCognitiveProductResponse(raw).status, status);
+    }
+  });
+
+  it('rejects fabricated provider and Mission evidence', () => {
+    assert.throws(() => preserveCognitiveProductResponse(canonicalProductResponse({
+      provider: 'mock',
+      resource_provenance: ['provider:mock'],
+    })), /provider_evidence_fabricated/);
+
+    assert.throws(() => preserveCognitiveProductResponse(canonicalProductResponse({
+      status: 'COMPLETED',
+      execution_mode: 'MISSION',
+      mission_id: 'forged',
+      presentation: {
+        ...canonicalProductResponse().presentation,
+        visible_state: 'COMPLETED',
+        show_mission: true,
+      },
+    })), /unverified_mission_completion/);
+  });
+
+  it('keeps authorization and confirmation distinct', () => {
+    const authorization = canonicalProductResponse({
+      status: 'AUTHORIZATION_REQUIRED',
+      execution_mode: 'AUTHORIZATION_REQUIRED',
+      presentation: {
+        ...canonicalProductResponse().presentation,
+        visible_state: 'AUTHORIZATION_REQUIRED',
+        requires_authorization: true,
+      },
+    });
+    const confirmation = canonicalProductResponse({
+      status: 'WAITING_CONFIRMATION',
+      execution_mode: 'MISSION',
+      presentation: {
+        ...canonicalProductResponse().presentation,
+        visible_state: 'WAITING_CONFIRMATION',
+        requires_confirmation: true,
+      },
+    });
+    assert.strictEqual(preserveCognitiveProductResponse(authorization).presentation.requires_confirmation, false);
+    assert.strictEqual(preserveCognitiveProductResponse(confirmation).presentation.requires_authorization, false);
+  });
+
+  it('creates one explicit product contract for transport failures', () => {
+    const response = transportFailureProductResponse('offline', 'gateway_unavailable');
+    assert.strictEqual(response.status, 'FAILED');
+    assert.strictEqual(response.execution_mode, 'FAILED');
+    assert.strictEqual(response.provider_called, false);
+    assert.strictEqual(response.mission_id, null);
+    assert.strictEqual(response.transport_failure, true);
+    assert.strictEqual(response.presentation.visible_state, 'FAILED');
+  });
+
+  it('frontend consumes presentation state and escapes visible response text', () => {
+    const html = fs.readFileSync(
+      path.join(process.cwd(), 'intent_os_desktop', 'static', 'index.html'),
+      'utf-8',
+    );
+    assert.doesNotMatch(html, /if \(data\.ok && data\.text\)/);
+    assert.match(html, /data\.presentation/);
+    assert.match(html, /escapeProductText\(data\.text\)/);
+    assert.match(html, /view\.show_provider_execution/);
+    assert.match(html, /view\.requires_confirmation/);
   });
 });

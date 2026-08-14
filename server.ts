@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import { IntentGatewayAdapter } from './gateway/adapter.js';
+import { transportFailureProductResponse } from './gateway/product-response.js';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = '0.0.0.0';
@@ -46,7 +47,10 @@ app.post('/api/intent', async (req: Request, res: Response) => {
     const result = await gatewayAdapter.processIntent(req.body || {});
     res.json(result);
   } catch (err: any) {
-    res.status(500).json({ ok: false, mode: 'unavailable', error: err.message });
+    res.status(500).json(transportFailureProductResponse(
+      'Falha ao transportar a resposta cognitiva.',
+      'intent_gateway_exception',
+    ));
   }
 });
 

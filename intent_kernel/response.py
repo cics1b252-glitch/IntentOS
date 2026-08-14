@@ -38,6 +38,19 @@ class CanonicalResultKind(str, Enum):
     FAILED = "FAILED"
 
 
+class ResponseOrigin(str, Enum):
+    """Canonical origin of response evidence, independent of visible status."""
+
+    COGNITIVE_RUNTIME = "COGNITIVE_RUNTIME"
+    LOCAL_RESPONSE = "LOCAL_RESPONSE"
+    CONVERSATION = "CONVERSATION"
+    MEMORY = "MEMORY"
+    MISSION = "MISSION"
+    PROVIDER = "PROVIDER"
+    SYSTEM = "SYSTEM"
+    LEGACY_COMPATIBILITY = "LEGACY_COMPATIBILITY"
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderInvocationEvidence:
     """Observed provider invocation, not provider preference/configuration."""
@@ -53,6 +66,7 @@ class CanonicalTurnResult:
 
     text: str
     kind: CanonicalResultKind
+    origin: ResponseOrigin | None = None
     local_source: bool = False
     provider_evidence: ProviderInvocationEvidence | None = None
     mission_id: str | None = None
@@ -93,6 +107,7 @@ class CanonicalTurnResult:
         return cls(
             text=text,
             kind=kind,
+            origin=ResponseOrigin.COGNITIVE_RUNTIME,
             missing_capabilities=tuple(
                 getattr(composition, "missing_capabilities", ()) or ()
             ),
@@ -120,6 +135,7 @@ class CanonicalTurnResult:
         return cls(
             text=text,
             kind=kind,
+            origin=ResponseOrigin.LOCAL_RESPONSE,
             local_source=True,
             limitations=limitations,
             missing_capabilities=missing_capabilities,
@@ -140,6 +156,7 @@ class CanonicalTurnResult:
         return cls(
             text=text,
             kind=CanonicalResultKind.BLOCKED,
+            origin=ResponseOrigin.COGNITIVE_RUNTIME,
             local_source=True,
             mission_id=mission_id,
             limitations=(reason,),
@@ -161,6 +178,7 @@ class CanonicalTurnResult:
                 if found
                 else CanonicalResultKind.UNKNOWN
             ),
+            origin=ResponseOrigin.MEMORY,
             local_source=True,
             metadata=dict(metadata or {}),
         )
@@ -172,6 +190,7 @@ class CanonicalTurnResult:
         return cls(
             text=text,
             kind=CanonicalResultKind.WAITING_CONTEXT,
+            origin=ResponseOrigin.CONVERSATION,
             local_source=True,
             metadata=dict(metadata or {}),
         )
@@ -194,6 +213,7 @@ class CanonicalTurnResult:
         return cls(
             text=text,
             kind=CanonicalResultKind.CONVERSATION,
+            origin=ResponseOrigin.PROVIDER,
             # This constructor represents a provider-path result. Local
             # cognitive sources use ``local()``; absence of invocation evidence
             # means no provider attribution rather than "provider=local".
@@ -217,6 +237,7 @@ class CanonicalTurnResult:
         return cls(
             text=text,
             kind=kind,
+            origin=ResponseOrigin.MISSION,
             local_source=True,
             mission_id=mission_id,
             verification_evidence=verification_evidence,
@@ -288,6 +309,13 @@ class CanonicalTurnResult:
         return cls(
             text=text,
             kind=CanonicalResultKind.FAILED,
+            origin=(
+                ResponseOrigin.PROVIDER
+                if provider_id
+                else ResponseOrigin.MISSION
+                if mission_id
+                else ResponseOrigin.SYSTEM
+            ),
             provider_evidence=(
                 ProviderInvocationEvidence(provider_id, provider_invoked)
                 if provider_id
@@ -305,6 +333,7 @@ class CognitiveResponse:
     execution_mode: str
     epistemic_status: str
     confidence: float
+    response_origin: ResponseOrigin = ResponseOrigin.SYSTEM
     provider: str | None = None
     provider_called: bool = False
     resource_provenance: list[str] = field(default_factory=list)
@@ -318,6 +347,7 @@ class CognitiveResponse:
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["status"] = self.status.value
+        value["response_origin"] = self.response_origin.value
         value["ok"] = self.status is not ResponseStatus.FAILED
         return value
 
@@ -366,6 +396,11 @@ class CognitiveResponseAssembler:
             canonical = CanonicalTurnResult(
                 text=str(raw.get("text") or raw.get("error") or ""),
                 kind=kind,
+                origin=(
+                    ResponseOrigin(str(raw["response_origin"]))
+                    if raw.get("response_origin") in {item.value for item in ResponseOrigin}
+                    else ResponseOrigin.LEGACY_COMPATIBILITY
+                ),
                 local_source=provider_id == "local" and not invoked,
                 provider_evidence=(
                     ProviderInvocationEvidence(
@@ -411,6 +446,13 @@ class CognitiveResponseAssembler:
             CanonicalResultKind.FAILED: "FAILED",
         }
         execution_mode = mode_by_kind.get(canonical.kind, default_execution_mode)
+        origin = canonical.origin or {
+            CanonicalResultKind.LOCAL_RESPONSE: ResponseOrigin.LOCAL_RESPONSE,
+            CanonicalResultKind.CONVERSATION: ResponseOrigin.CONVERSATION,
+            CanonicalResultKind.WAITING_CONTEXT: ResponseOrigin.CONVERSATION,
+            CanonicalResultKind.WAITING_CONFIRMATION: ResponseOrigin.MISSION,
+            CanonicalResultKind.MISSION_COMPLETED: ResponseOrigin.MISSION,
+        }.get(canonical.kind, ResponseOrigin.COGNITIVE_RUNTIME)
 
         evidence = canonical.provider_evidence
         provider_called = bool(evidence and evidence.invoked)
@@ -448,6 +490,7 @@ class CognitiveResponseAssembler:
             execution_mode=execution_mode,
             epistemic_status=epistemic_default,
             confidence=confidence_default,
+            response_origin=origin,
             provider=provider,
             provider_called=provider_called,
             resource_provenance=provenance,
@@ -471,5 +514,6 @@ class CognitiveResponseAssembler:
             execution_mode="BLOCKED",
             epistemic_status="fact",
             confidence=1.0,
+            response_origin=ResponseOrigin.COGNITIVE_RUNTIME,
             limitations=[verdict.reason],
         )

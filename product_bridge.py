@@ -35,6 +35,7 @@ from intent_kernel.response import (
     CanonicalTurnResult,
     CognitiveResponseAssembler,
 )
+from intent_kernel.product_response import CognitiveProductPresenter
 from intent_kernel.runtime.models import ActionContract, RuntimeNode, SideEffectLevel
 from intent_kernel.tools.models import (
     PermissionDecisionState,
@@ -118,8 +119,15 @@ def _safe_diagnostic(exc: BaseException) -> None:
 
 
 class ProductBridge:
-    def __init__(self) -> None:
-        self.data_root = Path(os.environ.get("INTENTOS_DATA_ROOT", "."))
+    def __init__(
+        self,
+        *,
+        factory: ApplicationFactory | None = None,
+        data_root: str | Path | None = None,
+    ) -> None:
+        self.data_root = Path(
+            data_root if data_root is not None else os.environ.get("INTENTOS_DATA_ROOT", ".")
+        ).expanduser()
         self.sessions_root = self.data_root / "missions"
         self.logs_root = self.data_root / "logs"
         self.sessions_root.mkdir(parents=True, exist_ok=True)
@@ -129,9 +137,13 @@ class ProductBridge:
         self.data_migration_status = self._migrate_sessions()
         self.last_trace["dataMigrationStatus"] = self.data_migration_status
 
-        builder = KernelBuilder().with_pkb_path(self.data_root / "future-kc" / "pkb")
-        builder.with_environment(dict(os.environ))
-        self.factory = ApplicationFactory(builder)
+        if factory is None:
+            builder = KernelBuilder().with_pkb_path(
+                self.data_root / "future-kc" / "pkb"
+            )
+            builder.with_environment(dict(os.environ))
+            factory = ApplicationFactory(builder)
+        self.factory = factory
         self.components = self.factory.get_components()
         self.kernel = self.factory.get_kernel()
         self.iue = self.components.iue
@@ -151,6 +163,7 @@ class ProductBridge:
         self.response_assembler = CognitiveResponseAssembler(
             self.components.constitution_engine
         )
+        self.product_presenter = CognitiveProductPresenter()
         self.conversation_service = self.components.conversation_service
         self.last_capability_analysis: dict[str, Any] | None = None
         self.last_pending_dialogue_match: dict[str, Any] | None = None
@@ -1271,12 +1284,7 @@ Estratégia completa registrada no histórico para execução."""
             canonical,
             {"project_id": request.get("project_id", "GLOBAL"), "session_id": request.get("session_id", "product-alpha")},
         )
-        normalized = canonical.to_dict()
-        normalized.update(
-            {key: value for key, value in metadata.items() if key not in normalized}
-        )
-        normalized["response_authority"] = "CognitiveResponseAssembler"
-        return normalized
+        return self.product_presenter.present(canonical, metadata).to_dict()
 
     def _record_local_flow(self, structured_intent: Any, mission_id: str) -> None:
         self._flow_event("intent_created", intent_id=structured_intent.intent_id)

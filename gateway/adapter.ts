@@ -1,4 +1,9 @@
 import { IntentGatewayTransport, LocalProcessTransport, GatewayStatus } from './transport.js';
+import {
+  CognitiveProductResponse,
+  preserveCognitiveProductResponse,
+  transportFailureProductResponse,
+} from './product-response.js';
 
 export class IntentGatewayAdapter {
   private transport: IntentGatewayTransport;
@@ -30,18 +35,26 @@ export class IntentGatewayAdapter {
     };
   }
 
-  public async processIntent(payload: Record<string, any>): Promise<any> {
+  public async processIntent(payload: Record<string, any>): Promise<CognitiveProductResponse> {
     const transportStatus = this.transport.getStatus();
     if (transportStatus.mode === 'unavailable') {
-      return {
-        ok: false,
-        mode: 'unavailable',
-        ready: false,
-        message: 'Kernel externo indisponível neste ambiente',
-        text: 'Kernel externo indisponível neste ambiente.',
-      };
+      return transportFailureProductResponse(
+        'Kernel externo indisponível neste ambiente.',
+        'gateway_unavailable',
+      );
     }
-    return await this.transport.sendRequest('intent', payload);
+    const response = await this.transport.sendRequest('intent', payload);
+    try {
+      const preserved = preserveCognitiveProductResponse(response);
+      preserved.gateway_mode = 'connected';
+      return preserved;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'unknown_contract_error';
+      return transportFailureProductResponse(
+        'A resposta do runtime não corresponde ao contrato cognitivo do produto.',
+        `product_contract_violation:${reason}`,
+      );
+    }
   }
 
   public async understandIntent(payload: Record<string, any>): Promise<any> {

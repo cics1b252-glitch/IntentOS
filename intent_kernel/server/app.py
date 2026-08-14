@@ -19,11 +19,11 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from intent_kernel.application import ApplicationFactory, KernelBuilder
 from intent_kernel.kernel import Kernel
-from intent_kernel.types import Mode
+from product_bridge import ProductBridge
 
 
 # ---------------------------------------------------------------------------
@@ -32,13 +32,15 @@ from intent_kernel.types import Mode
 
 _kernel: Kernel | None = None
 _factory: ApplicationFactory | None = None
+_product_bridge: ProductBridge | None = None
 
 
 def configure_factory(factory: ApplicationFactory) -> None:
     """Inject the shared Composition Root before server startup."""
-    global _factory, _kernel
+    global _factory, _kernel, _product_bridge
     _factory = factory
     _kernel = None
+    _product_bridge = None
 
 
 def get_kernel() -> Kernel:
@@ -54,6 +56,20 @@ def get_kernel() -> Kernel:
         _kernel = _factory.get_kernel()
 
     return _kernel
+
+
+def get_product_bridge() -> ProductBridge:
+    """Return the product adapter over the same canonical composition root."""
+    global _factory, _product_bridge
+    if _factory is None:
+        get_kernel()
+    if _product_bridge is None:
+        data_root = os.environ.get("INTENTOS_DATA_ROOT", "~/.intent-os")
+        _product_bridge = ProductBridge(
+            factory=_factory,
+            data_root=os.path.expanduser(data_root),
+        )
+    return _product_bridge
 
 
 @asynccontextmanager
@@ -100,16 +116,45 @@ class ProcessRequest(BaseModel):
     mode: str = Field(default="auto", description="Processing mode: auto|quick|basic|detail|expert|architect")
 
 
+class ProductPresentationResponse(BaseModel):
+    visible_state: str
+    title: str
+    tone: str
+    response_origin: str
+    show_provider_execution: bool
+    show_mission: bool
+    show_missing_capabilities: bool
+    requires_authorization: bool
+    requires_confirmation: bool
+    suggested_actions: list[str] = []
+    interactive_actions: list[str] = []
+
+
 class ProcessResponse(BaseModel):
-    """Response from processing an intent."""
+    """Typed product response preserving the canonical cognitive envelope."""
+
+    model_config = ConfigDict(extra="allow")
+
+    product_contract_version: str
     text: str
-    mode: str
-    domain: str
+    status: str
+    execution_mode: str
+    response_origin: str
     confidence: float
     epistemic_status: str
-    alternatives: list[str] = []
-    next_steps: list[str] = []
-    events: list[dict[str, Any]] = []
+    provider: str | None = None
+    provider_called: bool = False
+    resource_provenance: list[str] = []
+    mission_id: str | None = None
+    verification_evidence: list[dict[str, Any]] = []
+    limitations: list[str] = []
+    missing_capabilities: list[str] = []
+    authorization_requirements: list[str] = []
+    next_actions: list[str] = []
+    ok: bool
+    presentation: ProductPresentationResponse
+    response_authority: str
+    product_presentation_authority: str
 
 
 class QueryResponse(BaseModel):
@@ -176,40 +221,15 @@ async def status():
 
 @app.post("/api/v1/process", response_model=ProcessResponse)
 async def process_intent(req: ProcessRequest, _: bool = Depends(verify_api_key)):
-    """Process a user intent."""
-    kernel = get_kernel()
-
-    # Determine mode
-    mode = None
-    if req.mode != "auto":
-        try:
-            mode = Mode(req.mode.lower())
-        except ValueError:
-            raise HTTPException(400, f"Invalid mode: {req.mode}")
-
-    result = await kernel.process(req.text, context=req.context)
-
-    # Override mode if specified
-    if mode:
-        result.mode = mode
-
-    return ProcessResponse(
-        text=result.text,
-        mode=result.mode.value,
-        domain=result.domain.value,
-        confidence=result.confidence,
-        epistemic_status=result.epistemic_status.value,
-        alternatives=result.alternatives,
-        next_steps=result.next_steps,
-        events=[
-            {
-                "id": e.id,
-                "type": e.type.value,
-                "title": e.title,
-            }
-            for e in result.events
-        ],
-    )
+    """Process through ProductBridge without overriding canonical semantics."""
+    # Transport context is subordinate: it cannot replace the route-selected
+    # action or the typed user text accepted by this endpoint.
+    request = {**dict(req.context), "action": "intent", "message": req.text}
+    # The historical `mode` input remains accepted as a presentation preference,
+    # but it cannot override CognitiveResponse.execution_mode.
+    request["requested_presentation_mode"] = req.mode
+    result = await get_product_bridge().dispatch(request)
+    return ProcessResponse(**result)
 
 
 @app.get("/api/v1/query", response_model=QueryResponse)

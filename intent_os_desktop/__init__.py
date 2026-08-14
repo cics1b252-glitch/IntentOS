@@ -28,6 +28,7 @@ class IntentOSDesktop:
     def __init__(self, factory=None):
         self.kernel = None
         self.monitor = None
+        self.bridge = None
         self._factory = factory
         self.config_path = Path.home() / ".intent-os" / "config.json"
         self.config = self._load_config()
@@ -67,6 +68,12 @@ class IntentOSDesktop:
             self.kernel,
             components=self._factory.get_components(),
         )
+        from product_bridge import ProductBridge
+
+        self.bridge = ProductBridge(
+            factory=self._factory,
+            data_root=Path.home() / ".intent-os",
+        )
 
         return {
             "status": "initialized",
@@ -83,24 +90,18 @@ class IntentOSDesktop:
         if not self.kernel:
             self.initialize()
 
-        result = asyncio.run(self.kernel.process(text, context))
+        # Context carries transport/session metadata only. It cannot redirect
+        # this product entry point or replace the explicit user utterance.
+        request = {**dict(context or {}), "action": "intent", "message": text}
+        result = asyncio.run(self.bridge.dispatch(request))
 
         # Log to monitor
-        self.monitor.log_event("intent", f"Processed: {text[:50]}", {
-            "domain": result.domain.value,
-            "mode": result.mode.value,
-            "confidence": result.confidence,
+        self.monitor.log_event("intent", "Canonical product response", {
+            "status": result["status"],
+            "execution_mode": result["execution_mode"],
+            "response_origin": result["response_origin"],
         })
-
-        return {
-            "text": result.text,
-            "mode": result.mode.value,
-            "domain": result.domain.value,
-            "confidence": result.confidence,
-            "epistemic_status": result.epistemic_status.value,
-            "alternatives": result.alternatives,
-            "next_steps": result.next_steps,
-        }
+        return result
 
     def get_status(self) -> dict:
         """Get complete system status."""

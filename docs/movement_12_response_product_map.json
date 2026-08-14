@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "movement": 12,
+  "name": "Cognitive Response / Product Experience Convergence",
+  "source": {
+    "branch": "architecture/runtime-authority-convergence",
+    "head": "b5b856d01d571131d8a3e3c373021ceffc29b5d1",
+    "verified_runtime_baseline": "31e44bd6c8c7dac38e813b952e478f2d66eef130"
+  },
+  "paths": [
+    {
+      "entry_point": "node_api_intent",
+      "runtime_source": "CognitiveResponseAssembler",
+      "transport": ["ProductBridge", "LocalProcessTransport", "IntentGatewayAdapter"],
+      "presentation": "intent_os_desktop/static/index.html",
+      "conflict": "frontend_uses_ok_as_semantic_success"
+    },
+    {
+      "entry_point": "python_desktop_process_intent",
+      "runtime_source": "Kernel.process",
+      "transport": ["IntentOSDesktop"],
+      "presentation": "desktop_or_cli_client",
+      "conflict": "bypasses_cognitive_response"
+    },
+    {
+      "entry_point": "fastapi_v1_process",
+      "runtime_source": "Kernel.process",
+      "transport": ["ProcessResponse"],
+      "presentation": "api_client",
+      "conflict": "bypasses_cognitive_response_and_allows_mode_override"
+    }
+  ],
+  "fields": {
+    "status": {"authority": "CognitiveResponseAssembler", "risk": "frontend_ignored"},
+    "execution_mode": {"authority": "CognitiveResponseAssembler", "risk": "legacy_mode_divergence"},
+    "epistemic_status": {"authority": "CognitiveResponseAssembler", "risk": "frontend_hidden"},
+    "confidence": {"authority": "CognitiveResponseAssembler", "risk": "iqi_confusion"},
+    "text": {"authority": "governed_canonical_result", "risk": "unescaped_inner_html"},
+    "provider": {"authority": "ProviderInvocationEvidence", "risk": "selection_invocation_confusion"},
+    "provider_called": {"authority": "ProviderManager_invocation_boundary", "risk": "frontend_hidden"},
+    "resource_provenance": {"authority": "ProviderInvocationEvidence", "risk": "frontend_hidden"},
+    "mission_id": {"authority": "MissionEngine", "risk": "legacy_path_bypass"},
+    "authorization": {"authority": "ToolAuthorizationGate_and_ActionGate", "risk": "generic_ui_branch"},
+    "missing_capabilities": {"authority": "CapabilityFirstResolver", "risk": "frontend_hidden"},
+    "limitations": {"authority": "canonical_result_and_constitution", "risk": "text_only"},
+    "compatibility": {"authority": "execution_boundary_trace", "risk": "future_inference"},
+    "ok": {"authority": "protocol_processing_outcome", "risk": "misused_as_semantic_success"}
+  },
+  "target": {
+    "semantic_authority": "CognitiveResponseAssembler",
+    "product_projection": "CognitiveProductPresenter",
+    "bridge_role": "transport_only_plus_explicit_compatibility",
+    "gateway_role": "typed_validation_and_transport_failure_boundary",
+    "frontend_role": "escaped_presentation_only"
+  }
+}

@@ -52,6 +52,13 @@
         .message { padding: 12px 0; border-bottom: 1px solid var(--border); }
         .message.user { color: var(--accent); font-weight: 600; }
         .message.system { color: var(--text); }
+        .response-card { margin: 10px 0; padding: 14px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 8px; background: var(--surface2); }
+        .response-card .response-title { display: flex; justify-content: space-between; gap: 12px; font-weight: 700; margin-bottom: 8px; }
+        .response-card .response-state { font-size: 11px; color: var(--text-dim); }
+        .response-card .response-detail { margin-top: 10px; font-size: 12px; color: var(--text-dim); }
+        .response-card .response-detail ul { margin: 4px 0 0 18px; }
+        .response-card[data-tone="blocked"], .response-card[data-tone="error"] { border-left-color: var(--red); }
+        .response-card[data-tone="attention"], .response-card[data-tone="uncertain"], .response-card[data-tone="resource"], .response-card[data-tone="authorization"], .response-card[data-tone="confirmation"] { border-left-color: var(--yellow); }
         .iue-badge { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 8px; font-size: 12px; color: var(--text-dim); }
         .iue-badge .title { font-weight: 600; color: var(--accent); margin-bottom: 4px; }
         .iue-badge .list { margin-left: 16px; }
@@ -446,6 +453,54 @@
             }
         }
 
+        function escapeProductText(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function productList(title, values) {
+            if (!Array.isArray(values) || values.length === 0) return '';
+            return `<div class="response-detail"><strong>${escapeProductText(title)}:</strong><ul>${values.map(value => `<li>${escapeProductText(value)}</li>`).join('')}</ul></div>`;
+        }
+
+        function renderProductResponse(data) {
+            if (data.product_contract_version !== '1.0' || !data.presentation) {
+                return `<div class="response-card" data-tone="error"><div class="response-title"><span>Resposta inválida</span><span class="response-state">FAILED</span></div><div>O produto recebeu uma resposta sem contrato cognitivo válido.</div></div>`;
+            }
+            const view = data.presentation;
+            const provider = view.show_provider_execution
+                ? `<div class="response-detail">Provider executado: <strong>${escapeProductText(data.provider)}</strong></div>`
+                : '';
+            const mission = view.show_mission
+                ? `<div class="response-detail">Mission: <strong>${escapeProductText(data.mission_id)}</strong></div>`
+                : '';
+            const authorization = view.requires_authorization
+                ? '<div class="response-detail">Permissão de recurso necessária. Nenhuma execução ocorreu.</div>'
+                : '';
+            const confirmation = view.requires_confirmation
+                ? '<div class="response-detail">Ação aguardando confirmação. Este cliente ainda não oferece retomada interativa.</div>'
+                : '';
+            return `
+                <div class="response-card" data-tone="${escapeProductText(view.tone)}" data-status="${escapeProductText(data.status)}">
+                    <div class="response-title">
+                        <span>${escapeProductText(view.title)}</span>
+                        <span class="response-state">${escapeProductText(data.status)} · ${escapeProductText(data.response_origin)}</span>
+                    </div>
+                    <div>${escapeProductText(data.text).replace(/\n/g, '<br>')}</div>
+                    ${provider}
+                    ${mission}
+                    ${authorization}
+                    ${confirmation}
+                    ${productList('Capacidades ausentes', data.missing_capabilities)}
+                    ${productList('Limitações', data.limitations)}
+                    ${productList('Próximos passos sugeridos', view.suggested_actions)}
+                </div>`;
+        }
+
         async function sendIntent() {
             const input = document.getElementById('chat-input');
             const message = input.value.trim();
@@ -454,7 +509,7 @@
 
             const messages = document.getElementById('chat-messages');
             if (messages.querySelector('.empty')) messages.innerHTML = '';
-            messages.innerHTML += `<div class="message user">🔹 ${message}</div>`;
+            messages.innerHTML += `<div class="message user">🔹 ${escapeProductText(message)}</div>`;
 
             try {
                 const res = await fetch('/api/intent', {
@@ -463,30 +518,9 @@
                     body: JSON.stringify({ message, text: message })
                 });
                 const data = await res.json();
-                if (data.ok && data.text) {
-                    messages.innerHTML += `<div class="message system">${data.text.replace(/\n/g, '<br>')}</div>`;
-
-                    if (data.structured_intent) {
-                        const si = data.structured_intent;
-                        const score = Math.round((si.intent_quality_index?.overall_score || 0) * 100);
-                        messages.innerHTML += `
-                            <div class="iue-badge">
-                                <div class="title">🎯 IUE Analysis — Domínio: ${si.domain.toUpperCase()} (IQI: ${score}%)</div>
-                                <div><strong>Objetivo:</strong> ${si.goal}</div>
-                                ${si.missing_context && si.missing_context.length ? `
-                                    <div style="margin-top:4px;color:var(--yellow)"><strong>Dados Ausentes:</strong>
-                                        <ul class="list">${si.missing_context.map(m=>`<li>${m}</li>`).join('')}</ul>
-                                    </div>
-                                ` : ''}
-                            </div>
-                        `;
-                    }
-                } else {
-                    const errText = data.error || data.message || 'Kernel externo indisponível neste ambiente.';
-                    messages.innerHTML += `<div class="message system" style="color:var(--yellow)">⚠️ ${errText}</div>`;
-                }
+                messages.innerHTML += renderProductResponse(data);
             } catch (e) {
-                messages.innerHTML += `<div class="message system" style="color:var(--red)">Erro ao comunicar com o Intent Gateway.</div>`;
+                messages.innerHTML += `<div class="response-card" data-tone="error" data-status="FAILED"><div class="response-title"><span>Falha de comunicação</span><span class="response-state">FAILED</span></div><div>Erro ao comunicar com o Intent Gateway.</div></div>`;
             }
             messages.scrollTop = messages.scrollHeight;
         }

@@ -15,21 +15,27 @@ except ImportError:
     HAS_SERVER = False
     app = None
     get_kernel = None
-from intent_kernel.kernel import Kernel
+from intent_kernel.application import ApplicationFactory, KernelBuilder
 import tempfile
 
 
 @pytest.fixture(autouse=True)
-def override_kernel():
+def override_kernel(monkeypatch):
     """Override kernel with temp directory for tests."""
     if not HAS_SERVER:
         yield
         return
     import intent_kernel.server.app as server_module
     with tempfile.TemporaryDirectory() as tmpdir:
-        server_module._kernel = Kernel(pkb_path=f"{tmpdir}/pkb")
+        monkeypatch.setenv("INTENTOS_DATA_ROOT", tmpdir)
+        factory = ApplicationFactory(
+            KernelBuilder().with_pkb_path(f"{tmpdir}/pkb")
+        )
+        server_module.configure_factory(factory)
         yield
         server_module._kernel = None
+        server_module._factory = None
+        server_module._product_bridge = None
 
 
 @pytest.mark.asyncio
@@ -59,8 +65,10 @@ async def test_process_endpoint():
     assert resp.status_code == 200
     data = resp.json()
     assert data["text"]
-    assert data["mode"] in ("quick", "basic", "detail", "expert", "architect")
-    assert data["domain"]
+    assert data["status"] == data["presentation"]["visible_state"]
+    assert data["execution_mode"]
+    assert data["product_contract_version"] == "1.0"
+    assert data["response_authority"] == "CognitiveResponseAssembler"
     assert 0.0 <= data["confidence"] <= 1.0
 
 
@@ -74,7 +82,45 @@ async def test_process_finance():
         })
     assert resp.status_code == 200
     data = resp.json()
-    assert data["domain"] == "finance"
+    assert data["status"] in {
+        "COMPLETED", "WAITING_CONTEXT", "EXTERNAL_RESOURCE_REQUIRED", "UNKNOWN"
+    }
+    assert data["presentation"]["visible_state"] == data["status"]
+
+
+@pytest.mark.asyncio
+async def test_process_endpoint_cannot_override_canonical_mode():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/v1/process", json={
+            "text": "Qual a capital de XZ-91?",
+            "mode": "expert",
+        })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "UNKNOWN"
+    assert data["execution_mode"] == "UNKNOWN"
+    assert data["provider_called"] is False
+    assert data["mission_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_process_context_cannot_override_action_or_message():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/v1/process", json={
+            "text": "Qual a capital de XZ-91?",
+            "context": {
+                "action": "restore_session",
+                "message": "Crie e envie um e-mail.",
+                "session_id": "reserved-fields",
+            },
+        })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "UNKNOWN"
+    assert data["mission_id"] is None
+    assert data["provider_called"] is False
 
 
 @pytest.mark.asyncio

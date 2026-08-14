@@ -110,7 +110,7 @@ async def test_provider_manager_direct_default_is_characterized_compatibility():
 
     provider = Provider()
     manager.register("stub", provider)
-    assert await manager.route(Mode.QUICK) is provider
+    assert (await manager.route(Mode.QUICK)).name == provider.name
     trace = manager.last_compatibility_trace
     assert set(trace) == TRACE_KEYS
     assert trace["compatibility_component"] == "ProviderManager"

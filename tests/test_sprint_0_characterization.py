@@ -81,8 +81,8 @@ async def test_provider_manager_routes_every_mode_to_first_provider():
     manager.register("second", second)
 
     assert manager.default == "first"
-    assert await manager.route(Mode.QUICK) is first
-    assert await manager.route(Mode.ARCHITECT) is first
+    assert (await manager.route(Mode.QUICK)).name == first.name
+    assert (await manager.route(Mode.ARCHITECT)).name == first.name
 
 
 async def test_mock_provider_current_finance_template():

@@ -194,7 +194,10 @@ class CanonicalTurnResult:
         return cls(
             text=text,
             kind=CanonicalResultKind.CONVERSATION,
-            local_source=not invoked,
+            # This constructor represents a provider-path result. Local
+            # cognitive sources use ``local()``; absence of invocation evidence
+            # means no provider attribution rather than "provider=local".
+            local_source=False,
             provider_evidence=evidence,
             metadata=dict(metadata or {}),
         )

@@ -97,7 +97,7 @@ class TestRFC0017_2Repair(unittest.IsolatedAsyncioTestCase):
             "msg",
             [],
             {"mission_id": "m1"},
-            "gemini"
+            None
         )
         self.assertIs(res_internal.kind, CanonicalResultKind.FAILED)
         self.assertEqual(

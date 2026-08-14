@@ -163,7 +163,8 @@ async def test_zero_provider_product_path_is_truthful_and_never_invokes_mock(mon
     })
     assert mock_calls == 0
     assert response["provider_called"] is False
-    assert response["provider"] == "local"
+    assert response["provider"] is None
+    assert response["resource_provenance"] == []
     assert response["provider_selection"]["reason"] == "no_eligible_provider"
 
 

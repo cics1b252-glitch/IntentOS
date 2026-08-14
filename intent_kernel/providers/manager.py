@@ -120,7 +120,10 @@ class ProviderManager:
             entry_point="ProviderManager.route.direct_default",
             canonical_alternative_missing="canonical_provider_selection",
         ).to_dict()
-        return self.get()
+        # Compatibility callers still cross the observed invocation boundary.
+        # Returning the raw binding here would make a real direct invocation
+        # invisible to last_attempted/last_used and downstream provenance.
+        return ManagedProvider(self, provider_id=self._default)
 
     @property
     def default(self) -> str | None:

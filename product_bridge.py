@@ -932,14 +932,14 @@ Estratégia completa registrada no histórico para execução."""
         try:
             result = await self.kernel.process(message, context)
         except Exception as exc:
-            failed_provider = (
-                self.components.provider_manager.last_attempted
-                or provider_selection.provider_id
-                or default_provider
-            )
+            # Provider attribution is execution evidence, not selection evidence.
+            # ManagedProvider records this value at the invocation boundary before
+            # calling the binding. A selected/default provider that was never
+            # attempted must remain diagnostics-only.
+            attempted_provider = self.components.provider_manager.last_attempted
             await self._pause_failed_mission(context)
             response = self._provider_failure(
-                exc, session_id, message, history, context, failed_provider,
+                exc, session_id, message, history, context, attempted_provider,
                 persist_session=persist_turn,
             )
             self._flow_event("request_failed", stage=self.last_trace["lastCompletedStage"],
@@ -947,7 +947,12 @@ Estratégia completa registrada no histórico para execução."""
                              duration_ms=round((time.perf_counter() - started) * 1000, 2))
             response = replace(
                 response,
-                metadata={**response.metadata, "trace": self.last_trace},
+                metadata={
+                    **response.metadata,
+                    "provider_selection": provider_selection.to_dict(),
+                    "provider_selection_authority": "RRM",
+                    "trace": self.last_trace,
+                },
             )
             return self._compatibility_response(
                 response,
@@ -994,7 +999,7 @@ Estratégia completa registrada no histórico para execução."""
             "mission_id": context.get("mission_id"), "mission_status": "completed",
             "pending_dialogue": None, "conversation_state": conv_state,
             "intent": context.get("intent_model", {"text": message}),
-            "response": {"text": result.text, "provider": response_provider,
+            "response": {"text": result.text, "provider": used_provider,
                          "fallback_used": used_fallback, "domain": result.domain.value},
             "history": full_history, "updated_at": now,
         })
@@ -1026,7 +1031,7 @@ Estratégia completa registrada no histórico para execução."""
             })
         canonical_result = CanonicalTurnResult.provider(
             result.text,
-            provider_id=response_provider,
+            provider_id=used_provider,
             invoked=bool(used_provider),
             resource_ids=(
                 (f"provider:{used_provider}",) if used_provider else ("RRM",)
@@ -1359,7 +1364,7 @@ Estratégia completa registrada no histórico para execução."""
         message: str,
         history: list[dict[str, Any]],
         context: dict[str, Any],
-        provider: str | None,
+        attempted_provider: str | None,
         *,
         persist_session: Any | None = None,
     ) -> CanonicalTurnResult:
@@ -1387,6 +1392,8 @@ Estratégia completa registrada no histórico para execução."""
                 self._save_session(session_id, record)
             return CanonicalTurnResult.failed(
                 text,
+                provider_id=attempted_provider,
+                provider_invoked=attempted_provider is not None,
                 mission_id=context.get("mission_id"),
                 metadata={
                     "error": text,
@@ -1396,13 +1403,13 @@ Estratégia completa registrada no histórico para execução."""
             )
 
         if name == "RateLimitError" or provider_code == "quota_reached":
-            text = f"O Provider {provider or 'selecionado'} atingiu seu limite. Aguarde a renovação da cota ou revise os limites da conta."
+            text = f"O Provider {attempted_provider or 'selecionado'} atingiu seu limite. Aguarde a renovação da cota ou revise os limites da conta."
             code, status = "provider_quota", "quota_reached"
         elif name in {"APIConnectionError", "APITimeoutError"} or provider_code == "unavailable":
-            text = f"O Provider {provider or 'selecionado'} está indisponível. Tente novamente mais tarde."
+            text = f"O Provider {attempted_provider or 'selecionado'} está indisponível. Tente novamente mais tarde."
             code, status = "provider_connection", "unavailable"
         elif name == "AuthenticationError" or provider_code == "invalid_key":
-            text = f"A credencial do Provider {provider or 'selecionado'} foi recusada. Reconecte nas Configurações."
+            text = f"A credencial do Provider {attempted_provider or 'selecionado'} foi recusada. Reconecte nas Configurações."
             code, status = "provider_authentication", "error"
         else:
             text = "Não foi possível concluir esta Mission. Você pode tentar novamente."
@@ -1411,7 +1418,7 @@ Estratégia completa registrada no histórico para execução."""
             "schema_version": "1.2", "session_id": session_id,
             "mission_id": context.get("mission_id"), "mission_status": "failed_recoverable",
             "intent": context.get("intent_model", {"text": message}),
-            "response": {"error_code": code, "provider": provider},
+            "response": {"error_code": code, "provider": attempted_provider},
             "history": history, "updated_at": utc_iso(),
         }
         if callable(persist_session):
@@ -1420,8 +1427,8 @@ Estratégia completa registrada no histórico para execução."""
             self._save_session(session_id, record)
         return CanonicalTurnResult.failed(
             text,
-            provider_id=provider,
-            provider_invoked=bool(provider),
+            provider_id=attempted_provider,
+            provider_invoked=attempted_provider is not None,
             mission_id=context.get("mission_id"),
             metadata={
                 "error": text,

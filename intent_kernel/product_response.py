@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
-from intent_kernel.response import CognitiveResponse, ResponseOrigin, ResponseStatus
+from intent_kernel.response import (
+    CognitiveResponse,
+    ResponseOrigin,
+    ResponseStatus,
+    canonical_outcome_semantics,
+)
 
 
 PRODUCT_RESPONSE_CONTRACT_VERSION = "1.0"
@@ -85,6 +90,11 @@ class CognitiveProductPresenter:
         metadata: Mapping[str, Any] | None = None,
     ) -> CognitiveProductResponse:
         status = response.status
+        outcome_semantics = canonical_outcome_semantics(status)
+        if response.epistemic_status != outcome_semantics.epistemic_status:
+            raise ValueError("epistemic status contradicts canonical outcome")
+        if response.confidence != outcome_semantics.confidence:
+            raise ValueError("confidence contradicts canonical outcome")
         provider_provenance = any(
             item.startswith("provider:") for item in response.resource_provenance
         )
@@ -152,7 +162,7 @@ def transport_failure_product_response(
         status=ResponseStatus.FAILED,
         execution_mode="FAILED",
         epistemic_status="unknown",
-        confidence=1.0,
+        confidence=0.5,
         response_origin=ResponseOrigin.SYSTEM,
         limitations=[error_code],
     )

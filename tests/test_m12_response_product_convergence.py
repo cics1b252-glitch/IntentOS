@@ -11,9 +11,13 @@ from intent_kernel.product_response import (
     transport_failure_product_response,
 )
 from intent_kernel.response import (
+    CanonicalResultKind,
+    CanonicalTurnResult,
     CognitiveResponse,
+    CognitiveResponseAssembler,
     ResponseOrigin,
     ResponseStatus,
+    canonical_outcome_semantics,
     response_status_is_ok,
 )
 from product_bridge import ProductBridge
@@ -26,12 +30,13 @@ def _response(
     origin: ResponseOrigin,
     **overrides,
 ) -> CognitiveResponse:
+    outcome_semantics = canonical_outcome_semantics(status)
     values = {
         "text": f"canonical {status.value}",
         "status": status,
         "execution_mode": execution_mode,
-        "epistemic_status": "unknown" if status is ResponseStatus.UNKNOWN else "fact",
-        "confidence": 1.0,
+        "epistemic_status": outcome_semantics.epistemic_status,
+        "confidence": outcome_semantics.confidence,
         "response_origin": origin,
     }
     values.update(overrides)
@@ -131,6 +136,70 @@ def test_local_conversation_and_memory_are_ok_only_as_completed_outcomes():
         assert product["ok"] is True
 
 
+@pytest.mark.parametrize(
+    "kind,status",
+    [
+        (CanonicalResultKind.CONVERSATION, ResponseStatus.COMPLETED),
+        (CanonicalResultKind.WAITING_CONTEXT, ResponseStatus.WAITING_CONTEXT),
+        (CanonicalResultKind.UNKNOWN, ResponseStatus.UNKNOWN),
+        (CanonicalResultKind.BLOCKED, ResponseStatus.BLOCKED),
+        (
+            CanonicalResultKind.AUTHORIZATION_REQUIRED,
+            ResponseStatus.AUTHORIZATION_REQUIRED,
+        ),
+        (
+            CanonicalResultKind.EXTERNAL_RESOURCE_REQUIRED,
+            ResponseStatus.EXTERNAL_RESOURCE_REQUIRED,
+        ),
+        (
+            CanonicalResultKind.WAITING_CONFIRMATION,
+            ResponseStatus.WAITING_CONFIRMATION,
+        ),
+        (CanonicalResultKind.FAILED, ResponseStatus.FAILED),
+    ],
+)
+def test_python_canonical_epistemic_confidence_matrix(kind, status):
+    semantics = canonical_outcome_semantics(status)
+    result = CanonicalTurnResult(
+        text="canonical epistemic matrix",
+        kind=kind,
+        mission_id=(
+            "mission-epistemic-matrix"
+            if status is ResponseStatus.WAITING_CONFIRMATION
+            else None
+        ),
+    )
+    response = CognitiveResponseAssembler.from_result(result)
+
+    assert response.status is status
+    assert response.epistemic_status == semantics.epistemic_status
+    assert response.confidence == semantics.confidence
+    assert CognitiveProductPresenter.present(response).to_dict()[
+        "epistemic_status"
+    ] == semantics.epistemic_status
+
+    with pytest.raises(ValueError, match="epistemic status"):
+        CognitiveProductPresenter.present(
+            _response(
+                status,
+                execution_mode=response.execution_mode,
+                origin=response.response_origin,
+                mission_id=response.mission_id,
+                epistemic_status="contradictory",
+            )
+        )
+    with pytest.raises(ValueError, match="confidence"):
+        CognitiveProductPresenter.present(
+            _response(
+                status,
+                execution_mode=response.execution_mode,
+                origin=response.response_origin,
+                mission_id=response.mission_id,
+                confidence=(1.0 if semantics.confidence != 1.0 else 0.5),
+            )
+        )
+
+
 def test_verified_mission_completion_and_compatibility_facets_are_preserved():
     response = _response(
         ResponseStatus.COMPLETED,
@@ -226,6 +295,8 @@ def test_transport_failure_has_one_truthful_product_shape():
     )
     assert product["status"] == "FAILED"
     assert product["execution_mode"] == "FAILED"
+    assert product["epistemic_status"] == "unknown"
+    assert product["confidence"] == 0.5
     assert product["provider"] is None
     assert product["provider_called"] is False
     assert product["mission_id"] is None

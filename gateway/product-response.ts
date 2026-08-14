@@ -76,6 +76,27 @@ const STATUSES = new Set<CognitiveResponseStatus>([
 // The gateway validates this derived signal; it does not define success.
 const SUCCESSFUL_STATUSES = new Set<CognitiveResponseStatus>(['COMPLETED']);
 
+export interface CanonicalOutcomeSemantics {
+  epistemic_status: string;
+  confidence: number;
+}
+
+// Contract 1.0 mirror of Python's CANONICAL_OUTCOME_SEMANTICS. This table is
+// validation-only; Python remains the source of canonical epistemic truth.
+export const CANONICAL_OUTCOME_SEMANTICS: Record<
+  CognitiveResponseStatus,
+  CanonicalOutcomeSemantics
+> = {
+  COMPLETED: {epistemic_status: 'conclusion', confidence: 0.5},
+  WAITING_CONTEXT: {epistemic_status: 'conclusion', confidence: 0.5},
+  UNKNOWN: {epistemic_status: 'unknown', confidence: 1},
+  BLOCKED: {epistemic_status: 'fact', confidence: 1},
+  AUTHORIZATION_REQUIRED: {epistemic_status: 'fact', confidence: 1},
+  EXTERNAL_RESOURCE_REQUIRED: {epistemic_status: 'unknown', confidence: 1},
+  WAITING_CONFIRMATION: {epistemic_status: 'fact', confidence: 1},
+  FAILED: {epistemic_status: 'unknown', confidence: 0.5},
+};
+
 const ORIGINS = new Set<ResponseOrigin>([
   'COGNITIVE_RUNTIME',
   'LOCAL_RESPONSE',
@@ -164,7 +185,7 @@ export function transportFailureProductResponse(
     status: 'FAILED',
     execution_mode: 'FAILED',
     epistemic_status: 'unknown',
-    confidence: 1,
+    confidence: 0.5,
     response_origin: 'SYSTEM',
     provider: null,
     provider_called: false,
@@ -217,7 +238,10 @@ export function preserveCognitiveProductResponse(
   if (raw.product_presentation_authority !== 'CognitiveProductPresenter') throw new Error('invalid_presentation_authority');
   if (typeof raw.text !== 'string' || typeof raw.execution_mode !== 'string') throw new Error('invalid_text_or_mode');
   if (!EXECUTION_MODES_BY_STATUS[status].has(raw.execution_mode)) throw new Error('execution_mode_status_mismatch');
-  if (typeof raw.epistemic_status !== 'string' || typeof raw.confidence !== 'number' || !Number.isFinite(raw.confidence) || raw.confidence < 0 || raw.confidence > 1) throw new Error('invalid_epistemic_fields');
+  if (typeof raw.epistemic_status !== 'string' || typeof raw.confidence !== 'number' || !Number.isFinite(raw.confidence)) throw new Error('invalid_epistemic_fields');
+  const expectedOutcomeSemantics = CANONICAL_OUTCOME_SEMANTICS[status];
+  if (raw.epistemic_status !== expectedOutcomeSemantics.epistemic_status) throw new Error('epistemic_status_mismatch');
+  if (raw.confidence !== expectedOutcomeSemantics.confidence) throw new Error('confidence_status_mismatch');
   if (typeof raw.ok !== 'boolean' || raw.ok !== SUCCESSFUL_STATUSES.has(status)) throw new Error('ok_status_mismatch');
   if (typeof raw.provider_called !== 'boolean') throw new Error('invalid_provider_called');
   if (raw.provider !== null && typeof raw.provider !== 'string') throw new Error('invalid_provider');

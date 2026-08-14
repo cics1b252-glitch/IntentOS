@@ -2,9 +2,11 @@ import assert from 'node:assert';
 import test, { describe, it } from 'node:test';
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { IntentGatewayAdapter } from '../dist/gateway/adapter.js';
 import { LocalProcessTransport } from '../dist/gateway/transport.js';
 import {
+  CANONICAL_OUTCOME_SEMANTICS,
   preserveCognitiveProductResponse,
   transportFailureProductResponse,
 } from '../dist/gateway/product-response.js';
@@ -33,13 +35,14 @@ function canonicalProductResponse(overrides = {}) {
   };
   const missingCapabilities = overrides.missing_capabilities || ['knowledge.lookup'];
   const nextActions = overrides.next_actions || [];
+  const outcomeSemantics = CANONICAL_OUTCOME_SEMANTICS[status];
   const base = {
     product_contract_version: '1.0',
     text: 'canonical',
     status,
     execution_mode: 'UNKNOWN',
-    epistemic_status: 'unknown',
-    confidence: 1,
+    epistemic_status: outcomeSemantics.epistemic_status,
+    confidence: outcomeSemantics.confidence,
     response_origin: 'COGNITIVE_RUNTIME',
     provider: null,
     provider_called: false,
@@ -247,6 +250,85 @@ describe('Intent Gateway Adapter & Transport Tests', () => {
     }
   });
 
+  it('matches Python and rejects the full epistemic-confidence contradiction matrix', () => {
+    const python = spawnSync('python3', ['-c', [
+      'import json',
+      'from intent_kernel.response import CANONICAL_OUTCOME_SEMANTICS',
+      'print(json.dumps({status.value: {"epistemic_status": value.epistemic_status, "confidence": value.confidence} for status, value in CANONICAL_OUTCOME_SEMANTICS.items()}, sort_keys=True))',
+    ].join(';')], {encoding: 'utf8'});
+    assert.strictEqual(python.status, 0, python.stderr);
+    assert.deepStrictEqual(
+      CANONICAL_OUTCOME_SEMANTICS,
+      JSON.parse(python.stdout),
+    );
+
+    const modes = {
+      COMPLETED: 'CONVERSATION',
+      WAITING_CONTEXT: 'CONVERSATION',
+      UNKNOWN: 'UNKNOWN',
+      BLOCKED: 'BLOCKED',
+      AUTHORIZATION_REQUIRED: 'AUTHORIZATION_REQUIRED',
+      EXTERNAL_RESOURCE_REQUIRED: 'EXTERNAL_REASONING_REQUIRED',
+      WAITING_CONFIRMATION: 'MISSION',
+      FAILED: 'FAILED',
+    };
+    for (const [status, expected] of Object.entries(CANONICAL_OUTCOME_SEMANTICS)) {
+      const valid = canonicalProductResponse({
+        status,
+        execution_mode: modes[status],
+        epistemic_status: expected.epistemic_status,
+        confidence: expected.confidence,
+        mission_id: status === 'WAITING_CONFIRMATION' ? 'mission-epistemic-matrix' : null,
+        presentation: status === 'WAITING_CONFIRMATION' ? {show_mission: true} : {},
+      });
+      assert.strictEqual(preserveCognitiveProductResponse(valid), valid);
+      assert.throws(
+        () => preserveCognitiveProductResponse({...valid, epistemic_status: 'contradictory'}),
+        /epistemic_status_mismatch/,
+      );
+      assert.throws(
+        () => preserveCognitiveProductResponse({
+          ...valid,
+          confidence: expected.confidence === 1 ? 0.5 : 1,
+        }),
+        /confidence_status_mismatch/,
+      );
+      assert.throws(
+        () => preserveCognitiveProductResponse({
+          ...valid,
+          epistemic_status: 'contradictory',
+          confidence: expected.confidence === 1 ? 0.5 : 1,
+        }),
+        /epistemic_status_mismatch/,
+      );
+    }
+  });
+
+  it('fails closed through the adapter on PX-02 epistemic fabrication', async () => {
+    const contradictory = canonicalProductResponse({
+      status: 'UNKNOWN',
+      execution_mode: 'UNKNOWN',
+      ok: false,
+      epistemic_status: 'known',
+      confidence: 0.01,
+    });
+    const transport = {
+      start: async () => {}, stop: async () => {},
+      getStatus: () => ({ready: true, mode: 'connected'}),
+      sendRequest: async () => contradictory,
+    };
+    const result = await new IntentGatewayAdapter(transport).processIntent({message: 'x'});
+
+    assert.strictEqual(result.status, 'FAILED');
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.epistemic_status, 'unknown');
+    assert.strictEqual(result.confidence, 0.5);
+    assert.strictEqual(result.provider, null);
+    assert.strictEqual(result.mission_id, null);
+    assert.deepStrictEqual(result.presentation.interactive_actions, []);
+    assert.match(result.error_code, /^product_contract_violation:epistemic_status_mismatch$/);
+  });
+
   it('rejects fabricated provider and Mission evidence', () => {
     assert.throws(() => preserveCognitiveProductResponse(canonicalProductResponse({
       provider: 'mock',
@@ -425,6 +507,8 @@ describe('Intent Gateway Adapter & Transport Tests', () => {
     const response = transportFailureProductResponse('offline', 'gateway_unavailable');
     assert.strictEqual(response.status, 'FAILED');
     assert.strictEqual(response.execution_mode, 'FAILED');
+    assert.strictEqual(response.epistemic_status, 'unknown');
+    assert.strictEqual(response.confidence, 0.5);
     assert.strictEqual(response.provider_called, false);
     assert.strictEqual(response.mission_id, null);
     assert.strictEqual(response.transport_failure, true);

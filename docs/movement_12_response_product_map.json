@@ -33,8 +33,19 @@
   "fields": {
     "status": {"authority": "CognitiveResponseAssembler", "risk": "frontend_ignored"},
     "execution_mode": {"authority": "CognitiveResponseAssembler", "risk": "legacy_mode_divergence"},
-    "epistemic_status": {"authority": "CognitiveResponseAssembler", "risk": "frontend_hidden"},
-    "confidence": {"authority": "CognitiveResponseAssembler", "risk": "iqi_confusion"},
+    "epistemic_status": {
+      "authority": "CognitiveResponseAssembler",
+      "derivation": "CANONICAL_OUTCOME_SEMANTICS_by_status",
+      "typescript_role": "validation_only",
+      "risk": "frontend_hidden"
+    },
+    "confidence": {
+      "authority": "CognitiveResponseAssembler",
+      "derivation": "CANONICAL_OUTCOME_SEMANTICS_by_status",
+      "typescript_role": "validation_only",
+      "downstream_estimate": false,
+      "risk": "iqi_confusion"
+    },
     "text": {"authority": "governed_canonical_result", "risk": "unescaped_inner_html"},
     "provider": {"authority": "ProviderInvocationEvidence", "risk": "selection_invocation_confusion"},
     "provider_called": {"authority": "ProviderManager_invocation_boundary", "risk": "frontend_hidden"},

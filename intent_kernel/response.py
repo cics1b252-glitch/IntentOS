@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Mapping
 
 
@@ -25,6 +26,38 @@ def response_status_is_ok(status: ResponseStatus) -> bool:
     """Return whether the canonical outcome fulfilled the user-visible request."""
 
     return status in SUCCESSFUL_RESPONSE_STATUSES
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalOutcomeSemantics:
+    """Deterministic epistemic contract for a canonical product status."""
+
+    epistemic_status: str
+    confidence: float
+
+
+CANONICAL_OUTCOME_SEMANTICS: Mapping[
+    ResponseStatus, CanonicalOutcomeSemantics
+] = MappingProxyType(
+    {
+        ResponseStatus.COMPLETED: CanonicalOutcomeSemantics("conclusion", 0.5),
+        ResponseStatus.WAITING_CONTEXT: CanonicalOutcomeSemantics("conclusion", 0.5),
+        ResponseStatus.UNKNOWN: CanonicalOutcomeSemantics("unknown", 1.0),
+        ResponseStatus.BLOCKED: CanonicalOutcomeSemantics("fact", 1.0),
+        ResponseStatus.AUTHORIZATION_REQUIRED: CanonicalOutcomeSemantics("fact", 1.0),
+        ResponseStatus.EXTERNAL_RESOURCE_REQUIRED: CanonicalOutcomeSemantics(
+            "unknown", 1.0
+        ),
+        ResponseStatus.WAITING_CONFIRMATION: CanonicalOutcomeSemantics("fact", 1.0),
+        ResponseStatus.FAILED: CanonicalOutcomeSemantics("unknown", 0.5),
+    }
+)
+
+
+def canonical_outcome_semantics(status: ResponseStatus) -> CanonicalOutcomeSemantics:
+    """Return Python-owned epistemic semantics for product contract 1.0."""
+
+    return CANONICAL_OUTCOME_SEMANTICS[status]
 
 
 class CanonicalResultKind(str, Enum):
@@ -474,31 +507,13 @@ class CognitiveResponseAssembler:
             if provider_ref not in provenance:
                 provenance.append(provider_ref)
 
-        epistemic_default = {
-            ResponseStatus.UNKNOWN: "unknown",
-            ResponseStatus.EXTERNAL_RESOURCE_REQUIRED: "unknown",
-            ResponseStatus.BLOCKED: "fact",
-            ResponseStatus.AUTHORIZATION_REQUIRED: "fact",
-            ResponseStatus.WAITING_CONFIRMATION: "fact",
-            ResponseStatus.FAILED: "unknown",
-        }.get(status, "conclusion")
-        confidence_default = (
-            1.0
-            if status in {
-                ResponseStatus.UNKNOWN,
-                ResponseStatus.BLOCKED,
-                ResponseStatus.AUTHORIZATION_REQUIRED,
-                ResponseStatus.EXTERNAL_RESOURCE_REQUIRED,
-                ResponseStatus.WAITING_CONFIRMATION,
-            }
-            else 0.5
-        )
+        outcome_semantics = canonical_outcome_semantics(status)
         return CognitiveResponse(
             text=canonical.text,
             status=status,
             execution_mode=execution_mode,
-            epistemic_status=epistemic_default,
-            confidence=confidence_default,
+            epistemic_status=outcome_semantics.epistemic_status,
+            confidence=outcome_semantics.confidence,
             response_origin=origin,
             provider=provider,
             provider_called=provider_called,

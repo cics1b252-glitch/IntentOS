@@ -89,3 +89,25 @@ Local, conversation and memory responses have `ok=true` only when their
 canonical status is `COMPLETED`. Origin and execution mode do not independently
 define success. Python owns this classification; TypeScript only validates the
 serialized canonical result.
+
+## Movement 12.3 canonical epistemic contract
+
+Python owns the deterministic epistemic classification and confidence for
+product contract 1.0. TypeScript mirrors this table only to validate serialized
+canonical results; it must fail closed on disagreement. Confidence is derived
+upstream and is not a gateway or UI estimate.
+
+| Canonical status | `epistemic_status` | `confidence` |
+| --- | --- | ---: |
+| `COMPLETED` | `conclusion` | `0.5` |
+| `WAITING_CONTEXT` | `conclusion` | `0.5` |
+| `UNKNOWN` | `unknown` | `1.0` |
+| `BLOCKED` | `fact` | `1.0` |
+| `AUTHORIZATION_REQUIRED` | `fact` | `1.0` |
+| `EXTERNAL_RESOURCE_REQUIRED` | `unknown` | `1.0` |
+| `WAITING_CONFIRMATION` | `fact` | `1.0` |
+| `FAILED` | `unknown` | `0.5` |
+
+The UI may display these fields but must not reinterpret or replace them. A
+cross-language parity test compares the TypeScript validation mirror directly
+with Python's canonical table to detect future drift.

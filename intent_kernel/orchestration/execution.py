@@ -102,6 +102,7 @@ class CapabilityExecutionService:
             return self._error(
                 capability,
                 ErrorCode.CAPABILITY_UNAVAILABLE,
+                metadata={"resource_resolution": resource_decision.to_dict()},
             )
         descriptor = registration.capability
         verdict = await self.constitution.evaluate(
@@ -120,6 +121,9 @@ class CapabilityExecutionService:
         )
         if not verdict.allowed:
             outcome = self._error(capability, ErrorCode.POLICY_DENIED)
+            outcome.result.metadata["resource_resolution"] = (
+                resource_decision.to_dict()
+            )
             outcome.constitution_verdict = verdict
             await self._audit(
                 mission,
@@ -135,6 +139,9 @@ class CapabilityExecutionService:
             and not idempotency_key
         ):
             outcome = self._error(capability, ErrorCode.INVALID_REQUEST)
+            outcome.result.metadata["resource_resolution"] = (
+                resource_decision.to_dict()
+            )
             outcome.constitution_verdict = verdict
             await self._audit(
                 mission,
@@ -150,6 +157,9 @@ class CapabilityExecutionService:
                 capability,
                 ErrorCode.PERMISSION_REQUIRED,
             )
+            outcome.result.metadata["resource_resolution"] = (
+                resource_decision.to_dict()
+            )
             outcome.constitution_verdict = verdict
             await self._audit(
                 mission,
@@ -160,8 +170,16 @@ class CapabilityExecutionService:
                 idempotency_key,
             )
             return outcome
-        if not self.resource_authority.revalidate(resource_decision):
-            return self._error(capability, ErrorCode.CAPABILITY_UNAVAILABLE)
+        revalidation = await self.resource_authority.revalidate(resource_decision)
+        if not revalidation:
+            return self._error(
+                capability,
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                metadata={
+                    "resource_resolution": resource_decision.to_dict(),
+                    "resource_revalidation": revalidation.to_dict(),
+                },
+            )
         cache_key = (str(mission.id), capability, idempotency_key)
         cached = await self.idempotency_store.get(cache_key)
         if cached is not None:
@@ -197,6 +215,12 @@ class CapabilityExecutionService:
             registration.executor_kind.value,
         )
         result.metadata.setdefault("effect", descriptor.effect.value)
+        result.metadata.setdefault(
+            "resource_resolution", resource_decision.to_dict()
+        )
+        result.metadata.setdefault(
+            "resource_revalidation", revalidation.to_dict()
+        )
         outcome = CapabilityExecutionOutcome(
             result=result,
             constitution_verdict=verdict,
@@ -239,7 +263,18 @@ class CapabilityExecutionService:
                 ),
                 agent_id=registration.executor_id,
             )
-        provider = self.provider_manager.get(registration.executor_id)
+        self.provider_manager.reset_execution_tracking()
+        provider = self.provider_manager.bind_selected(
+            registration.executor_id,
+            expected_binding=registration.executor,
+        )
+        if provider is None:
+            return CapabilityResult(
+                capability=registration.capability.name,
+                success=False,
+                error_code=ErrorCode.CAPABILITY_UNAVAILABLE,
+                metadata={"provider_invocation_attempted": False},
+            )
         response = await provider.execute(
             ProviderRequest(
                 messages=[
@@ -264,6 +299,12 @@ class CapabilityExecutionService:
                 "provider": response.provider,
                 "model": response.model,
                 "usage": response.usage,
+                "provider_invocation_attempted": (
+                    self.provider_manager.last_attempted is not None
+                ),
+                "provider_invocation_succeeded": (
+                    self.provider_manager.last_used is not None
+                ),
             },
         )
 
@@ -330,11 +371,14 @@ class CapabilityExecutionService:
     def _error(
         capability: str,
         code: ErrorCode,
+        *,
+        metadata: dict[str, Any] | None = None,
     ) -> CapabilityExecutionOutcome:
         return CapabilityExecutionOutcome(
             result=CapabilityResult(
                 capability=capability,
                 success=False,
                 error_code=code,
+                metadata=dict(metadata or {}),
             )
         )

@@ -59,6 +59,7 @@ from intent_kernel.providers import (
     ManagedProvider,
     MockProvider,
     ProviderManager,
+    RRMProviderBinding,
 )
 from intent_kernel.router import ModuleRouter
 from intent_kernel.rrm.projection import RuntimeResourceProjection
@@ -205,6 +206,14 @@ class KernelBuilder:
                 providers.set_default(name)
         if not providers.available:
             providers.register("mock", MockProvider())
+        resource_manager = RegistryResourceManager(populate_defaults=False)
+        projection = RuntimeResourceProjection(resource_manager)
+        providers.set_resource_projection(projection.project_provider)
+        for provider_name in providers.available:
+            projection.project_provider(providers.get(provider_name))
+        provider_authority = CanonicalProviderAuthority(
+            resource_manager, providers
+        )
         event_bus = self._event_bus or EventBus()
         migration_telemetry = MigrationTelemetry(
             dependency_counts={
@@ -220,13 +229,16 @@ class KernelBuilder:
         event_publisher = LegacyEventPublisherAdapter(event_bus)
         capability_router = self._capability_router or CapabilityRouter()
         default_provider = ManagedProvider(providers)
+        canonical_provider_binding = RRMProviderBinding(
+            provider_authority, providers
+        )
         core_apps = (
             AtlasCoreApp(),
             LogosCoreApp(
                 knowledge_store=knowledge_store,
-                provider=default_provider,
+                provider=canonical_provider_binding,
             ),
-            OEMStudioCoreApp(provider=default_provider),
+            OEMStudioCoreApp(provider=canonical_provider_binding),
         )
         if not capability_router.registered_apps:
             for app in core_apps:
@@ -265,9 +277,6 @@ class KernelBuilder:
                 LegacyAgentAdapter(legacy_agent)
             )
         capability_registry = CanonicalCapabilityRegistry()
-        resource_manager = RegistryResourceManager(populate_defaults=False)
-        projection = RuntimeResourceProjection(resource_manager)
-        providers.set_resource_projection(projection.project_provider)
         for app in core_apps:
             capability_registry.register_core_app(app)
             projection.project_core_app(app)
@@ -277,10 +286,6 @@ class KernelBuilder:
         for provider_name in providers.available:
             provider = providers.get(provider_name)
             capability_registry.register_provider(provider)
-            projection.project_provider(provider)
-        provider_authority = CanonicalProviderAuthority(
-            resource_manager, providers
-        )
         for capability_id in (
             "memory.write", "memory.retrieve", "productivity.spreadsheet"
         ):

@@ -33,7 +33,9 @@ class RRMToCORAdapter:
     """Adapter bridging RRM (RegistryResourceManager) to COR's RegistryCatalog interface."""
 
     def __init__(self, rrm_service: Optional[RegistryResourceManager] = None) -> None:
-        self._rrm = rrm_service or RegistryResourceManager(populate_defaults=True)
+        # Standalone compatibility use fails closed instead of manufacturing
+        # COR-visible defaults. Canonical composition always injects its RRM.
+        self._rrm = rrm_service or RegistryResourceManager(populate_defaults=False)
 
     @property
     def rrm_service(self) -> RegistryResourceManager:

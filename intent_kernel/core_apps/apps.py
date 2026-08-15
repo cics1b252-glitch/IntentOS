@@ -282,16 +282,24 @@ async def _provider_intent(
             metadata={"mission_id": str(request.mission.id)},
         )
     )
+    metadata = {
+        "epistemic_status": "conclusion",
+        "provider_invocation_attempted": bool(response.provider),
+    }
+    if response.provider:
+        metadata.update({
+            "provider": response.provider,
+            "model": response.model,
+            "usage": response.usage,
+        })
+    if response.metadata.get("provider_selection"):
+        metadata["provider_selection"] = response.metadata["provider_selection"]
+        metadata["provider_selection_authority"] = "RRM"
     return CapabilityResult(
         capability=request.capability,
         success=response.error_code is None,
         output=response.text,
         confidence=0.6,
         error_code=response.error_code,
-        metadata={
-            "provider": response.provider,
-            "model": response.model,
-            "usage": response.usage,
-            "epistemic_status": "conclusion",
-        },
+        metadata=metadata,
     )

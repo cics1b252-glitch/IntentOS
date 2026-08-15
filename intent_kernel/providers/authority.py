@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
+from intent_kernel.contracts import ErrorCode, ProviderRequest, ProviderResponse
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderSelectionDecision:
@@ -104,3 +106,42 @@ class CanonicalProviderAuthority:
             eligible_provider_ids=eligible,
             reason="eligible_provider_selected" if primary else "no_eligible_provider",
         )
+
+
+class RRMProviderBinding:
+    """Provider Port that resolves through RRM immediately before invocation."""
+
+    name = "rrm-selected-provider"
+    capabilities = {"text_completion"}
+
+    def __init__(
+        self,
+        authority: CanonicalProviderAuthority,
+        provider_manager: Any,
+    ) -> None:
+        self.authority = authority
+        self.provider_manager = provider_manager
+
+    async def execute(self, request: ProviderRequest) -> ProviderResponse:
+        self.provider_manager.reset_execution_tracking()
+        required = request.required_capabilities or {"text_completion"}
+        decision = await self.authority.select(required_capabilities=required)
+        binding = await self.provider_manager.route(None, selection=decision)
+        if binding is None:
+            return ProviderResponse(
+                text="",
+                provider="",
+                model="",
+                error_code=ErrorCode.PROVIDER_UNAVAILABLE,
+                metadata={
+                    "provider_selection": decision.to_dict(),
+                    "provider_selection_authority": "RRM",
+                },
+            )
+        return await binding.execute(request)
+
+    async def health(self) -> bool:
+        decision = await self.authority.select(
+            required_capabilities=self.capabilities
+        )
+        return decision.available

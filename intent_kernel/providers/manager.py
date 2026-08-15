@@ -125,6 +125,26 @@ class ProviderManager:
         # invisible to last_attempted/last_used and downstream provenance.
         return ManagedProvider(self, provider_id=self._default)
 
+    def bind_selected(
+        self,
+        provider_id: str,
+        *,
+        expected_binding: Provider | None = None,
+    ) -> Provider | None:
+        """Bind an already RRM-selected provider without selecting a fallback."""
+
+        provider = self._providers.get(provider_id)
+        if provider is None:
+            return None
+        if expected_binding is not None and provider is not expected_binding:
+            return None
+        self._last_compatibility_trace = None
+        return ManagedProvider(
+            self,
+            provider_id=provider_id,
+            allow_manager_fallback=False,
+        )
+
     @property
     def default(self) -> str | None:
         return self._default
@@ -148,10 +168,12 @@ class ManagedProvider:
         *,
         provider_id: str | None = None,
         fallback_provider_id: str | None = None,
+        allow_manager_fallback: bool = True,
     ):
         self._manager = manager
         self._provider_id = provider_id
         self._fallback_provider_id = fallback_provider_id
+        self._allow_manager_fallback = allow_manager_fallback
 
     @property
     def name(self) -> str:
@@ -175,7 +197,9 @@ class ManagedProvider:
         except Exception as exc:
             self._manager.observe("provider_response_received", provider=primary.name,
                                   status="error", error=type(exc).__name__)
-            fallback = self._fallback_provider_id or self._manager.fallback
+            fallback = self._fallback_provider_id
+            if fallback is None and self._allow_manager_fallback:
+                fallback = self._manager.fallback
             if not fallback or fallback == primary.name:
                 raise
             alternate = self._manager.get(fallback)

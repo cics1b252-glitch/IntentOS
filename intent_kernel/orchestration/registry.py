@@ -30,7 +30,7 @@ class CapabilityRegistration:
 
 
 class CanonicalCapabilityRegistry:
-    """Single official registry for apps, agents and providers."""
+    """Catalog known invocation bindings without declaring availability."""
 
     def __init__(self):
         self._registrations: dict[
@@ -115,6 +115,44 @@ class CanonicalCapabilityRegistry:
                 if item.executor_kind is executor_kind
             ]
         return entries
+
+    def contains(self, registration: CapabilityRegistration) -> bool:
+        """Return whether the exact invocation binding is still registered."""
+
+        return any(
+            item.executor_kind is registration.executor_kind
+            and item.executor_id == registration.executor_id
+            and item.executor is registration.executor
+            for item in self._registrations.get(
+                registration.capability.name, ()
+            )
+        )
+
+    def unregister(
+        self,
+        capability: str,
+        *,
+        executor_kind: ExecutorKind,
+        executor_id: str,
+    ) -> bool:
+        """Remove an invocation binding without changing RRM resource truth."""
+
+        entries = self._registrations.get(capability, [])
+        retained = [
+            item
+            for item in entries
+            if not (
+                item.executor_kind is executor_kind
+                and item.executor_id == executor_id
+            )
+        ]
+        if len(retained) == len(entries):
+            return False
+        if retained:
+            self._registrations[capability] = retained
+        else:
+            self._registrations.pop(capability, None)
+        return True
 
     def select(
         self,

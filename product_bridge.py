@@ -21,6 +21,7 @@ from intent_kernel.contracts import MissionContext, MissionId, MissionStatus
 from intent_kernel.cpe import CognitivePlanningEngine
 from intent_kernel.cor import CapabilityOrchestrator
 from intent_kernel.ecc import ExecutiveCognitiveController
+from intent_kernel.rrm.adapter import RRMToCORAdapter
 from intent_kernel.time_utils import utc_iso
 from intent_kernel.ame import (
     AdaptiveMemoryEngine,
@@ -150,7 +151,13 @@ class ProductBridge:
         self.cdm = self.components.cdm
         self.cpe = CognitivePlanningEngine()
         self.cor = CapabilityOrchestrator()
-        self.ecc = ExecutiveCognitiveController(iue=self.iue, cdm=self.cdm, cpe=self.cpe, cor=self.cor)
+        self.ecc = ExecutiveCognitiveController(
+            iue=self.iue,
+            cdm=self.cdm,
+            cpe=self.cpe,
+            cor=self.cor,
+            registry=RRMToCORAdapter(self.components.resource_manager),
+        )
         self.components.provider_manager.set_observer(self._provider_event)
 
         ame_storage = self.data_root / "ame_memory"
@@ -221,21 +228,52 @@ class ProductBridge:
                 "app_version": APP_VERSION,
             }
         if action == "providers":
-            eligible = [
-                item.provider_id
-                for item in self.components.resource_manager.list_providers(
-                    only_eligible=True
+            provider_selection = await self.components.provider_authority.select(
+                required_capabilities=("text_completion",)
+            )
+            eligible = list(provider_selection.eligible_provider_ids)
+            registered_bindings = self.components.provider_manager.available
+            rrm_resources = {
+                item.provider_id: item
+                for item in self.components.resource_manager.list_providers()
+            }
+            provider_states = [
+                {
+                    "provider_id": provider_id,
+                    "registered": provider_id in registered_bindings,
+                    "rrm_available": bool(
+                        rrm_resources.get(provider_id)
+                        and rrm_resources[provider_id].is_eligible
+                    ),
+                    "eligible": provider_id in eligible,
+                    "selected": provider_id == provider_selection.provider_id,
+                    "attempted": (
+                        provider_id
+                        == self.components.provider_manager.last_attempted
+                    ),
+                    "used": (
+                        provider_id == self.components.provider_manager.last_used
+                    ),
+                }
+                for provider_id in sorted(
+                    set(registered_bindings) | set(rrm_resources)
                 )
             ]
             return {
                 "ok": True,
                 # Protocol compatibility: `available` historically means a
                 # registered binding, not execution eligibility.
-                "available": self.components.provider_manager.available,
+                "available": registered_bindings,
+                "available_semantics": "registered_binding_compatibility_alias",
                 "eligible": eligible,
-                "registered_bindings": self.components.provider_manager.available,
+                "registered_bindings": registered_bindings,
                 "availability_authority": "RRM",
+                "selection": provider_selection.to_dict(),
+                "resource_states": provider_states,
                 "default": getattr(self.components.provider_manager, "default", "gemini"),
+                "last_attempted": getattr(
+                    self.components.provider_manager, "last_attempted", None
+                ),
                 "last_used": getattr(self.components.provider_manager, "last_used", None),
             }
         if action == "core_apps" or action == "modules":

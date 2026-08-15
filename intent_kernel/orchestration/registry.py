@@ -28,6 +28,11 @@ class CapabilityRegistration:
     executor_id: str
     executor: Any
 
+    @property
+    def binding_identity(self) -> str:
+        """Runtime identity of the exact executable object in this binding."""
+        return f"{self.executor_kind.value}:{self.executor_id}@{id(self.executor):#x}"
+
 
 class CanonicalCapabilityRegistry:
     """Catalog known invocation bindings without declaring availability."""

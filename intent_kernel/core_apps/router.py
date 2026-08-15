@@ -109,6 +109,37 @@ class CapabilityRouter:
         result.metadata.setdefault("mission_id", str(mission.id))
         return result
 
+    async def execute_exact(
+        self,
+        mission: Mission,
+        registration: Any,
+        payload: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> CapabilityResult:
+        """Dispatch the exact selected binding; never re-resolve by name."""
+        app = registration.executor
+        if app is None:
+            return CapabilityResult(
+                capability=registration.capability.name,
+                success=False,
+                error_code=ErrorCode.CAPABILITY_UNAVAILABLE,
+                metadata={"mission_id": str(mission.id)},
+            )
+        result = await app.execute(
+            CapabilityRequest(
+                mission=mission,
+                capability=registration.capability.name,
+                payload=deepcopy(payload or {}),
+                context=deepcopy(context or {}),
+            )
+        )
+        result.metadata.setdefault(
+            "core_app", getattr(app, "app_id", registration.executor_id)
+        )
+        result.metadata.setdefault("mission_id", str(mission.id))
+        result.metadata.setdefault("dispatched_binding", registration.binding_identity)
+        return result
+
     @property
     def capabilities(self) -> tuple[Capability, ...]:
         return tuple(

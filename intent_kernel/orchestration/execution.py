@@ -111,6 +111,7 @@ class CapabilityExecutionService:
                 "mission_id": str(mission.id),
                 "capability": capability,
                 "executor": registration.executor_id,
+                "binding_identity": registration.binding_identity,
                 "effect": descriptor.effect.value,
                 "confirmed": confirmed,
             },
@@ -215,6 +216,8 @@ class CapabilityExecutionService:
             registration.executor_kind.value,
         )
         result.metadata.setdefault("effect", descriptor.effect.value)
+        result.metadata.setdefault("binding_identity", registration.binding_identity)
+        result.metadata.setdefault("selected_binding", resource_decision.selected_binding)
         result.metadata.setdefault(
             "resource_resolution", resource_decision.to_dict()
         )
@@ -246,9 +249,9 @@ class CapabilityExecutionService:
         context: dict[str, Any],
     ) -> CapabilityResult:
         if registration.executor_kind is ExecutorKind.CORE_APP:
-            return await self.capability_router.execute_mission(
+            return await self.capability_router.execute_exact(
                 mission,
-                registration.capability.name,
+                registration,
                 payload,
                 context,
             )

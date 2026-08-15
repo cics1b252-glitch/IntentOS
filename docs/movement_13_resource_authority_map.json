@@ -165,18 +165,18 @@
     },
     {
       "component": "CoreApp CapabilityRouter",
-      "classification": "EXECUTION_BINDING",
-      "inputs": ["explicit_capability", "Mission"],
+      "classification": "COMPATIBILITY_ONLY",
+      "inputs": ["exact_selected_binding", "legacy_capability", "Mission"],
       "outputs": ["CoreApp_result"],
       "state_owned": ["capability_to_app_handles"],
-      "runtime_decisions": ["explicit_binding_dispatch"],
+      "runtime_decisions": ["exact_binding_dispatch", "legacy_name_dispatch"],
       "rrm_consulted": true,
       "rrm_revalidated": true,
       "can_bypass_rrm": false,
       "can_invoke": true,
       "compatibility_trace": true,
-      "canonical_replacement": "CanonicalResourceBindingAuthority for selection",
-      "retirement_prerequisites": ["remove_domain_default_callers"]
+      "canonical_replacement": "CanonicalResourceBindingAuthority for selection; CapabilityExecutionService exact-binding dispatch",
+      "retirement_prerequisites": ["remove_domain_default_callers", "remove_name_based_canonical_dispatch"]
     },
     {
       "component": "ModuleRouter",

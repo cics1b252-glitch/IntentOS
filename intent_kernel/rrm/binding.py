@@ -19,6 +19,7 @@ class ResourceBindingDecision:
     binding_healthy: bool = False
     selected_binding: str | None = None
     authority: str = "RRM"
+    binding_identity: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -30,6 +31,7 @@ class ResourceBindingDecision:
             "binding_healthy": self.binding_healthy,
             "selected_binding": self.selected_binding,
             "authority": self.authority,
+            "binding_identity": self.binding_identity,
         }
 
 
@@ -42,6 +44,7 @@ class ResourceBindingRevalidation:
     binding_healthy: bool
     reason: str
     authority: str = "RRM"
+    binding_identity: str = ""
 
     def __bool__(self) -> bool:
         return self.valid
@@ -85,6 +88,7 @@ class CanonicalResourceBindingAuthority:
                 rrm_eligible=True,
                 binding_healthy=True,
                 selected_binding=f"{entry.executor_kind.value}:{entry.executor_id}",
+                binding_identity=entry.binding_identity,
             )
             self.last_resolution = decision
             return decision
@@ -141,6 +145,11 @@ class CanonicalResourceBindingAuthority:
             rrm_eligible=rrm_eligible,
             binding_healthy=binding_healthy,
             reason=reason,
+            binding_identity=(
+                registration.binding_identity
+                if registration is not None
+                else decision.binding_identity
+            ),
         )
         self.last_revalidation = result
         return result

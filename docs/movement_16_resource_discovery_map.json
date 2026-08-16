@@ -1,0 +1,267 @@
+{
+  "movement": 16,
+  "title": "Governed Resource Discovery Convergence",
+  "core_principle": "DISCOVERY IS EVIDENCE. DISCOVERY IS NOT AUTHORITY.",
+  "primary_invariant": "DISCOVERED != REGISTERED != AVAILABLE != ELIGIBLE != SELECTED != AUTHORIZED != BOUND != ATTEMPTED != USED != VERIFIED",
+  "components": [
+    {
+      "name": "CanonicalResourceDiscoveryService",
+      "classification": "DISCOVERY_ONLY",
+      "responsibility": "Accepts adapters, orchestrates observations, normalizes evidence, deduplicates, produces deterministic snapshots, exposes discovery truth. Never executes, invokes, authorizes, binds, or mutates RRM.",
+      "authority_granted": [],
+      "authority_denied": ["execution", "invocation", "authorization", "binding", "RRM mutation", "Mission creation", "confirmation", "verification", "completion"]
+    },
+    {
+      "name": "DiscoveryRegistry",
+      "classification": "DISCOVERY_REGISTRY_ONLY",
+      "responsibility": "Stores discovery evidence only. Presence means observed, not available/eligible/authorized/bound/trusted.",
+      "authority_granted": [],
+      "authority_denied": ["runtime authority", "eligibility", "availability", "authorization", "binding"]
+    },
+    {
+      "name": "ResourceDiscoveryEvidence",
+      "classification": "DERIVED",
+      "responsibility": "Immutable typed evidence record of a single observation with provenance, confidence, health, credential metadata.",
+      "authority_granted": [],
+      "authority_denied": ["state mutation"]
+    },
+    {
+      "name": "ResourceDiscoverySnapshot",
+      "classification": "DERIVED",
+      "responsibility": "Deterministic read-only snapshot of all discovery evidence with optional derived RRM cross-reference.",
+      "authority_granted": [],
+      "authority_denied": ["state mutation"]
+    },
+    {
+      "name": "ResourceDiscoveryCorrelation",
+      "classification": "DERIVED",
+      "responsibility": "Derived read-only cross-reference between discovery evidence and RRM truth.",
+      "authority_granted": [],
+      "authority_denied": ["RRM mutation"]
+    },
+    {
+      "name": "ResourceDiscoveryAdapter",
+      "classification": "READ_ONLY",
+      "responsibility": "Narrow protocol for pluggable observation sources. Returns evidence only.",
+      "authority_granted": [],
+      "authority_denied": ["execution", "invocation", "RRM mutation"]
+    },
+    {
+      "name": "ResourceDiscoveryStatus",
+      "classification": "DERIVED",
+      "responsibility": "Discovery-specific states: OBSERVED, STALE, REVOKED, UNAVAILABLE_AT_SOURCE, UNKNOWN, INVALID.",
+      "authority_granted": [],
+      "authority_denied": []
+    },
+    {
+      "name": "ResourceDiscoveryKind",
+      "classification": "DERIVED",
+      "responsibility": "Observed resource category: PROVIDER, TOOL, CAPABILITY, ENVIRONMENT, AGENT, LOCAL_PROGRAM, MCP_RESOURCE, CONNECTED_SERVICE, DEVICE, CUSTOM.",
+      "authority_granted": [],
+      "authority_denied": []
+    },
+    {
+      "name": "ResourceRegistrationProposal",
+      "classification": "PROPOSAL_ONLY",
+      "responsibility": "Non-productive typed proposal for future registration. Never registers anything. Never mutates RRM.",
+      "authority_granted": [],
+      "authority_denied": ["registration", "RRM mutation", "binding"]
+    },
+    {
+      "name": "RegistryResourceManager (RRM)",
+      "classification": "CANONICAL_AUTHORITY",
+      "responsibility": "Sole runtime availability/eligibility authority. Unchanged by M16.",
+      "authority_granted": ["availability", "eligibility", "registration", "status mutation"],
+      "authority_denied": []
+    },
+    {
+      "name": "CanonicalResourceBindingAuthority",
+      "classification": "EXECUTION_BINDING",
+      "responsibility": "Sole runtime binding gatekeeper. Unchanged by M16.",
+      "authority_granted": ["binding selection", "revalidation"],
+      "authority_denied": []
+    },
+    {
+      "name": "CanonicalCapabilityRegistry",
+      "classification": "EXECUTION_BINDING",
+      "responsibility": "Runtime execution binding registry. Unchanged by M16.",
+      "authority_granted": ["binding registration"],
+      "authority_denied": []
+    },
+    {
+      "name": "MissionEngine",
+      "classification": "CANONICAL_AUTHORITY",
+      "responsibility": "Sole Mission identity/lifecycle authority. Unchanged by M16.",
+      "authority_granted": ["Mission creation", "Mission lifecycle"],
+      "authority_denied": []
+    },
+    {
+      "name": "ToolAuthorizationGate",
+      "classification": "AUTHORIZATION_ONLY",
+      "responsibility": "Tool authorization decisions. Unchanged by M16.",
+      "authority_granted": ["tool authorization"],
+      "authority_denied": []
+    },
+    {
+      "name": "CanonicalConfirmationService",
+      "classification": "CANONICAL_AUTHORITY",
+      "responsibility": "Typed confirmation. Unchanged by M16.",
+      "authority_granted": ["confirmation"],
+      "authority_denied": []
+    },
+    {
+      "name": "VerificationGate",
+      "classification": "EXECUTION_BINDING",
+      "responsibility": "Post-execution verification. Unchanged by M16.",
+      "authority_granted": ["verification"],
+      "authority_denied": []
+    },
+    {
+      "name": "MissionCompletionGate",
+      "classification": "CANONICAL_AUTHORITY",
+      "responsibility": "Sole Mission completion authority. Unchanged by M16.",
+      "authority_granted": ["Mission completion"],
+      "authority_denied": []
+    },
+    {
+      "name": "CanonicalProviderAuthority",
+      "classification": "CANONICAL_AUTHORITY",
+      "responsibility": "Provider selection/invocation. Unchanged by M16.",
+      "authority_granted": ["provider selection", "provider invocation"],
+      "authority_denied": []
+    },
+    {
+      "name": "CanonicalMemoryService",
+      "classification": "CANONICAL_AUTHORITY",
+      "responsibility": "Memory scoping. Unchanged by M16.",
+      "authority_granted": ["memory scope"],
+      "authority_denied": []
+    },
+    {
+      "name": "CanonicalAgentFactory",
+      "classification": "FACTORY_ONLY",
+      "responsibility": "Agent creation. Unchanged by M16.",
+      "authority_granted": ["agent creation"],
+      "authority_denied": []
+    },
+    {
+      "name": "CanonicalAgentRegistry",
+      "classification": "REGISTRY_ONLY",
+      "responsibility": "Agent registry. Unchanged by M16.",
+      "authority_granted": [],
+      "authority_denied": ["runtime authority"]
+    },
+    {
+      "name": "GovernedAgent",
+      "classification": "EXECUTION_PARTICIPANT",
+      "responsibility": "Passive identity/lifecycle. May consume discovery as read-only context; cannot promote it.",
+      "authority_granted": [],
+      "authority_denied": ["discovery promotion", "RRM mutation", "registration", "binding", "authorization"]
+    },
+    {
+      "name": "ProductBridge",
+      "classification": "PRODUCT_CONTRACT_LAYER",
+      "responsibility": "Transport/presentation. Discovery diagnostics are read-only if exposed.",
+      "authority_granted": [],
+      "authority_denied": []
+    },
+    {
+      "name": "SymbioticLayer",
+      "classification": "READ_ONLY",
+      "responsibility": "Host environment observation. May be an adapter source.",
+      "authority_granted": [],
+      "authority_denied": []
+    },
+    {
+      "name": "Legacy Discovery/Catalog Mechanisms",
+      "classification": "COMPATIBILITY_ONLY",
+      "responsibility": "May coexist temporarily. Must not override canonical RRM or binding authorities.",
+      "authority_granted": [],
+      "authority_denied": ["RRM override", "binding override"]
+    }
+  ],
+  "authority_rules": [
+    {"id": "M16-R01", "rule": "Discovery is read-only evidence, not runtime authority."},
+    {"id": "M16-R02", "rule": "Discovery does not create runtime availability."},
+    {"id": "M16-R03", "rule": "Discovery does not create runtime eligibility."},
+    {"id": "M16-R04", "rule": "Discovery does not create authorization."},
+    {"id": "M16-R05", "rule": "Discovery does not create executable binding."},
+    {"id": "M16-R06", "rule": "Discovery does not invoke provider/tool/resource."},
+    {"id": "M16-R07", "rule": "RRM remains sole runtime availability/eligibility authority."},
+    {"id": "M16-R08", "rule": "Existing canonical execution path remains mandatory."},
+    {"id": "M16-R09", "rule": "Agent cannot promote discovery into authority."},
+    {"id": "M16-R10", "rule": "Compatibility cannot promote discovery into authority."},
+    {"id": "M16-R11", "rule": "Discovery identity/source provenance is preserved."},
+    {"id": "M16-R12", "rule": "Stale/replaced observations cannot silently substitute identity."},
+    {"id": "M16-R13", "rule": "Discovery metadata cannot inject authority."},
+    {"id": "M16-R14", "rule": "Zero-provider truth remains intact."},
+    {"id": "M16-R15", "rule": "RA-13-01 remains fixed."},
+    {"id": "M16-R16", "rule": "M14 confirmation/resume authority remains intact."},
+    {"id": "M16-R17", "rule": "M15 Agent authority containment remains intact."},
+    {"id": "M16-R18", "rule": "M11-M15 regressions pass."},
+    {"id": "M16-R19", "rule": "No productive external execution is introduced."},
+    {"id": "M16-R20", "rule": "Full available regression suite passes."}
+  ],
+  "obligations": [
+    {"id": "M16-O01", "obligation": "Every discovery adapter must return typed ResourceDiscoveryEvidence."},
+    {"id": "M16-O02", "obligation": "Every evidence record must preserve source, source_type, observed_at, observed_by."},
+    {"id": "M16-O03", "obligation": "Confidence values must be clamped to [0.0, 1.0]."},
+    {"id": "M16-O04", "obligation": "Discovery status must not reuse RRM lifecycle statuses."},
+    {"id": "M16-O05", "obligation": "Snapshots must be deterministic given the same registry state."},
+    {"id": "M16-O06", "obligation": "RRM cross-reference must be derived, never written."},
+    {"id": "M16-O07", "obligation": "Revocation must fail closed (missing ID returns False)."},
+    {"id": "M16-O08", "obligation": "Staleness must fail closed (missing ID returns False)."},
+    {"id": "M16-O09", "obligation": "Discovery must not write to project/user memory."},
+    {"id": "M16-O10", "obligation": "Discovery evidence must be treated as untrusted input."},
+    {"id": "M16-O11", "obligation": "Adapter errors must not propagate as execution failures."},
+    {"id": "M16-O12", "obligation": "Proposal must not mutate any runtime state."}
+  ],
+  "discovery_flow": [
+    "External/Local Environment",
+    "ResourceDiscoveryAdapter (READ_ONLY)",
+    "CanonicalResourceDiscoveryService (DISCOVERY_ONLY)",
+    "normalize + deduplicate + preserve provenance",
+    "DiscoveryRegistry (DISCOVERY_REGISTRY_ONLY)",
+    "ResourceDiscoveryEvidence (DERIVED)",
+    "ResourceDiscoverySnapshot (DERIVED)",
+    "ResourceDiscoveryCorrelation (DERIVED)",
+    "BOUNDARY: Discovery ends here",
+    "EXPLICIT canonical registration/projection path (NOT part of M16)",
+    "RRM (CANONICAL_AUTHORITY)",
+    "availability / eligibility",
+    "CanonicalResourceBindingAuthority (EXECUTION_BINDING)",
+    "exact execution binding",
+    "execution"
+  ],
+  "discovery_statuses": [
+    {"status": "OBSERVED", "meaning": "Fresh observation, evidence valid", "runtime_implication": "none"},
+    {"status": "STALE", "meaning": "Evidence not refreshed, may be outdated", "runtime_implication": "none"},
+    {"status": "REVOKED", "meaning": "Source explicitly revoked observation", "runtime_implication": "none"},
+    {"status": "UNAVAILABLE_AT_SOURCE", "meaning": "Source reported resource unavailable", "runtime_implication": "none"},
+    {"status": "UNKNOWN", "meaning": "Could not determine observation validity", "runtime_implication": "none"},
+    {"status": "INVALID", "meaning": "Malformed or rejected evidence", "runtime_implication": "none"}
+  ],
+  "correlation_statuses": [
+    {"status": "no_match", "meaning": "Resource not found in RRM"},
+    {"status": "partial_match", "meaning": "Resource found in RRM but not eligible"},
+    {"status": "exact_match", "meaning": "Resource found in RRM and eligible"},
+    {"status": "no_rrm", "meaning": "No RRM instance configured"}
+  ],
+  "new_files": [
+    "intent_kernel/discovery/__init__.py",
+    "intent_kernel/discovery/models.py",
+    "intent_kernel/discovery/service.py",
+    "intent_kernel/discovery/registry.py",
+    "intent_kernel/discovery/adapter.py",
+    "intent_kernel/discovery/proposal.py"
+  ],
+  "modified_files": [
+    "intent_kernel/application/composition.py"
+  ],
+  "test_count": 26,
+  "adversarial_count": 15,
+  "novel_domain_count": 6,
+  "authority_rules_count": 20,
+  "obligations_count": 12,
+  "components_count": 25
+}

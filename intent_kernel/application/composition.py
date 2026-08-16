@@ -69,6 +69,7 @@ from intent_kernel.providers import (
 from intent_kernel.router import ModuleRouter
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.service import RegistryResourceManager
+from intent_kernel.discovery import CanonicalResourceDiscoveryService
 from intent_kernel.rrm.binding import CanonicalResourceBindingAuthority
 from intent_kernel.rrm.models import CapabilityResource, ResourceOrigin, AvailabilitySource
 from intent_kernel.runtime import MissionRuntime
@@ -117,6 +118,7 @@ class ApplicationComponents:
     tool_authorization_gate: ToolAuthorizationGate
     mission_runtime: MissionRuntime
     confirmation_service: CanonicalConfirmationService
+    resource_discovery_service: CanonicalResourceDiscoveryService
     migration_telemetry: MigrationTelemetry
     bootstrap_mode: str = "canonical"
     legacy_adapters: tuple[str, ...] = LEGACY_ADAPTERS
@@ -350,6 +352,9 @@ class KernelBuilder:
             tool_authorization_gate=tool_authorization_gate,
             confirmation_ttl_seconds=300,
         )
+        resource_discovery_service = CanonicalResourceDiscoveryService(
+            rrm=resource_manager,
+        )
         legacy_capability_executor = LegacyCapabilityExecutorAdapter(
             router,
             mission_engine=mission_engine,
@@ -371,6 +376,7 @@ class KernelBuilder:
                 "mission_lifecycle_authority": "MissionEngine",
                 "mission_completion_authority": "MissionCompletionGate",
                 "confirmation_authority": "CanonicalConfirmationService",
+                "resource_discovery_authority": "CanonicalResourceDiscoveryService",
                 "tool_authorization_authority": "ToolAuthorizationGate",
                 "agent_orchestrator": "canonical",
                 "agent_factory": "canonical",
@@ -419,6 +425,7 @@ class KernelBuilder:
             tool_authorization_gate=tool_authorization_gate,
             mission_runtime=mission_runtime,
             confirmation_service=confirmation_service,
+            resource_discovery_service=resource_discovery_service,
             migration_telemetry=migration_telemetry,
         )
 

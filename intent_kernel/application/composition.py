@@ -20,6 +20,10 @@ from intent_kernel.agents import (
     FinanceAgent,
     KnowledgeAgent,
 )
+from intent_kernel.agents.factory import (
+    CanonicalAgentFactory,
+    CanonicalAgentRegistry,
+)
 from intent_kernel.application.mission_engine import MissionEngine
 from intent_kernel.application.mission_service import CanonicalMissionService
 from intent_kernel.application.confirmation_service import CanonicalConfirmationService
@@ -95,6 +99,8 @@ class ApplicationComponents:
     module_router: ModuleRouter
     capability_registry: CanonicalCapabilityRegistry
     agent_orchestrator: CanonicalAgentOrchestrator
+    agent_registry: CanonicalAgentRegistry
+    agent_factory: CanonicalAgentFactory
     capability_execution_service: CapabilityExecutionService
     constitution_engine: ConstitutionEngine
     constitution_pipeline: ConstitutionPipeline
@@ -278,6 +284,7 @@ class KernelBuilder:
             agent_orchestrator.register(
                 LegacyAgentAdapter(legacy_agent)
             )
+        agent_factory = CanonicalAgentFactory()
         capability_registry = CanonicalCapabilityRegistry()
         for app in core_apps:
             capability_registry.register_core_app(app)
@@ -366,6 +373,8 @@ class KernelBuilder:
                 "confirmation_authority": "CanonicalConfirmationService",
                 "tool_authorization_authority": "ToolAuthorizationGate",
                 "agent_orchestrator": "canonical",
+                "agent_factory": "canonical",
+                "agent_registry": "canonical",
                 "provider_manager": tuple(providers.available),
                 "provider_selection_authority": "RRM",
                 "core_apps": tuple(app.app_id for app in core_apps),
@@ -392,6 +401,8 @@ class KernelBuilder:
             module_router=router,
             capability_registry=capability_registry,
             agent_orchestrator=agent_orchestrator,
+            agent_registry=agent_factory.registry,
+            agent_factory=agent_factory,
             capability_execution_service=capability_execution_service,
             constitution_engine=constitution_engine,
             constitution_pipeline=constitution_pipeline,

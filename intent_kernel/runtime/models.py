@@ -65,6 +65,23 @@ class ActionGateDecision(str, Enum):
     ABORT = "ABORT"
 
 
+class ConfirmationState(str, Enum):
+    """Typed lifecycle of a user confirmation requirement (Movement 14).
+
+    Explicit typed states are required so that ``WAITING_CONFIRMATION`` is
+    distinguishable from ``CONFIRMED``, ``REJECTED``, ``EXPIRED``, ``STALE``
+    (invalidated) and ``CONSUMED`` (already applied). No lexical shortcut may
+    bypass these states.
+    """
+    NO_CONFIRMATION_REQUIRED = "NO_CONFIRMATION_REQUIRED"
+    WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    STALE = "STALE"
+    CONSUMED = "CONSUMED"
+
+
 class FailureCategory(str, Enum):
     """Taxonomy of runtime node and mission execution failures."""
     TRANSIENT = "TRANSIENT"
@@ -128,6 +145,11 @@ class ExecutionConfirmationRequest:
     expires_at: Optional[str] = None
     approved: Optional[bool] = None
     approved_at: Optional[str] = None
+    state: ConfirmationState = ConfirmationState.WAITING_CONFIRMATION
+    runtime_id: str = ""
+    confirmation_token: str = ""
+    session_id: str = ""
+    project_id: str = "GLOBAL"
     provenance: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

@@ -28,6 +28,7 @@ from intent_kernel.runtime.executor_port import (
 from intent_kernel.runtime.models import (
     ActionContract,
     ActionGateDecision,
+    ConfirmationState,
     ExecutionConfirmationRequest,
     FailureCategory,
     FailureReport,
@@ -173,6 +174,7 @@ class MissionRuntime:
                             effect=f"Execute capability {contract.capability}",
                             reversibility=contract.reversibility,
                             risk_level=contract.risk_level,
+                            runtime_id=instance.runtime_id,
                         )
                         self._confirmations[conf_req.confirmation_id] = conf_req
 
@@ -359,10 +361,17 @@ class MissionRuntime:
         return MissionId(value)
 
     def submit_confirmation(self, confirmation_id: str, approved: bool) -> Optional[ExecutionConfirmationRequest]:
-        """Submit user confirmation or refusal for a pending action node."""
+        """Submit user confirmation or refusal for a pending action node.
+
+        Only a requirement in the canonical ``WAITING_CONFIRMATION`` state may
+        be approved; replaying an already confirmed/consumed/expired/rejected
+        requirement is a no-op (defense in depth for Movement 14).
+        """
         conf = self._confirmations.get(confirmation_id)
         if not conf:
             return None
+        if conf.state is not ConfirmationState.WAITING_CONFIRMATION:
+            return conf
 
         conf.approved = approved
         conf.approved_at = utc_iso()
@@ -373,6 +382,34 @@ class MissionRuntime:
                 instance.status = MissionRuntimeState.READY
 
         return conf
+
+    def get_confirmation(self, confirmation_id: str) -> Optional[ExecutionConfirmationRequest]:
+        """Public lookup of any confirmation requirement by its typed ID."""
+        return self._confirmations.get(confirmation_id)
+
+    def get_pending_confirmation(self, mission_id: str) -> Optional[ExecutionConfirmationRequest]:
+        """Return the active WAITING_CONFIRMATION requirement for a Mission."""
+        for conf in self._confirmations.values():
+            if conf.mission_id == mission_id and conf.state is ConfirmationState.WAITING_CONFIRMATION:
+                return conf
+        return None
+
+    def cancel_instance(self, mission_id: str) -> None:
+        """Cancel runtime instances of a Mission (used by canonical rejection)."""
+        for instance in self._instances.values():
+            if instance.mission_id != mission_id:
+                continue
+            if instance.status in (MissionRuntimeState.COMPLETED, MissionRuntimeState.CANCELLED):
+                continue
+            instance.status = MissionRuntimeState.CANCELLED
+            for node in instance.nodes.values():
+                if node.state in (
+                    RuntimeNodeState.PENDING,
+                    RuntimeNodeState.READY,
+                    RuntimeNodeState.WAITING_CONFIRMATION,
+                    RuntimeNodeState.WAITING_RESOURCE,
+                ):
+                    node.state = RuntimeNodeState.CANCELLED
 
     async def pause(self, runtime_id: str) -> Optional[MissionRuntimeInstance]:
         """Pause execution of an active mission and create a checkpoint."""

@@ -16,6 +16,10 @@ from typing import Any
 from uuid import uuid4
 
 from intent_kernel.application import ApplicationFactory, KernelBuilder
+from intent_kernel.application.confirmation_service import (
+    ConfirmationSubmission,
+    ConfirmationOutcome,
+)
 from intent_kernel.application.memory_service import CanonicalMemoryService
 from intent_kernel.contracts import MissionContext, MissionId, MissionStatus
 from intent_kernel.cpe import CognitivePlanningEngine
@@ -33,11 +37,18 @@ from intent_kernel.modules.fin.module import _extract_brl_amount
 from intent_kernel.cognition import CognitiveExecutionMode
 from intent_kernel.compatibility import attach_compatibility_trace, compatibility_trace
 from intent_kernel.response import (
+    CanonicalResultKind,
     CanonicalTurnResult,
     CognitiveResponseAssembler,
 )
 from intent_kernel.product_response import CognitiveProductPresenter
-from intent_kernel.runtime.models import ActionContract, RuntimeNode, SideEffectLevel
+from intent_kernel.runtime.models import (
+    ActionContract,
+    ConfirmationState,
+    MissionRuntimeState,
+    RuntimeNode,
+    SideEffectLevel,
+)
 from intent_kernel.tools.models import (
     PermissionDecisionState,
     ToolAuthorizationDecisionState,
@@ -293,6 +304,9 @@ class ProductBridge:
                 "mission_status": session.get("mission_status", "idle"),
                 "history_length": len(session.get("history", [])),
             }
+        if action == "confirm":
+            response = await self._confirm_mission(request)
+            return await self._govern_response(response, request)
         if action == "intent" or action == "chat":
             if "text" in request and "message" not in request:
                 request["message"] = request["text"]
@@ -1226,7 +1240,11 @@ Estratégia completa registrada no histórico para execução."""
             side_effect_level=SideEffectLevel.EXTERNAL_REVERSIBLE,
             required_permissions=list(permission),
             confirmation_required=True,
-            provenance={"requested_capability": capability, "synthetic": True},
+            provenance={
+                "requested_capability": capability,
+                "synthetic": True,
+                "tool_id": candidate.tool_id,
+            },
         )
         node = RuntimeNode(
             capability=capability,
@@ -1239,6 +1257,14 @@ Estratégia completa registrada no histórico para execução."""
             project_id=context["project_id"],
         )
         instance = await self.components.mission_runtime.run_mission(instance.runtime_id)
+        confirmation_meta = self._bind_pending_confirmation(
+            mission=mission,
+            instance=instance,
+            context=context,
+            candidate=candidate,
+            tool=tool,
+            permission=list(permission),
+        )
         return CanonicalTurnResult.waiting_confirmation(
             "A ação foi planejada e aguarda confirmação antes da execução simulada.",
             mission_id=str(mission.id),
@@ -1249,6 +1275,7 @@ Estratégia completa registrada no histórico para execução."""
             "runtime_id": instance.runtime_id,
             "runtime_status": instance.status.value,
             "authorization_gate": authorization.value,
+            "confirmation": confirmation_meta,
             "mission_authority": {
                 "identity_owner": "MissionEngine",
                 "lifecycle_owner": "MissionEngine",
@@ -1264,6 +1291,293 @@ Estratégia completa registrada no histórico para execução."""
             },
             "domain": decision.domain_hint,
             },
+        )
+
+    def _bind_pending_confirmation(
+        self,
+        *,
+        mission: Any,
+        instance: Any,
+        context: dict[str, Any],
+        candidate: ToolCandidate,
+        tool: ToolResource,
+        permission: list[str],
+    ) -> dict[str, Any] | None:
+        """Bind scope/token/expiry/authorization snapshot to the pending requirement."""
+        pending = self.components.mission_runtime.get_pending_confirmation(
+            str(mission.id)
+        )
+        if pending is None:
+            return None
+        bound = self.components.confirmation_service.bind_pending(
+            confirmation_id=pending.confirmation_id,
+            mission_id=str(mission.id),
+            runtime_id=instance.runtime_id,
+            action_id=pending.action_id,
+            session_id=context["session_id"],
+            project_id=context["project_id"],
+            confirmation_token=uuid4().hex,
+            authorization={
+                "candidate": candidate.to_dict(),
+                "tool": tool.to_dict(),
+                "project_id": context["project_id"],
+                "required_permissions": list(permission),
+            },
+            ttl_seconds=300,
+        )
+        return {
+            "confirmation_id": bound.confirmation_id,
+            "confirmation_token": bound.confirmation_token,
+            "expires_at": bound.expires_at,
+            "state": bound.state.value,
+        }
+
+    async def _confirm_mission(self, request: dict[str, Any]) -> CanonicalTurnResult:
+        """Handle the typed ``confirm`` action bound to Mission identity.
+
+        Free-form affirmative text ("sim", "confirmo", ...) never reaches this
+        handler: only an explicit typed request may resume a Mission.
+        """
+        params = dict(request.get("params") or {})
+        mission_id = str(
+            params.get("mission_id") or request.get("mission_id") or ""
+        ).strip()
+        confirmation_id = str(
+            params.get("confirmation_id")
+            or request.get("confirmation_id")
+            or ""
+        ).strip()
+        approved_raw = params.get("approved")
+        if isinstance(approved_raw, str):
+            lowered = approved_raw.strip().casefold()
+            if lowered in ("true", "1", "yes", "sim"):
+                approved_raw = True
+            elif lowered in ("false", "0", "no", "não", "nao"):
+                approved_raw = False
+            else:
+                approved_raw = None
+        approved = approved_raw if isinstance(approved_raw, bool) else None
+        session_id = str(
+            params.get("session_id") or request.get("session_id") or ""
+        ).strip()
+        project_id = str(
+            params.get("project_id") or request.get("project_id") or "GLOBAL"
+        ).strip()
+        token = str(
+            params.get("confirmation_token")
+            or request.get("confirmation_token")
+            or ""
+        ).strip()
+
+        if not mission_id or not confirmation_id or approved is None:
+            return CanonicalTurnResult.failed(
+                "Requisição de confirmação tipada inválida: mission_id, "
+                "confirmation_id e approved (booleano) são obrigatórios.",
+                metadata={
+                    "confirm": {
+                        "error": "invalid_confirmation_request",
+                        "mission_id": mission_id or None,
+                        "confirmation_id": confirmation_id or None,
+                    }
+                },
+            )
+
+        outcome = await self.components.confirmation_service.submit(
+            ConfirmationSubmission(
+                mission_id=mission_id,
+                confirmation_id=confirmation_id,
+                approved=approved,
+                session_id=session_id,
+                project_id=project_id,
+                confirmation_token=token,
+            )
+        )
+        meta: dict[str, Any] = {
+            "confirm": {
+                "state": outcome.state.value,
+                "accepted": outcome.accepted,
+                "reason": outcome.reason,
+                "mission_id": outcome.mission_id,
+                "confirmation_id": outcome.confirmation_id,
+                "runtime_id": outcome.runtime_id,
+                "mission_status": outcome.mission_status,
+            },
+            "mission_authority": {
+                "identity_owner": "MissionEngine",
+                "lifecycle_owner": "MissionEngine",
+                "execution_runtime": "MissionRuntime",
+                "transition_authority": "MissionEngine",
+                "completion_authority": "MissionCompletionGate",
+            },
+        }
+        if outcome.state is ConfirmationState.REJECTED and outcome.accepted:
+            return CanonicalTurnResult.local(
+                "A ação foi recusada e a missão foi cancelada sem qualquer execução.",
+                kind=CanonicalResultKind.UNKNOWN,
+                metadata={**meta, "authorization_gate": "CONFIRMATION_REJECTED"},
+            )
+        if outcome.state is ConfirmationState.CONFIRMED and outcome.accepted:
+            return await self._resume_confirmed(outcome, meta)
+        return self._confirmation_non_executing_result(outcome, meta)
+
+    async def _resume_confirmed(
+        self, outcome: ConfirmationOutcome, meta: dict[str, Any]
+    ) -> CanonicalTurnResult:
+        """Resume the SAME Mission with revalidation, never inheriting a new binding."""
+        conf = self.components.confirmation_service.get_confirmation(
+            outcome.confirmation_id
+        )
+        if conf is not None:
+            decision, snapshot = await self.components.confirmation_service.recheck_authorization(
+                conf
+            )
+            if decision is not None and decision is not ToolAuthorizationDecisionState.ALLOW:
+                self.components.confirmation_service.invalidate(
+                    outcome.confirmation_id,
+                    f"authorization_recheck:{decision.value}",
+                )
+                return CanonicalTurnResult.mission(
+                    "A autorização do vínculo confirmado foi revogada ou invalidada "
+                    "desde o planejamento; nenhuma execução ocorreu.",
+                    kind=CanonicalResultKind.AUTHORIZATION_REQUIRED,
+                    mission_id=outcome.mission_id,
+                    authorization_requirements=("user.authorization",),
+                    next_actions=("Reautorizar a ferramenta",),
+                    metadata={
+                        **meta,
+                        "authorization_gate": decision.value,
+                        "confirmation_revalidation": "fail_closed",
+                    },
+                )
+        instance = await self.components.mission_runtime.run_mission(
+            outcome.runtime_id
+        )
+        executed = (
+            instance.status
+            in (MissionRuntimeState.COMPLETED, MissionRuntimeState.FAILED)
+            or bool(instance.completed_nodes)
+            or bool(instance.failed_nodes)
+        )
+        if executed:
+            self.components.confirmation_service.consume(outcome.confirmation_id)
+        else:
+            self.components.confirmation_service.invalidate(
+                outcome.confirmation_id,
+                f"runtime_status:{instance.status.value}",
+            )
+        return self._resumed_instance_result(instance, outcome, meta)
+
+    def _resumed_instance_result(
+        self,
+        instance: Any,
+        outcome: ConfirmationOutcome,
+        meta: dict[str, Any],
+    ) -> CanonicalTurnResult:
+        """Translate the resumed runtime state to a canonical product result."""
+        mission_id = outcome.mission_id
+        status = instance.status
+        base = {
+            **meta,
+            "runtime_id": instance.runtime_id,
+            "runtime_status": status.value,
+        }
+        if status is MissionRuntimeState.COMPLETED:
+            return CanonicalTurnResult.mission(
+                "A ação confirmada foi executada, verificada e a missão foi "
+                "concluída pelo MissionCompletionGate.",
+                kind=CanonicalResultKind.MISSION_COMPLETED,
+                mission_id=mission_id,
+                verification_evidence=tuple(instance.completion_evidence),
+                metadata={
+                    **base,
+                    "verification_status": instance.verification_status.value,
+                    "completion_authority": instance.completion_authority,
+                },
+            )
+        if status is MissionRuntimeState.WAITING_RESOURCE:
+            return CanonicalTurnResult.mission(
+                "A missão confirmada aguarda um recurso elegível; nenhuma "
+                "execução ocorreu neste turno.",
+                kind=CanonicalResultKind.EXTERNAL_RESOURCE_REQUIRED,
+                mission_id=mission_id,
+                next_actions=("Aguardar recurso elegível",),
+                metadata=base,
+            )
+        if status is MissionRuntimeState.BLOCKED:
+            return CanonicalTurnResult.blocked(
+                "A execução confirmada foi bloqueada pela política durante a "
+                "revalidação; nenhuma execução ocorreu.",
+                reason="action_gate_block",
+                mission_id=mission_id,
+                metadata=base,
+            )
+        if status is MissionRuntimeState.FAILED:
+            return CanonicalTurnResult.failed(
+                "A execução confirmada falhou ou não passou na verificação; "
+                "a missão não foi concluída.",
+                mission_id=mission_id,
+                metadata=base,
+            )
+        if status is MissionRuntimeState.WAITING_USER_CONFIRMATION:
+            return CanonicalTurnResult.waiting_confirmation(
+                "A missão continua aguardando confirmação; nenhuma execução "
+                "ocorreu.",
+                mission_id=mission_id,
+                metadata=base,
+            )
+        return CanonicalTurnResult.mission(
+            "A missão confirmada segue em execução controlada.",
+            kind=CanonicalResultKind.WAITING_CONTEXT,
+            mission_id=mission_id,
+            metadata=base,
+        )
+
+    def _confirmation_non_executing_result(
+        self, outcome: ConfirmationOutcome, meta: dict[str, Any]
+    ) -> CanonicalTurnResult:
+        """Non-executing informational result for rejected/expired/replayed confirms."""
+        reason = outcome.reason
+        if reason == "mission_already_completed":
+            text = (
+                "Esta missão já foi concluída; a confirmação não foi aplicada e "
+                "nenhuma nova execução ocorreu."
+            )
+        elif reason == "confirmation_already_consumed":
+            text = (
+                "Esta confirmação já foi aplicada; nenhuma execução duplicada ocorreu."
+            )
+        elif reason == "mission_already_cancelled":
+            text = "Esta missão já foi cancelada; nenhuma execução ocorreu."
+        elif reason == "confirmation_expired":
+            text = (
+                "A confirmação expirou; nenhuma execução ocorreu. Solicite uma nova "
+                "confirmação."
+            )
+        elif reason == "confirmation_already_accepted":
+            text = "Esta confirmação já foi aceita; nenhuma execução duplicada ocorreu."
+        elif reason == "confirmation_already_rejected":
+            text = "Esta confirmação já foi recusada; nenhuma execução ocorreu."
+        elif reason == "binding_invalid":
+            text = (
+                "O vínculo da confirmação não é mais válido; nenhuma execução ocorreu."
+            )
+        elif reason in (
+            "token_mismatch",
+            "scope_session_mismatch",
+            "scope_project_mismatch",
+            "mission_mismatch",
+        ):
+            text = "A confirmação não corresponde ao vínculo esperado; nenhuma execução ocorreu."
+        elif reason.startswith("mission_not_pending"):
+            text = "A missão não está aguardando confirmação; nenhuma execução ocorreu."
+        elif reason in ("mission_not_found", "confirmation_not_found"):
+            text = "Confirmação ou missão não encontrada; nenhuma execução ocorreu."
+        else:
+            text = "A confirmação não foi aplicada; nenhuma execução ocorreu."
+        return CanonicalTurnResult.local(
+            text,
+            kind=CanonicalResultKind.UNKNOWN,
+            metadata={**meta, "confirm_state": outcome.state.value, "reason": reason},
         )
 
     async def _govern_response(

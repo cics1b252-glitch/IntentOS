@@ -100,6 +100,18 @@ class MissionEngine:
             self._reject(mission, MissionStatus.RUNNING)
         return await self._transition(mission, MissionStatus.RUNNING)
 
+    async def reject(self, mission_id: MissionId) -> Mission:
+        """Move a pending-decision Mission to the canonical non-executing CANCELLED state.
+
+        Rejection is part of the typed confirmation protocol: it transitions a
+        Mission that is awaiting a user decision (WAITING_FOR_DECISION) to the
+        canonical CANCELLED state so no controlled execution can ever resume.
+        """
+        mission = await self._require(mission_id)
+        if mission.status is not MissionStatus.WAITING_FOR_DECISION:
+            self._reject(mission, MissionStatus.CANCELLED)
+        return await self._transition(mission, MissionStatus.CANCELLED)
+
     async def complete(
         self,
         mission_id: MissionId,

@@ -22,6 +22,7 @@ from intent_kernel.agents import (
 )
 from intent_kernel.application.mission_engine import MissionEngine
 from intent_kernel.application.mission_service import CanonicalMissionService
+from intent_kernel.application.confirmation_service import CanonicalConfirmationService
 from intent_kernel.application.migration import MigrationTelemetry
 from intent_kernel.bus import EventBus
 from intent_kernel.constitution import (
@@ -109,6 +110,7 @@ class ApplicationComponents:
     conversation_service: CognitiveConversationService
     tool_authorization_gate: ToolAuthorizationGate
     mission_runtime: MissionRuntime
+    confirmation_service: CanonicalConfirmationService
     migration_telemetry: MigrationTelemetry
     bootstrap_mode: str = "canonical"
     legacy_adapters: tuple[str, ...] = LEGACY_ADAPTERS
@@ -335,6 +337,12 @@ class KernelBuilder:
             constitution=constitution_engine,
             mission_engine=mission_engine,
         )
+        confirmation_service = CanonicalConfirmationService(
+            mission_engine,
+            mission_runtime,
+            tool_authorization_gate=tool_authorization_gate,
+            confirmation_ttl_seconds=300,
+        )
         legacy_capability_executor = LegacyCapabilityExecutorAdapter(
             router,
             mission_engine=mission_engine,
@@ -355,6 +363,7 @@ class KernelBuilder:
                 "conversation_authority": "CognitiveConversationService",
                 "mission_lifecycle_authority": "MissionEngine",
                 "mission_completion_authority": "MissionCompletionGate",
+                "confirmation_authority": "CanonicalConfirmationService",
                 "tool_authorization_authority": "ToolAuthorizationGate",
                 "agent_orchestrator": "canonical",
                 "provider_manager": tuple(providers.available),
@@ -398,6 +407,7 @@ class KernelBuilder:
             conversation_service=conversation_service,
             tool_authorization_gate=tool_authorization_gate,
             mission_runtime=mission_runtime,
+            confirmation_service=confirmation_service,
             migration_telemetry=migration_telemetry,
         )
 

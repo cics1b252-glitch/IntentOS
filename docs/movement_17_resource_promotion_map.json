@@ -1,0 +1,88 @@
+{
+  "movement": 17,
+  "title": "Governed Resource Promotion Convergence",
+  "core_principle": "PROMOTION IS A GOVERNED TRANSITION. DISCOVERY DOES NOT IMPLY REGISTRATION. REGISTRATION DOES NOT IMPLY ELIGIBILITY. ELIGIBILITY DOES NOT IMPLY AVAILABILITY.",
+  "primary_invariant": "DISCOVERED != PROPOSED != APPROVED != REGISTERED != AVAILABLE != ELIGIBLE != SELECTED != AUTHORIZED != BOUND != ATTEMPTED != USED != VERIFIED",
+  "components": [
+    {
+      "name": "ResourcePromotionProposalService",
+      "classification": "PROPOSAL_ONLY",
+      "responsibility": "Creates typed proposals from discovery evidence. Proposals are immutable typed contracts. Cannot decide, approve, reject, register, authorize, invoke, or mutate RRM.",
+      "authority_granted": ["proposal creation", "proposal revocation", "proposal expiration", "proposal listing"],
+      "authority_denied": ["decision making", "registration", "authorization", "invocation", "RRM mutation", "availability", "eligibility"]
+    },
+    {
+      "name": "ResourcePromotionDecisionAuthority",
+      "classification": "APPROVAL_ONLY",
+      "responsibility": "Makes typed decisions (APPROVE/REJECT) on proposals. Consumes decision IDs after use (single-use). Cannot propose, register, authorize, invoke, or mutate RRM.",
+      "authority_granted": ["decision making", "decision consumption"],
+      "authority_denied": ["proposal creation", "registration", "authorization", "invocation", "RRM mutation"]
+    },
+    {
+      "name": "CanonicalPromotionRegistrationBoundary",
+      "classification": "REGISTRATION_ONLY",
+      "responsibility": "Translates approved proposals into RRM registration. Performs 10-point TOCTOU revalidation before registration. Cannot propose, decide, authorize, or invoke.",
+      "authority_granted": ["RRM registration"],
+      "authority_denied": ["proposal creation", "decision making", "authorization", "invocation", "availability inference", "eligibility inference"]
+    },
+    {
+      "name": "CanonicalResourcePromotionService",
+      "classification": "ORCHESTRATION",
+      "responsibility": "Orchestrates the full promotion lifecycle: propose -> decide -> register. Composes the three specialized services. No direct RRM mutation.",
+      "authority_granted": ["promotion orchestration"],
+      "authority_denied": ["direct RRM mutation", "authorization", "invocation"]
+    },
+    {
+      "name": "ResourcePromotionProposal",
+      "classification": "DERIVED",
+      "responsibility": "Immutable typed proposal contract linking discovery evidence to a promotion request with scope and metadata.",
+      "authority_granted": [],
+      "authority_denied": ["state mutation"]
+    },
+    {
+      "name": "ResourcePromotionDecision",
+      "classification": "DERIVED",
+      "responsibility": "Immutable typed decision contract recording a typed approval/rejection of a proposal.",
+      "authority_granted": [],
+      "authority_denied": ["state mutation"]
+    },
+    {
+      "name": "ResourcePromotionResult",
+      "classification": "DERIVED",
+      "responsibility": "Immutable result record of a promotion attempt with success/failure status and reason.",
+      "authority_granted": [],
+      "authority_denied": ["state mutation"]
+    }
+  ],
+  "lifecycle_states": ["PENDING", "APPROVED", "REJECTED", "EXPIRED", "REVOKED", "CONSUMED"],
+  "decision_types": ["APPROVE", "REJECT"],
+  "registration_kinds": ["provider", "capability", "agent", "environment"],
+  "toctou_checks": [
+    "1. Proposal exists",
+    "2. Proposal is APPROVED",
+    "3. Decision belongs to proposal",
+    "4. Decision is APPROVE type",
+    "5. Evidence still exists in discovery",
+    "6. Evidence not deleted",
+    "7. Evidence not revoked",
+    "8. Evidence not stale",
+    "9. No conflicting canonical resource in RRM",
+    "10. Resource kind supported for registration"
+  ],
+  "invariants": [
+    "Discovery alone never triggers registration",
+    "Proposal alone never triggers registration",
+    "Rejection never triggers registration",
+    "Expiration never triggers registration",
+    "Revocation never triggers registration",
+    "Approval alone never triggers registration (decision consumed at registration time)",
+    "Decision IDs are single-use (consumed after registration attempt)",
+    "Proposal IDs are deterministic from evidence identity",
+    "TOCTOU revalidation prevents stale registration",
+    "Unknown decision types are rejected",
+    "Agents cannot self-promote",
+    "Providers cannot invoke themselves through promotion",
+    "Tools cannot execute through promotion",
+    "Metadata cannot escalate scope"
+  ]
+}

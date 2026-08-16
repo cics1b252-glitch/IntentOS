@@ -70,6 +70,7 @@ from intent_kernel.router import ModuleRouter
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.service import RegistryResourceManager
 from intent_kernel.discovery import CanonicalResourceDiscoveryService
+from intent_kernel.promotion.promotion_service import CanonicalResourcePromotionService
 from intent_kernel.rrm.binding import CanonicalResourceBindingAuthority
 from intent_kernel.rrm.models import CapabilityResource, ResourceOrigin, AvailabilitySource
 from intent_kernel.runtime import MissionRuntime
@@ -119,6 +120,7 @@ class ApplicationComponents:
     mission_runtime: MissionRuntime
     confirmation_service: CanonicalConfirmationService
     resource_discovery_service: CanonicalResourceDiscoveryService
+    resource_promotion_service: CanonicalResourcePromotionService
     migration_telemetry: MigrationTelemetry
     bootstrap_mode: str = "canonical"
     legacy_adapters: tuple[str, ...] = LEGACY_ADAPTERS
@@ -355,6 +357,10 @@ class KernelBuilder:
         resource_discovery_service = CanonicalResourceDiscoveryService(
             rrm=resource_manager,
         )
+        resource_promotion_service = CanonicalResourcePromotionService(
+            discovery_service=resource_discovery_service,
+            rrm=resource_manager,
+        )
         legacy_capability_executor = LegacyCapabilityExecutorAdapter(
             router,
             mission_engine=mission_engine,
@@ -377,6 +383,7 @@ class KernelBuilder:
                 "mission_completion_authority": "MissionCompletionGate",
                 "confirmation_authority": "CanonicalConfirmationService",
                 "resource_discovery_authority": "CanonicalResourceDiscoveryService",
+                "resource_promotion_authority": "CanonicalResourcePromotionService",
                 "tool_authorization_authority": "ToolAuthorizationGate",
                 "agent_orchestrator": "canonical",
                 "agent_factory": "canonical",
@@ -426,6 +433,7 @@ class KernelBuilder:
             mission_runtime=mission_runtime,
             confirmation_service=confirmation_service,
             resource_discovery_service=resource_discovery_service,
+            resource_promotion_service=resource_promotion_service,
             migration_telemetry=migration_telemetry,
         )
 

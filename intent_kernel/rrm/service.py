@@ -55,6 +55,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             if existing is not None and self._is_governed_resource(provider.provider_id):
                 if self._is_compatibility_source(provider.resource_origin):
                     return existing
+                if existing.resource_origin == provider.resource_origin:
+                    return existing
             provider.updated_at = utc_iso()
             self._providers[provider.provider_id] = provider
             return provider
@@ -86,6 +88,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing = self._accounts.get(account.account_id)
             if existing is not None and self._is_governed_resource(account.account_id):
                 if self._is_compatibility_source(account.resource_origin):
+                    return existing
+                if existing.resource_origin == account.resource_origin:
                     return existing
             account.updated_at = utc_iso()
             self._accounts[account.account_id] = account
@@ -126,6 +130,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             if existing is not None and self._is_governed_resource(environment.environment_id):
                 if self._is_compatibility_source(environment.resource_origin):
                     return existing
+                if existing.resource_origin == environment.resource_origin:
+                    return existing
             environment.updated_at = utc_iso()
             self._environments[environment.environment_id] = environment
             return environment
@@ -157,6 +163,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing = self._capabilities.get(capability.capability_id)
             if existing is not None and self._is_governed_resource(capability.capability_id):
                 if self._is_compatibility_source(capability.resource_origin):
+                    return existing
+                if existing.resource_origin == capability.resource_origin:
                     return existing
             capability.updated_at = utc_iso()
             self._capabilities[capability.capability_id] = capability
@@ -195,6 +203,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing = self._agents.get(agent.agent_id)
             if existing is not None and self._is_governed_resource(agent.agent_id):
                 if self._is_compatibility_source(agent.resource_origin):
+                    return existing
+                if existing.resource_origin == agent.resource_origin:
                     return existing
             agent.updated_at = utc_iso()
             self._agents[agent.agent_id] = agent
@@ -260,14 +270,27 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     # --- Governed Resource Provenance ---
 
-    def mark_governed(self, resource_id: str) -> None:
-        """Mark a resource ID as governed (e.g., promoted via M17).
+    def mark_governed(self, resource_id: str, registration_id: str = "") -> None:
+        """Mark a resource ID as governed with canonical registration provenance.
 
         Governed resources cannot be silently overwritten by
         compatibility/bootstrap writers.
+
+        registration_id must be a non-empty canonical identifier
+        from the promotion registration boundary (M17). Origin alone
+        is NOT sufficient for governed classification.
         """
         with self._lock:
             self._governed_ids.add(resource_id)
+            if registration_id:
+                for store in (
+                    self._providers, self._capabilities, self._agents,
+                    self._environments, self._accounts, self._projects,
+                ):
+                    res = store.get(resource_id)
+                    if res is not None:
+                        res.governed_registration_id = registration_id
+                        res.updated_at = utc_iso()
 
     def is_governed(self, resource_id: str) -> bool:
         """Check if a resource ID is governed."""
@@ -275,15 +298,30 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             return resource_id in self._governed_ids
 
     def _is_governed_resource(self, resource_id: str) -> bool:
-        """Check if an existing resource is governed.
+        """Check if an existing resource has canonical governed provenance.
 
-        A resource is considered governed if:
-        - It is in the governed IDs set, OR
-        - Its origin is USER_REGISTRATION, ORGANIZATION_POLICY,
-          CONFIGURATION, or HOST_DISCOVERY (non-compatibility origins)
+        A resource is considered governed ONLY if:
+        - It is in the governed IDs set AND has a non-empty
+          governed_registration_id (canonical promotion provenance), OR
+        - It has a non-empty governed_registration_id set by the
+          promotion registration boundary.
+
+        Origin alone is NOT sufficient — caller-controlled resource_origin
+        cannot forge governed identity.
         """
         if resource_id in self._governed_ids:
-            return True
+            existing = (
+                self._providers.get(resource_id)
+                or self._capabilities.get(resource_id)
+                or self._agents.get(resource_id)
+                or self._environments.get(resource_id)
+                or self._accounts.get(resource_id)
+                or self._projects.get(resource_id)
+            )
+            if existing is not None:
+                return bool(getattr(existing, "governed_registration_id", ""))
+            return False
+
         existing = (
             self._providers.get(resource_id)
             or self._capabilities.get(resource_id)
@@ -293,14 +331,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             or self._projects.get(resource_id)
         )
         if existing is not None:
-            origin = getattr(existing, "resource_origin", None)
-            if origin in (
-                ResourceOrigin.USER_REGISTRATION,
-                ResourceOrigin.ORGANIZATION_POLICY,
-                ResourceOrigin.CONFIGURATION,
-                ResourceOrigin.HOST_DISCOVERY,
-            ):
-                return True
+            return bool(getattr(existing, "governed_registration_id", ""))
         return False
 
     def _is_compatibility_source(self, resource_origin: ResourceOrigin) -> bool:

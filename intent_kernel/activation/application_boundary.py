@@ -27,12 +27,16 @@ Before mutation, performs 14-point TOCTOU revalidation:
 13. scope remains valid
 14. decision has not expired/revoked/been consumed
 
+Check 15 (new): evidence revalidated against canonical source at
+application time. Stored evidence snapshots alone are not trusted.
+
 Fail closed on any mismatch.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from uuid import uuid4
 
 from intent_kernel.activation.models import (
@@ -75,9 +79,12 @@ class ActivationApplicationBoundary:
 
     Only this boundary may apply a valid activation decision to the RRM
     lifecycle fields controlled by Movement 18. Performs 14-point TOCTOU
-    revalidation before any mutation.
+    revalidation before any mutation, plus evidence TOCTOU revalidation.
 
     The boundary MUST NOT manufacture prerequisite truth.
+
+    For governed resources, only this boundary may apply legitimate
+    updates (exact-provenance guarded, TOCTOU-revalidated).
     """
 
     def __init__(
@@ -87,12 +94,14 @@ class ActivationApplicationBoundary:
         activation_decisions: dict[str, ResourceActivationDecision],
         consumed_decisions: set[str],
         evidence_store: dict[str, ResourceActivationEvidence] | None = None,
+        evidence_authority: Any = None,
     ) -> None:
         self._rrm = rrm
         self._requests = activation_requests
         self._decisions = activation_decisions
         self._consumed = consumed_decisions
         self._evidence_store = evidence_store or {}
+        self._evidence_authority = evidence_authority
 
     def update_evidence(self, evidence: ResourceActivationEvidence) -> None:
         """Update evidence store for boundary revalidation."""
@@ -247,6 +256,27 @@ class ActivationApplicationBoundary:
                 decision_id=decision_id, resource_id=decision.resource_id,
                 reason="scope_mismatch",
             )
+
+        # Check 15: evidence TOCTOU — revalidate against canonical source
+        if self._evidence_authority is not None:
+            fresh_evidence = self._evidence_authority.collect_for_resource(
+                decision.resource_id, decision.resource_kind,
+            )
+            fresh_types = {ev.evidence_type for ev in fresh_evidence}
+            for eid in request.evidence_ids:
+                stored_evidence = self._evidence_store.get(eid)
+                if stored_evidence is None:
+                    return ResourceActivationResult(
+                        success=False, request_id=decision.request_id,
+                        decision_id=decision_id, resource_id=decision.resource_id,
+                        reason=f"evidence_not_found: {eid}",
+                    )
+                if stored_evidence.evidence_type not in fresh_types:
+                    return ResourceActivationResult(
+                        success=False, request_id=decision.request_id,
+                        decision_id=decision_id, resource_id=decision.resource_id,
+                        reason=f"evidence_no_longer_canonical: {eid}",
+                    )
 
         # All checks passed — apply activation transition
         # The boundary MUST NOT manufacture prerequisite truth.

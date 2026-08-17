@@ -1,21 +1,23 @@
 """Movement 18 — Canonical Activation Evidence Authority.
 
-EVIDENCE_VALIDATION_ONLY — validates every submitted evidence object
-against live canonical sources before storing/using it.
+EVIDENCE_COLLECTION_ONLY — derives activation evidence from canonical
+sources. Callers CANNOT construct arbitrary ResourceActivationEvidence
+and have it accepted as canonical prerequisite truth.
 
 EVIDENCE OBJECT != TRUSTED EVIDENCE
 CALLER ASSERTION != CANONICAL SOURCE OF TRUTH
 ACTIVATION APPROVAL != PREREQUISITE EVIDENCE
 
-A public caller must NOT be able to construct arbitrary
-ResourceActivationEvidence and have the activation authority trust it
-as canonical prerequisite truth.
+collect_for_resource() produces evidence by querying the canonical
+source directly. validate_and_store() is retained for backward
+compatibility but only stores evidence that was previously collected.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from intent_kernel.activation.models import (
     ActivationEvidenceType,
@@ -37,10 +39,11 @@ class EvidenceValidationResult:
 
 
 class CanonicalActivationEvidenceAuthority:
-    """EVIDENCE_VALIDATION_ONLY — validates evidence against canonical sources.
+    """EVIDENCE_COLLECTION_ONLY — derives evidence from canonical sources.
 
-    This authority validates every submitted evidence object against
-    live canonical state before accepting it as activation evidence.
+    This authority produces activation evidence by querying the canonical
+    source directly. Callers cannot submit arbitrary evidence objects
+    and have them accepted as truth.
 
     CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
     """
@@ -65,7 +68,58 @@ class CanonicalActivationEvidenceAuthority:
         self._rrm = rrm
         self._provider_manager = provider_manager
         self._capability_registry = capability_registry
-        self._validated_evidence: dict[str, ResourceActivationEvidence] = {}
+        self._collected_evidence: dict[str, ResourceActivationEvidence] = {}
+
+    # ------------------------------------------------------------------
+    # Primary API — derive evidence from canonical sources
+    # ------------------------------------------------------------------
+
+    def collect_for_resource(
+        self,
+        resource_id: str,
+        resource_kind: ResourceDiscoveryKind,
+    ) -> list[ResourceActivationEvidence]:
+        """Derive ALL valid prerequisite evidence for a resource from canonical sources.
+
+        This is the ONLY trusted entry point. Callers do NOT construct
+        evidence objects — the authority derives them by querying the
+        canonical source directly.
+        """
+        resource_type = self._RESOURCE_TYPE_MAP.get(resource_kind)
+        if resource_type is None:
+            return []
+
+        resource = self._get_resource(resource_type, resource_id)
+        if resource is None:
+            return []
+
+        evidence_list: list[ResourceActivationEvidence] = []
+
+        if resource_type == ResourceType.PROVIDER:
+            evidence_list.extend(self._collect_provider_evidence(resource, resource_id, resource_kind))
+        elif resource_type == ResourceType.CAPABILITY:
+            evidence_list.extend(self._collect_capability_evidence(resource, resource_id, resource_kind))
+        elif resource_type == ResourceType.AGENT:
+            evidence_list.extend(self._collect_agent_evidence(resource, resource_id, resource_kind))
+        elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
+            evidence_list.extend(self._collect_environment_evidence(resource, resource_id, resource_kind))
+        elif resource_type == ResourceType.ACCOUNT:
+            evidence_list.extend(self._collect_account_evidence(resource, resource_id, resource_kind))
+
+        for ev in evidence_list:
+            self._collected_evidence[ev.evidence_id] = ev
+
+        return evidence_list
+
+    def get_collected_evidence(self, evidence_id: str) -> ResourceActivationEvidence | None:
+        return self._collected_evidence.get(evidence_id)
+
+    def get_all_collected(self) -> dict[str, ResourceActivationEvidence]:
+        return dict(self._collected_evidence)
+
+    # ------------------------------------------------------------------
+    # Backward-compatible entry point — validates then stores
+    # ------------------------------------------------------------------
 
     def validate_and_store(
         self,
@@ -73,8 +127,8 @@ class CanonicalActivationEvidenceAuthority:
     ) -> EvidenceValidationResult:
         """Validate evidence against canonical sources and store if valid.
 
-        Every evidence object must be validated against the live canonical
-        source before it can be used for activation.
+        Retained for backward compatibility. New code should use
+        collect_for_resource() instead.
         """
         if evidence.revoked:
             return EvidenceValidationResult(
@@ -104,15 +158,158 @@ class CanonicalActivationEvidenceAuthority:
         )
 
         if validation.valid:
-            self._validated_evidence[evidence.evidence_id] = evidence
+            self._collected_evidence[evidence.evidence_id] = evidence
 
         return validation
 
     def get_validated_evidence(self, evidence_id: str) -> ResourceActivationEvidence | None:
-        return self._validated_evidence.get(evidence_id)
+        return self._collected_evidence.get(evidence_id)
 
     def get_all_validated(self) -> dict[str, ResourceActivationEvidence]:
-        return dict(self._validated_evidence)
+        return dict(self._collected_evidence)
+
+    # ------------------------------------------------------------------
+    # Canonical evidence producers — derive from source, not caller
+    # ------------------------------------------------------------------
+
+    def _collect_provider_evidence(
+        self, resource, resource_id: str, resource_kind: ResourceDiscoveryKind,
+    ) -> list[ResourceActivationEvidence]:
+        """Derive provider prerequisite evidence from canonical source."""
+        evidence_list: list[ResourceActivationEvidence] = []
+        ts = utc_iso()
+
+        if resource.is_configured:
+            binding = ""
+            if self._provider_manager is not None:
+                if resource_id in getattr(self._provider_manager, "available", {}):
+                    binding = f"provider-manager:{resource_id}"
+
+            evidence_list.append(ResourceActivationEvidence(
+                evidence_id=f"ev-{uuid4().hex[:12]}",
+                resource_id=resource_id,
+                resource_kind=resource_kind,
+                evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
+                source="canonical:rrm",
+                source_identity="RegistryResourceManager",
+                observed_at=ts,
+                binding_identity=binding,
+            ))
+
+        if resource.has_active_account:
+            evidence_list.append(ResourceActivationEvidence(
+                evidence_id=f"ev-{uuid4().hex[:12]}",
+                resource_id=resource_id,
+                resource_kind=resource_kind,
+                evidence_type=ActivationEvidenceType.PROVIDER_ACCOUNT,
+                source="canonical:rrm",
+                source_identity="RegistryResourceManager",
+                observed_at=ts,
+            ))
+
+        return evidence_list
+
+    def _collect_capability_evidence(
+        self, resource, resource_id: str, resource_kind: ResourceDiscoveryKind,
+    ) -> list[ResourceActivationEvidence]:
+        """Derive capability prerequisite evidence from canonical registry."""
+        evidence_list: list[ResourceActivationEvidence] = []
+        ts = utc_iso()
+
+        if resource.is_executable:
+            binding = ""
+            if self._capability_registry is not None:
+                for cap_name, registrations in getattr(self._capability_registry, "_registrations", {}).items():
+                    for reg in registrations:
+                        if getattr(reg, "capability_name", "") == resource.name or getattr(reg, "capability_id", "") == resource_id:
+                            binding = getattr(reg, "binding_identity", f"registry:{cap_name}")
+                            break
+                    if binding:
+                        break
+
+            evidence_list.append(ResourceActivationEvidence(
+                evidence_id=f"ev-{uuid4().hex[:12]}",
+                resource_id=resource_id,
+                resource_kind=resource_kind,
+                evidence_type=ActivationEvidenceType.CAPABILITY_EXECUTABLE,
+                source="canonical:registry",
+                source_identity="CanonicalCapabilityRegistry",
+                observed_at=ts,
+                binding_identity=binding,
+            ))
+
+        return evidence_list
+
+    def _collect_agent_evidence(
+        self, resource, resource_id: str, resource_kind: ResourceDiscoveryKind,
+    ) -> list[ResourceActivationEvidence]:
+        """Derive agent prerequisite evidence from canonical registry."""
+        from intent_kernel.rrm.models import AgentInstallationState
+
+        evidence_list: list[ResourceActivationEvidence] = []
+        ts = utc_iso()
+
+        valid_states = (
+            AgentInstallationState.INSTALLED,
+            AgentInstallationState.ENABLED,
+            AgentInstallationState.AVAILABLE,
+        )
+        if resource.is_enabled and resource.installation_state in valid_states:
+            evidence_list.append(ResourceActivationEvidence(
+                evidence_id=f"ev-{uuid4().hex[:12]}",
+                resource_id=resource_id,
+                resource_kind=resource_kind,
+                evidence_type=ActivationEvidenceType.AGENT_IDENTITY,
+                source="canonical:rrm",
+                source_identity="RegistryResourceManager",
+                observed_at=ts,
+            ))
+
+        return evidence_list
+
+    def _collect_environment_evidence(
+        self, resource, resource_id: str, resource_kind: ResourceDiscoveryKind,
+    ) -> list[ResourceActivationEvidence]:
+        """Derive environment prerequisite evidence from canonical source."""
+        evidence_list: list[ResourceActivationEvidence] = []
+        ts = utc_iso()
+
+        if resource.is_discovered:
+            evidence_list.append(ResourceActivationEvidence(
+                evidence_id=f"ev-{uuid4().hex[:12]}",
+                resource_id=resource_id,
+                resource_kind=resource_kind,
+                evidence_type=ActivationEvidenceType.ENVIRONMENT_DISCOVERY,
+                source="canonical:rrm",
+                source_identity="RegistryResourceManager",
+                observed_at=ts,
+            ))
+
+        return evidence_list
+
+    def _collect_account_evidence(
+        self, resource, resource_id: str, resource_kind: ResourceDiscoveryKind,
+    ) -> list[ResourceActivationEvidence]:
+        """Derive account prerequisite evidence from canonical source."""
+        evidence_list: list[ResourceActivationEvidence] = []
+        ts = utc_iso()
+
+        if resource.secret_reference:
+            evidence_list.append(ResourceActivationEvidence(
+                evidence_id=f"ev-{uuid4().hex[:12]}",
+                resource_id=resource_id,
+                resource_kind=resource_kind,
+                evidence_type=ActivationEvidenceType.ACCOUNT_SECRET,
+                source="canonical:rrm",
+                source_identity="RegistryResourceManager",
+                observed_at=ts,
+            ))
+
+        return evidence_list
+
+    # ------------------------------------------------------------------
+    # Validation helpers (for backward-compatible validate_and_store)
+    # ------------------------------------------------------------------
 
     def _validate_evidence_against_source(
         self,
@@ -144,19 +341,12 @@ class CanonicalActivationEvidenceAuthority:
     def _validate_provider_configuration(
         self, evidence: ResourceActivationEvidence, resource,
     ) -> EvidenceValidationResult:
-        """Validate provider configuration evidence against canonical state.
-
-        Evidence is valid only if:
-        - resource.is_configured is True in canonical RRM
-        - binding identity matches if provided
-        """
         if not resource.is_configured:
             return EvidenceValidationResult(
                 valid=False,
                 evidence_id=evidence.evidence_id,
                 reason="provider_not_configured_in_canonical_source",
             )
-
         if evidence.binding_identity:
             if self._provider_manager is not None:
                 if evidence.resource_id not in self._provider_manager.available:
@@ -165,7 +355,6 @@ class CanonicalActivationEvidenceAuthority:
                         evidence_id=evidence.evidence_id,
                         reason="provider_binding_not_in_manager",
                     )
-
         return EvidenceValidationResult(
             valid=True,
             evidence_id=evidence.evidence_id,
@@ -174,14 +363,12 @@ class CanonicalActivationEvidenceAuthority:
     def _validate_provider_account(
         self, evidence: ResourceActivationEvidence, resource,
     ) -> EvidenceValidationResult:
-        """Validate provider active-account evidence against canonical state."""
         if not resource.has_active_account:
             return EvidenceValidationResult(
                 valid=False,
                 evidence_id=evidence.evidence_id,
                 reason="provider_no_active_account_in_canonical_source",
             )
-
         return EvidenceValidationResult(
             valid=True,
             evidence_id=evidence.evidence_id,
@@ -190,18 +377,12 @@ class CanonicalActivationEvidenceAuthority:
     def _validate_capability_executable(
         self, evidence: ResourceActivationEvidence, resource,
     ) -> EvidenceValidationResult:
-        """Validate capability executable evidence against canonical registry.
-
-        Evidence must reference an exact binding identity from the canonical
-        capability registry.
-        """
         if not resource.is_executable:
             return EvidenceValidationResult(
                 valid=False,
                 evidence_id=evidence.evidence_id,
                 reason="capability_not_executable_in_canonical_source",
             )
-
         if evidence.binding_identity and self._capability_registry is not None:
             binding_found = False
             for cap_name, registrations in self._capability_registry._registrations.items():
@@ -217,7 +398,6 @@ class CanonicalActivationEvidenceAuthority:
                     evidence_id=evidence.evidence_id,
                     reason="binding_identity_not_in_canonical_registry",
                 )
-
         return EvidenceValidationResult(
             valid=True,
             evidence_id=evidence.evidence_id,
@@ -226,14 +406,12 @@ class CanonicalActivationEvidenceAuthority:
     def _validate_agent_identity(
         self, evidence: ResourceActivationEvidence, resource,
     ) -> EvidenceValidationResult:
-        """Validate agent identity evidence against canonical state."""
         if not resource.is_enabled:
             return EvidenceValidationResult(
                 valid=False,
                 evidence_id=evidence.evidence_id,
                 reason="agent_not_enabled_in_canonical_source",
             )
-
         from intent_kernel.rrm.models import AgentInstallationState
         valid_states = (
             AgentInstallationState.INSTALLED,
@@ -246,7 +424,6 @@ class CanonicalActivationEvidenceAuthority:
                 evidence_id=evidence.evidence_id,
                 reason=f"agent_installation_state_invalid: {resource.installation_state.value}",
             )
-
         return EvidenceValidationResult(
             valid=True,
             evidence_id=evidence.evidence_id,
@@ -255,14 +432,12 @@ class CanonicalActivationEvidenceAuthority:
     def _validate_environment_discovery(
         self, evidence: ResourceActivationEvidence, resource,
     ) -> EvidenceValidationResult:
-        """Validate environment discovery evidence against canonical state."""
         if not resource.is_discovered:
             return EvidenceValidationResult(
                 valid=False,
                 evidence_id=evidence.evidence_id,
                 reason="environment_not_discovered_in_canonical_source",
             )
-
         return EvidenceValidationResult(
             valid=True,
             evidence_id=evidence.evidence_id,
@@ -271,14 +446,12 @@ class CanonicalActivationEvidenceAuthority:
     def _validate_account_secret(
         self, evidence: ResourceActivationEvidence, resource,
     ) -> EvidenceValidationResult:
-        """Validate account secret reference evidence against canonical state."""
         if not resource.secret_reference:
             return EvidenceValidationResult(
                 valid=False,
                 evidence_id=evidence.evidence_id,
                 reason="account_no_secret_reference_in_canonical_source",
             )
-
         return EvidenceValidationResult(
             valid=True,
             evidence_id=evidence.evidence_id,

@@ -5,8 +5,7 @@
   "pipeline": {
     "stages": [
       "REGISTERED_RESOURCE",
-      "INDEPENDENT_PREREQUISITE_EVIDENCE",
-      "EVIDENCE_VALIDATION",
+      "CANONICAL_EVIDENCE_COLLECTION",
       "ACTIVATION_REQUEST",
       "PREREQUISITE_EVALUATION_WITH_EVIDENCE",
       "TYPED_DECISION",
@@ -15,7 +14,7 @@
       "ACTIVATED_RESOURCE"
     ],
     "authority_chain": [
-      "CanonicalActivationEvidenceAuthority (EVIDENCE_VALIDATION_ONLY)",
+      "CanonicalActivationEvidenceAuthority (EVIDENCE_COLLECTION_ONLY)",
       "CanonicalResourceActivationAuthority (ACTIVATION_ONLY)",
       "ActivationApplicationBoundary (ACTIVATION_APPLICATION_ONLY)",
       "CanonicalResourceActivationService (ORCHESTRATION_ONLY)"

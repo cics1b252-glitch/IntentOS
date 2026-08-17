@@ -39,20 +39,17 @@ INDEPENDENT EVIDENCE
 
 ## Separation of Concerns
 
-### Evidence Authority — EVIDENCE_VALIDATION_ONLY
+### Evidence Authority — EVIDENCE_COLLECTION_ONLY
 
-Validates every evidence against live canonical sources before storage:
-- Unregistered resource evidence → rejected
-- Revoked evidence → rejected
-- Unsupported resource kind → rejected
-- Provider: is_configured validated against canonical RRM state
-- Provider: has_active_account validated against canonical RRM state
-- Capability: is_executable validated against canonical RRM state
-- Capability: binding_identity validated against canonical capability registry
-- Agent: is_enabled validated against canonical RRM state
-- Agent: installation_state validated against canonical RRM state
-- Environment: is_discovered validated against canonical RRM state
-- Account: secret_reference validated against canonical RRM state
+Derives activation evidence from canonical sources. Callers cannot construct arbitrary evidence:
+
+- `collect_for_resource()` queries canonical source and produces evidence
+- Provider: is_configured + has_active_account derived from RRM state
+- Capability: is_executable + binding_identity derived from capability registry
+- Agent: is_enabled + installation_state derived from RRM state
+- Environment: is_discovered derived from RRM state
+- Account: secret_reference derived from RRM state
+- `validate_and_store()` retained for backward compatibility
 
 ### Authority — ACTIVATION_ONLY
 
@@ -72,7 +69,7 @@ were verified. Evidence must be independent of activation.
 
 ### Application Boundary — ACTIVATION_APPLICATION_ONLY
 
-Applies activation decisions with 14-point TOCTOU revalidation:
+Applies activation decisions with 15-point TOCTOU revalidation:
 1. Activation request still exists
 2. Decision still exists
 3. Decision is APPROVED
@@ -87,9 +84,11 @@ Applies activation decisions with 14-point TOCTOU revalidation:
 12. Binding/configuration identity unchanged
 13. Scope remains valid
 14. Decision has not been consumed (single-use)
+15. Evidence revalidated against canonical source (TOCTOU)
 
 The boundary MUST NOT manufacture prerequisite truth.
 The boundary MAY apply an activation transition already justified by evidence.
+For governed resources, only this boundary may apply legitimate updates.
 
 ### Service — ORCHESTRATION_ONLY
 
@@ -150,8 +149,9 @@ Delegates to authority and boundary; contains no independent mutation logic.
 - No discovery, promotion, or registration authority leak
 - Compatibility/bootstrap paths documented but not silently activated
 - RRM same-ID overwrite guard: compatibility sources cannot overwrite governed resources
-- Governed resource provenance detection: USER_REGISTRATION, ORGANIZATION_POLICY, CONFIGURATION, HOST_DISCOVERY origins are governed
-- Explicit mark_governed() API for runtime governance
+- Governed resource provenance: requires `governed_registration_id` (origin alone insufficient)
+- Same-ID/same-origin replacement of governed resources rejected
+- Explicit mark_governed() API for runtime governance with registration provenance
 
 ### RA-18-02: Activation Evidence Repair
 
@@ -165,30 +165,39 @@ Delegates to authority and boundary; contains no independent mutation logic.
 - Forged/revoked/cross-resource evidence rejected
 - Binding revalidation at application time
 
-### RA-18-03: Canonical Evidence Validation (Repair Cycle 2)
+### RA-18-03: Canonical Evidence Collection (Repair Cycle 3)
 
-**Defect:** Public callers could assert arbitrary evidence accepted as canonical prerequisite truth.
-
-**Repair:**
-- CanonicalActivationEvidenceAuthority (EVIDENCE_VALIDATION_ONLY) validates every evidence against live canonical sources before storage
-- Evidence validated against: ProviderManager bindings, CanonicalCapabilityRegistry, agent lifecycle state, environment discovery provenance, account configuration state
-- register_evidence() now goes through evidence authority validation
-- Unregistered resource evidence rejected
-- Revoked evidence rejected
-- Unsupported resource kind rejected
-- Binding identity validated against canonical registry
-- Evidence store contains only validated evidence
-
-### RA-18-01 (Revised): Compatibility/Bootstrap Overwrite Guard (Repair Cycle 2)
-
-**Defect:** RRM register_* methods silently replaced same-ID objects, allowing compatibility writers to overwrite governed M17 resources.
+**Defect:** Public callers could construct arbitrary evidence and have it accepted as canonical truth.
 
 **Repair:**
-- _is_governed_resource() detects governed resources by provenance (USER_REGISTRATION, ORGANIZATION_POLICY, CONFIGURATION, HOST_DISCOVERY) or explicit mark_governed()
-- _is_compatibility_source() identifies MIGRATION, CONFIGURATION, HOST_DISCOVERY origins
-- register_provider/capability/agent/account/environment: compatibility sources rejected when target is governed
-- Same-origin overwrites still permitted (legitimate updates)
-- mark_governed()/is_governed() API for explicit governance
+- `collect_for_resource()` derives evidence from canonical sources (callers cannot construct evidence)
+- Evidence authority queries RRM directly for each resource kind
+- `validate_and_store()` retained for backward compatibility only
+- Service exposes `collect_and_register_evidence()` as the trusted entry point
+- Evidence TOCTOU: application boundary revalidates against canonical source at application time
+
+### RA-18-04: Governed Resource Provenance (Repair Cycle 3)
+
+**Defect:** `resource_origin` alone classified resources as governed — origin is caller-controlled.
+
+**Repair:**
+- `governed_registration_id` field on all resource models
+- `_is_governed_resource()` requires canonical `governed_registration_id` (not origin alone)
+- `mark_governed(resource_id, registration_id)` sets provenance on resource
+- Same-ID/same-origin replacement of governed resources rejected
+- Legitimate governed updates must go through ActivationApplicationBoundary with TOCTOU revalidation
+
+### RA-18-01 (Revised): Compatibility/Bootstrap Overwrite Guard (Repair Cycle 3)
+
+**Defect:** RRM register_* methods allowed same-origin replacement of governed resources.
+
+**Repair:**
+- `_is_governed_resource()` requires `governed_registration_id` (origin alone insufficient)
+- `_is_compatibility_source()` identifies MIGRATION, CONFIGURATION, HOST_DISCOVERY origins
+- register_*: compatibility sources rejected when target is governed
+- register_*: same-ID/same-origin replacement rejected for governed resources
+- Different-origin replacement of governed resources permitted (legitimate updates)
+- mark_governed()/is_governed() API with registration provenance
 
 ### Paths Contained
 
@@ -210,7 +219,7 @@ ResourceActivationStatus:
 
 ## Test Coverage
 
-51 tests (A-Z matrix + RA-18-03 evidence validation + RA-18-01 overwrite guard):
+61 tests (A-Z matrix + RA-18-03 canonical evidence collection + RA-18-04 governed provenance + RA-18-01 overwrite guard):
 - Models frozen and immutable (including evidence)
 - Evidence model (revocation, validity, source_identity)
 - Authority rejects unsupported/unregistered resources
@@ -236,25 +245,40 @@ ResourceActivationStatus:
 - RA-18-01 containment
 - TOCTOU revalidation (template, unregistered)
 - Boundary observe-only (all resource kinds)
-- RA-18-03: Canonical evidence validation (19 tests)
-  - Unregistered resource evidence → rejected
-  - Revoked evidence → rejected
-  - Provider config valid/invalid → accepted/rejected
-  - Provider account valid/invalid → accepted/rejected
-  - Capability executable valid/invalid/non-existent binding → accepted/rejected
-  - Agent identity valid/disabled/invalid state → accepted/rejected
-  - Environment discovery valid/not discovered → accepted/rejected
-  - Account secret valid/no reference → accepted/rejected
-  - Only validated evidence stored
-  - Service wires evidence authority
-  - Unsupported resource kind → rejected
-- RA-18-01: RRM overwrite guard (12 tests)
-  - Governed by origin detection
-  - Compatibility source cannot overwrite USER_REGISTRATION
-  - Explicitly governed resource protected
-  - Same origin can overwrite
-  - Configuration cannot overwrite USER_REGISTRATION
-  - Host discovery cannot overwrite USER_REGISTRATION
-  - Non-governed resource can register
-  - mark_governed/is_governed persistence
+- RA-18-03: Canonical evidence collection (16 tests)
+  - collect_for_resource returns empty for unregistered resource
+  - collect_for_resource returns empty for unsupported kind
+  - Provider: configuration/account evidence derived from canonical source
+  - Provider: no evidence when not configured / no active account
+  - Capability: executable evidence derived from canonical registry
+  - Capability: no evidence when not executable
+  - Agent: identity evidence derived from canonical RRM
+  - Agent: no evidence when disabled / unavailable
+  - Environment: discovery evidence derived from canonical source
+  - Environment: no evidence when not discovered
+  - Account: secret evidence derived from canonical source
+  - Account: no evidence when no secret reference
+  - Collected evidence has source_identity set
+- RA-18-04: Governed provenance (12 tests)
+  - Origin-only is NOT governed
+  - mark_governed with registration_id makes resource governed
+  - mark_governed without registration_id does NOT make resource governed
+  - governed_registration_id on resource makes it governed
+  - Same-ID/same-origin replacement rejected for governed resources
+  - Same-ID/different-origin replacement allowed for governed resources
+  - Compatibility source cannot overwrite governed resource
+  - Non-governed resource can be freely registered
+  - mark_governed sets governed_registration_id on resource
+  - Agent/capability: same-origin replacement rejected when governed
+  - Environment: compatibility cannot overwrite governed resource
+- RA-18-01: RRM overwrite guard (13 tests)
+  - Origin-only does NOT make resource governed (Cycle 3 fix)
+  - Compatibility source CAN overwrite non-governed resource
+  - Explicitly governed resource protected from compatibility
+  - Same-origin replacement rejected for governed resources
+  - Configuration/host discovery cannot overwrite governed resource
+  - Non-governed resource can be freely registered
+  - mark_governed with registration_id is persisted
+  - Agent/capability/account/environment: compatibility cannot overwrite governed
+  - Account: same-origin replacement rejected when governed
   - Agent capability account environment overwrite protection

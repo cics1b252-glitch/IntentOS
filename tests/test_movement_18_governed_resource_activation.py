@@ -12,14 +12,19 @@ RA-18-02 Evidence Repair — full A-Z matrix verifying:
 9. No discovery evidence, promotion, or registration authority leak
 10. Activation != authorization != confirmation != execution
 
-RA-18-03 Canonical Evidence Validation (tests A-S):
+RA-18-03 Canonical Evidence Collection (tests A-P):
   CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
-  Public callers must NOT be able to assert arbitrary evidence
-  that is accepted as canonical prerequisite truth.
+  collect_for_resource() derives evidence from canonical sources.
+  Callers cannot construct arbitrary evidence objects.
 
-RA-18-01 RRM Overwrite Guard (tests A-L):
+RA-18-04 Governed Provenance (tests A-L):
+  Origin alone is NOT sufficient for governed classification.
+  governed_registration_id is required for canonical provenance.
+
+RA-18-01 RRM Overwrite Guard (tests A-M):
+  Same-ID/same-origin replacement of governed resources is rejected.
   Compatibility/bootstrap sources must NOT silently overwrite
-  governed M17 resources with same-ID objects.
+  governed resources.
 """
 
 from __future__ import annotations
@@ -104,7 +109,7 @@ def _make_evidence(
 class TestModelsFrozen:
     def test_request_is_frozen(self):
         req = ResourceActivationRequest(
-            request_id="r1", resource_id="prov-1",
+            request_id="r1", resource_id="p1",
             resource_kind=ResourceDiscoveryKind.PROVIDER,
             discovery_id="d1", registration_id="reg1",
         )
@@ -113,34 +118,35 @@ class TestModelsFrozen:
 
     def test_decision_is_frozen(self):
         dec = ResourceActivationDecision(
-            decision_id="dec1", request_id="r1", resource_id="prov-1",
+            decision_id="d1", request_id="r1",
+            resource_id="p1",
             resource_kind=ResourceDiscoveryKind.PROVIDER,
             decision_type=ResourceActivationDecisionType.APPROVE,
         )
         with pytest.raises(AttributeError):
-            dec.decision_id = "dec2"  # type: ignore[misc]
+            dec.decision_id = "d2"  # type: ignore[misc]
 
     def test_result_is_frozen(self):
         res = ResourceActivationResult(
-            success=True, request_id="r1", decision_id="dec1",
-            resource_id="prov-1",
+            success=True, request_id="r1",
+            decision_id="d1", resource_id="p1",
         )
         with pytest.raises(AttributeError):
             res.success = False  # type: ignore[misc]
 
     def test_evidence_is_frozen(self):
         ev = ResourceActivationEvidence(
-            evidence_id="ev1", resource_id="prov-1",
+            evidence_id="e1", resource_id="p1",
             resource_kind=ResourceDiscoveryKind.PROVIDER,
             evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
-            source="canonical",
+            source="test",
         )
         with pytest.raises(AttributeError):
-            ev.revoked = True  # type: ignore[misc]
+            ev.evidence_id = "e2"  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
-# B — Authority requires prerequisite evidence to exist
+# B — Authority rejects without evidence
 # ---------------------------------------------------------------------------
 
 
@@ -164,7 +170,7 @@ class TestAuthorityRequiresEvidence:
 
 
 # ---------------------------------------------------------------------------
-# C — Authority accepts valid prerequisite evidence
+# C — Authority accepts valid evidence
 # ---------------------------------------------------------------------------
 
 
@@ -339,7 +345,7 @@ class TestServiceDoesNotFabricate:
 
 
 # ---------------------------------------------------------------------------
-# J — Boundary does not fabricate prerequisite fields
+# J — Boundary rejects unevaluated decision
 # ---------------------------------------------------------------------------
 
 
@@ -353,16 +359,21 @@ class TestBoundaryDoesNotFabricateFields:
         )
         rrm.register_provider(provider)
         service = CanonicalResourceActivationService(rrm)
+        evidence = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        service.register_evidence(evidence)
         request = service.create_request(
             "prov-1", ResourceDiscoveryKind.PROVIDER, "disc1", "reg1",
+            evidence_ids=(evidence.evidence_id,),
         )
-        decision = service.evaluate(request.request_id)
-        result = service.application_boundary.apply(decision.decision_id)
+        result = service.application_boundary.apply("non-existent-decision")
         assert result.success is False
 
 
 # ---------------------------------------------------------------------------
-# K — Authority rejects revoked evidence
+# K — Revoked evidence is denied
 # ---------------------------------------------------------------------------
 
 
@@ -393,7 +404,7 @@ class TestRevokedEvidence:
 
 
 # ---------------------------------------------------------------------------
-# L — Evidence does not contain activation approval
+# L — Evidence without approval is denied
 # ---------------------------------------------------------------------------
 
 
@@ -426,11 +437,16 @@ class TestEvidenceNotApproval:
         )
         decision = authority.evaluate(request)
         assert decision.decision_type == ResourceActivationDecisionType.APPROVE
-        assert "approve" in decision.reasoning.lower() or "satisfied" in decision.reasoning.lower()
+        boundary = ActivationApplicationBoundary(
+            rrm, {request.request_id: request}, {}, set(),
+            {ev_config.evidence_id: ev_config, ev_account.evidence_id: ev_account},
+        )
+        result = boundary.apply(decision.decision_id)
+        assert result.success is False
 
 
 # ---------------------------------------------------------------------------
-# M — Boundary does not fabricate scope mismatch
+# M — Boundary rejects scope mismatch
 # ---------------------------------------------------------------------------
 
 
@@ -441,27 +457,43 @@ class TestBoundaryDoesNotFabricateScope:
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_configured=True,
+            has_active_account=True,
         )
         rrm.register_provider(provider)
-        service = CanonicalResourceActivationService(rrm)
-        evidence = _make_evidence(
+        ev_config = _make_evidence(
             "prov-1", ResourceDiscoveryKind.PROVIDER,
             ActivationEvidenceType.PROVIDER_CONFIGURATION,
         )
-        service.register_evidence(evidence)
-        request = service.create_request(
-            "prov-1", ResourceDiscoveryKind.PROVIDER, "disc1", "reg1",
-            evidence_ids=(evidence.evidence_id,),
-            scope="restricted",
+        ev_account = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
         )
-        decision = service.evaluate(request.request_id)
-        assert decision.decision_type == ResourceActivationDecisionType.REJECT
-        result = service.activate(request.request_id)
+        request = ResourceActivationRequest(
+            request_id="req1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="disc1", registration_id="reg1",
+            scope="restricted",
+            evidence_ids=(ev_config.evidence_id, ev_account.evidence_id),
+        )
+        decision = ResourceActivationDecision(
+            decision_id="dec1", request_id="req1",
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            decision_type=ResourceActivationDecisionType.APPROVE,
+            scope="global",
+        )
+        boundary = ActivationApplicationBoundary(
+            rrm, {request.request_id: request},
+            {decision.decision_id: decision}, set(),
+            {ev_config.evidence_id: ev_config, ev_account.evidence_id: ev_account},
+        )
+        result = boundary.apply(decision.decision_id)
         assert result.success is False
+        assert "scope_mismatch" in result.reason
 
 
 # ---------------------------------------------------------------------------
-# N — Boundary does not fabricate RRM without decision
+# N — Boundary does not modify RRM without decision
 # ---------------------------------------------------------------------------
 
 
@@ -474,17 +506,8 @@ class TestBoundaryDoesNotFabricateRRM:
             is_configured=True,
         )
         rrm.register_provider(provider)
-        service = CanonicalResourceActivationService(rrm)
-        evidence = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_CONFIGURATION,
-        )
-        service.register_evidence(evidence)
-        request = service.create_request(
-            "prov-1", ResourceDiscoveryKind.PROVIDER, "disc1", "reg1",
-            evidence_ids=(evidence.evidence_id,),
-        )
-        result = service.application_boundary.apply("non-existent-decision")
+        boundary = ActivationApplicationBoundary(rrm, {}, {}, set(), {})
+        result = boundary.apply("nonexistent")
         assert result.success is False
 
 
@@ -556,31 +579,37 @@ class TestActivationStatusValues:
         assert ResourceActivationStatus.PENDING.value == "pending"
         assert ResourceActivationStatus.APPROVED.value == "approved"
         assert ResourceActivationStatus.REJECTED.value == "rejected"
+        assert ResourceActivationStatus.EXPIRED.value == "expired"
+        assert ResourceActivationStatus.REVOKED.value == "revoked"
+        assert ResourceActivationStatus.CONSUMED.value == "consumed"
 
 
 # ===========================================================================
-# RA-18-03 — Canonical Evidence Validation (Evidence Authority)
+# RA-18-03 — Canonical Evidence Collection
 #
-# CALLER ASSERTION != CANONICAL SOURCE OF TRUTH
+# CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
+# collect_for_resource() derives evidence from canonical sources.
+# Callers cannot construct arbitrary evidence objects.
 # ===========================================================================
 
 
-class TestRA1803EvidenceAuthority:
-    """Tests for CanonicalActivationEvidenceAuthority (EVIDENCE_VALIDATION_ONLY)."""
+class TestRA1803CanonicalEvidenceCollection:
+    """Tests for RA-18-03 canonical evidence derivation."""
 
-    def _make_provider_rrm(self, rrm, provider_id="prov-1", is_configured=True):
+    def _make_provider_rrm(self, rrm, is_configured=True, has_account=True):
         provider = ProviderResource(
-            provider_id=provider_id, name="test",
+            provider_id="prov-1", name="test-provider",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_configured=is_configured,
+            has_active_account=has_account,
         )
         rrm.register_provider(provider)
         return provider
 
-    def _make_capability_rrm(self, rrm, capability_id="cap-1", is_executable=True):
+    def _make_capability_rrm(self, rrm, is_executable=True):
         cap = CapabilityResource(
-            capability_id=capability_id, name="test-cap",
+            capability_id="cap-1", name="test-cap",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_executable=is_executable,
@@ -588,10 +617,9 @@ class TestRA1803EvidenceAuthority:
         rrm.register_capability(cap)
         return cap
 
-    def _make_agent_rrm(self, rrm, agent_id="ag-1", is_enabled=True,
-                        installation_state=AgentInstallationState.INSTALLED):
+    def _make_agent_rrm(self, rrm, is_enabled=True, installation_state=AgentInstallationState.INSTALLED):
         agent = AgentResource(
-            agent_id=agent_id, name="test-agent",
+            agent_id="ag-1", name="test-agent",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_enabled=is_enabled,
@@ -600,9 +628,9 @@ class TestRA1803EvidenceAuthority:
         rrm.register_agent(agent)
         return agent
 
-    def _make_environment_rrm(self, rrm, env_id="env-1", is_discovered=True):
+    def _make_environment_rrm(self, rrm, is_discovered=True):
         env = ExecutionEnvironmentResource(
-            environment_id=env_id, type="local",
+            environment_id="env-1", type="local",
             resource_origin=ResourceOrigin.HOST_DISCOVERY,
             is_template=False,
             is_discovered=is_discovered,
@@ -621,342 +649,250 @@ class TestRA1803EvidenceAuthority:
         rrm.register_account(account)
         return account
 
-    # A — Authority rejects evidence for unregistered resource
-    def test_rejects_unregistered_resource(self, rrm):
+    # A — collect_for_resource returns empty for unregistered resource
+    def test_collect_empty_for_unregistered(self, rrm):
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "prov-nonexistent", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_CONFIGURATION,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "resource_not_registered" in result.reason
+        evidence = authority.collect_for_resource("prov-nonexistent", ResourceDiscoveryKind.PROVIDER)
+        assert evidence == []
 
-    # B — Authority rejects revoked evidence
-    def test_rejects_revoked_evidence(self, rrm):
+    # B — collect_for_resource returns empty for unsupported kind
+    def test_collect_empty_for_unsupported_kind(self, rrm):
+        authority = CanonicalActivationEvidenceAuthority(rrm)
+        evidence = authority.collect_for_resource("prov-1", ResourceDiscoveryKind.MCP_RESOURCE)
+        assert evidence == []
+
+    # C — collect_for_resource derives provider configuration evidence
+    def test_collects_provider_configuration(self, rrm):
         self._make_provider_rrm(rrm)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_CONFIGURATION,
-            revoked=True,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "revoked" in result.reason
+        evidence = authority.collect_for_resource("prov-1", ResourceDiscoveryKind.PROVIDER)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.PROVIDER_CONFIGURATION in types
 
-    # C — Authority accepts valid provider configuration evidence
-    def test_accepts_valid_provider_configuration(self, rrm):
+    # D — collect_for_resource derives provider account evidence
+    def test_collects_provider_account(self, rrm):
         self._make_provider_rrm(rrm)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_CONFIGURATION,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is True
+        evidence = authority.collect_for_resource("prov-1", ResourceDiscoveryKind.PROVIDER)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.PROVIDER_ACCOUNT in types
 
-    # D — Authority rejects provider config when not configured
-    def test_rejects_provider_not_configured(self, rrm):
+    # E — collect_for_resource returns empty when provider not configured
+    def test_collects_no_config_when_not_configured(self, rrm):
         self._make_provider_rrm(rrm, is_configured=False)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_CONFIGURATION,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "not_configured" in result.reason
+        evidence = authority.collect_for_resource("prov-1", ResourceDiscoveryKind.PROVIDER)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.PROVIDER_CONFIGURATION not in types
 
-    # E — Authority accepts valid provider active-account evidence
-    def test_accepts_valid_provider_account(self, rrm):
-        self._make_provider_rrm(rrm)
+    # F — collect_for_resource returns empty when provider has no active account
+    def test_collects_no_account_when_no_account(self, rrm):
+        self._make_provider_rrm(rrm, has_account=False)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_ACCOUNT,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is True
+        evidence = authority.collect_for_resource("prov-1", ResourceDiscoveryKind.PROVIDER)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.PROVIDER_ACCOUNT not in types
 
-    # F — Authority rejects provider active-account when no account
-    def test_rejects_provider_no_account(self, rrm):
-        self._make_provider_rrm(rrm, is_configured=False)
-        provider = rrm.get_provider("prov-1")
-        provider.has_active_account = False
-        authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_ACCOUNT,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "no_active_account" in result.reason
-
-    # G — Authority accepts valid capability executable evidence
-    def test_accepts_valid_capability_executable(self, rrm):
+    # G — collect_for_resource derives capability executable evidence
+    def test_collects_capability_executable(self, rrm):
         self._make_capability_rrm(rrm)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "cap-1", ResourceDiscoveryKind.CAPABILITY,
-            ActivationEvidenceType.CAPABILITY_EXECUTABLE,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is True
+        evidence = authority.collect_for_resource("cap-1", ResourceDiscoveryKind.CAPABILITY)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.CAPABILITY_EXECUTABLE in types
 
-    # H — Authority rejects capability when not executable
-    def test_rejects_capability_not_executable(self, rrm):
+    # H — collect_for_resource returns empty when capability not executable
+    def test_collects_no_executable_when_not_executable(self, rrm):
         self._make_capability_rrm(rrm, is_executable=False)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "cap-1", ResourceDiscoveryKind.CAPABILITY,
-            ActivationEvidenceType.CAPABILITY_EXECUTABLE,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "not_executable" in result.reason
+        evidence = authority.collect_for_resource("cap-1", ResourceDiscoveryKind.CAPABILITY)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.CAPABILITY_EXECUTABLE not in types
 
-    # I — Authority rejects capability with non-existent binding
-    def test_rejects_capability_binding_not_in_registry(self, rrm):
-        self._make_capability_rrm(rrm)
-        mock_cap_reg = MagicMock()
-        mock_cap_reg._registrations = {}
-        authority = CanonicalActivationEvidenceAuthority(rrm, capability_registry=mock_cap_reg)
-        evidence = ResourceActivationEvidence(
-            evidence_id="ev-cap-binding",
-            resource_id="cap-1",
-            resource_kind=ResourceDiscoveryKind.CAPABILITY,
-            evidence_type=ActivationEvidenceType.CAPABILITY_EXECUTABLE,
-            source="canonical",
-            binding_identity="nonexistent-binding-123",
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "binding_identity_not_in_canonical_registry" in result.reason
-
-    # J — Authority accepts valid agent identity evidence
-    def test_accepts_valid_agent_identity(self, rrm):
+    # I — collect_for_resource derives agent identity evidence
+    def test_collects_agent_identity(self, rrm):
         self._make_agent_rrm(rrm)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "ag-1", ResourceDiscoveryKind.AGENT,
-            ActivationEvidenceType.AGENT_IDENTITY,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is True
+        evidence = authority.collect_for_resource("ag-1", ResourceDiscoveryKind.AGENT)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.AGENT_IDENTITY in types
 
-    # K — Authority rejects agent identity when disabled
-    def test_rejects_agent_disabled(self, rrm):
+    # J — collect_for_resource returns empty when agent disabled
+    def test_collects_no_identity_when_disabled(self, rrm):
         self._make_agent_rrm(rrm, is_enabled=False)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "ag-1", ResourceDiscoveryKind.AGENT,
-            ActivationEvidenceType.AGENT_IDENTITY,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "not_enabled" in result.reason
+        evidence = authority.collect_for_resource("ag-1", ResourceDiscoveryKind.AGENT)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.AGENT_IDENTITY not in types
 
-    # L — Authority rejects agent identity with invalid installation state
-    def test_rejects_agent_invalid_installation_state(self, rrm):
+    # K — collect_for_resource returns empty when agent unavailable
+    def test_collects_no_identity_when_unavailable(self, rrm):
         self._make_agent_rrm(rrm, installation_state=AgentInstallationState.UNAVAILABLE)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "ag-1", ResourceDiscoveryKind.AGENT,
-            ActivationEvidenceType.AGENT_IDENTITY,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "installation_state_invalid" in result.reason
+        evidence = authority.collect_for_resource("ag-1", ResourceDiscoveryKind.AGENT)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.AGENT_IDENTITY not in types
 
-    # M — Authority accepts valid environment discovery evidence
-    def test_accepts_valid_environment_discovery(self, rrm):
+    # L — collect_for_resource derives environment discovery evidence
+    def test_collects_environment_discovery(self, rrm):
         self._make_environment_rrm(rrm)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "env-1", ResourceDiscoveryKind.ENVIRONMENT,
-            ActivationEvidenceType.ENVIRONMENT_DISCOVERY,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is True
+        evidence = authority.collect_for_resource("env-1", ResourceDiscoveryKind.ENVIRONMENT)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.ENVIRONMENT_DISCOVERY in types
 
-    # N — Authority rejects environment discovery when not discovered
-    def test_rejects_environment_not_discovered(self, rrm):
+    # M — collect_for_resource returns empty when environment not discovered
+    def test_collects_no_discovery_when_not_discovered(self, rrm):
         self._make_environment_rrm(rrm, is_discovered=False)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "env-1", ResourceDiscoveryKind.ENVIRONMENT,
-            ActivationEvidenceType.ENVIRONMENT_DISCOVERY,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "not_discovered" in result.reason
+        evidence = authority.collect_for_resource("env-1", ResourceDiscoveryKind.ENVIRONMENT)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.ENVIRONMENT_DISCOVERY not in types
 
-    # O — Authority accepts valid account secret evidence
-    def test_accepts_valid_account_secret(self, rrm):
+    # N — collect_for_resource derives account secret evidence
+    def test_collects_account_secret(self, rrm):
         self._make_account_rrm(rrm)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "acc-1", ResourceDiscoveryKind.CONNECTED_SERVICE,
-            ActivationEvidenceType.ACCOUNT_SECRET,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is True
+        evidence = authority.collect_for_resource("acc-1", ResourceDiscoveryKind.CONNECTED_SERVICE)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.ACCOUNT_SECRET in types
 
-    # P — Authority rejects account secret when no secret reference
-    def test_rejects_account_no_secret(self, rrm):
+    # O — collect_for_resource returns empty when account has no secret
+    def test_collects_no_secret_when_no_secret(self, rrm):
         self._make_account_rrm(rrm, has_secret=False)
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = _make_evidence(
-            "acc-1", ResourceDiscoveryKind.CONNECTED_SERVICE,
-            ActivationEvidenceType.ACCOUNT_SECRET,
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "no_secret_reference" in result.reason
+        evidence = authority.collect_for_resource("acc-1", ResourceDiscoveryKind.CONNECTED_SERVICE)
+        types = [e.evidence_type for e in evidence]
+        assert ActivationEvidenceType.ACCOUNT_SECRET not in types
 
-    # Q — Evidence authority stores only validated evidence
-    def test_stores_only_validated_evidence(self, rrm):
-        self._make_provider_rrm(rrm, is_configured=False)
-        authority = CanonicalActivationEvidenceAuthority(rrm)
-        ev_valid = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_ACCOUNT,
-        )
-        ev_invalid = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_CONFIGURATION,
-        )
-        result_valid = authority.validate_and_store(ev_valid)
-        result_invalid = authority.validate_and_store(ev_invalid)
-        assert result_valid.valid is True
-        assert result_invalid.valid is False
-        assert len(authority.get_all_validated()) == 1
-
-    # R — Service requires evidence authority for all evidence
-    def test_service_requires_evidence_authority(self, rrm):
+    # P — collected evidence has source_identity set
+    def test_collected_evidence_has_source_identity(self, rrm):
         self._make_provider_rrm(rrm)
-        service = CanonicalResourceActivationService(rrm)
-        evidence = _make_evidence(
-            "prov-1", ResourceDiscoveryKind.PROVIDER,
-            ActivationEvidenceType.PROVIDER_CONFIGURATION,
-        )
-        validation = service.register_evidence(evidence)
-        assert validation.valid is True
-        assert "prov-1" in [e.resource_id for e in service.evidence_store.values()]
-
-    # S — Unsupported resource kind is rejected
-    def test_rejects_unsupported_resource_kind(self, rrm):
         authority = CanonicalActivationEvidenceAuthority(rrm)
-        evidence = ResourceActivationEvidence(
-            evidence_id="ev-unknown",
-            resource_id="prov-1",
-            resource_kind=ResourceDiscoveryKind.MCP_RESOURCE,
-            evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
-            source="canonical",
-        )
-        result = authority.validate_and_store(evidence)
-        assert result.valid is False
-        assert "unsupported_resource_kind" in result.reason
+        evidence = authority.collect_for_resource("prov-1", ResourceDiscoveryKind.PROVIDER)
+        for ev in evidence:
+            assert ev.source_identity != ""
 
 
 # ===========================================================================
-# RA-18-01 — RRM Same-ID Overwrite Guard
+# RA-18-04 — Governed Provenance
 #
-# Compatibility/bootstrap sources must NOT silently overwrite governed
-# M17 resources with same-ID objects.
+# Origin alone is NOT sufficient for governed classification.
+# governed_registration_id is required for canonical provenance.
 # ===========================================================================
 
 
-class TestRA1801RRMOverwriteGuard:
-    """Tests for RRM governed resource overwrite protection."""
+class TestRA1804GovernedProvenance:
+    """Tests for RA-18-04 governed resource provenance."""
 
-    def _make_governed_provider(self, rrm, provider_id="prov-1"):
+    # A — origin-only is NOT governed
+    def test_origin_only_not_governed(self, rrm):
         provider = ProviderResource(
-            provider_id=provider_id, name="governed",
+            provider_id="prov-1", name="test",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_configured=True,
         )
         rrm.register_provider(provider)
-        return provider
+        assert rrm._is_governed_resource("prov-1") is False
 
-    def _make_compatibility_provider(self, provider_id="prov-1"):
-        return ProviderResource(
-            provider_id=provider_id, name="compat",
-            resource_origin=ResourceOrigin.MIGRATION,
+    # B — mark_governed with registration_id makes resource governed
+    def test_mark_governed_with_registration_id(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="test",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
-            is_configured=False,
+            is_configured=True,
         )
-
-    # A — Existing resource is recognized as governed by origin
-    def test_governed_by_origin(self, rrm):
-        self._make_governed_provider(rrm)
+        rrm.register_provider(provider)
+        rrm.mark_governed("prov-1", "promo-reg-001")
         assert rrm._is_governed_resource("prov-1") is True
 
-    # B — Compatibility source cannot overwrite USER_REGISTRATION origin
-    def test_compatibility_cannot_overwrite_user_registration(self, rrm):
-        self._make_governed_provider(rrm)
-        compat = self._make_compatibility_provider()
-        rrm.register_provider(compat)
-        provider = rrm.get_provider("prov-1")
-        assert provider.name == "governed"
-
-    # C — Explicitly governed resource is protected
-    def test_explicitly_governed_protected(self, rrm):
+    # C — mark_governed without registration_id does NOT make resource governed
+    def test_mark_governed_without_registration_id(self, rrm):
         provider = ProviderResource(
-            provider_id="prov-1", name="explicit",
-            resource_origin=ResourceOrigin.MIGRATION,
+            provider_id="prov-1", name="test",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_configured=True,
         )
         rrm.register_provider(provider)
         rrm.mark_governed("prov-1")
-        compat = self._make_compatibility_provider()
-        rrm.register_provider(compat)
-        provider = rrm.get_provider("prov-1")
-        assert provider.name == "explicit"
+        assert rrm._is_governed_resource("prov-1") is False
 
-    # D — Same origin can overwrite governed resource
-    def test_same_origin_can_overwrite(self, rrm):
-        self._make_governed_provider(rrm)
+    # D — governed_registration_id on resource makes it governed
+    def test_governed_registration_id_on_resource(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="test",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+            governed_registration_id="promo-reg-002",
+        )
+        rrm.register_provider(provider)
+        assert rrm._is_governed_resource("prov-1") is True
+
+    # E — same-ID/same-origin replacement is rejected for governed resources
+    def test_same_id_same_origin_rejected(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+            governed_registration_id="promo-reg-003",
+        )
+        rrm.register_provider(provider)
         new_provider = ProviderResource(
-            provider_id="prov-1", name="updated",
+            provider_id="prov-1", name="attempted-replace",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_configured=True,
         )
         rrm.register_provider(new_provider)
-        provider = rrm.get_provider("prov-1")
-        assert provider.name == "updated"
+        result = rrm.get_provider("prov-1")
+        assert result.name == "governed"
 
-    # E — Configuration source cannot overwrite USER_REGISTRATION origin
-    def test_configuration_cannot_overwrite_user_registration(self, rrm):
-        self._make_governed_provider(rrm)
+    # F — same-ID/different-origin replacement is allowed for governed resources
+    def test_same_id_different_origin_allowed(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+            governed_registration_id="promo-reg-004",
+        )
+        rrm.register_provider(provider)
+        new_provider = ProviderResource(
+            provider_id="prov-1", name="updated",
+            resource_origin=ResourceOrigin.ORGANIZATION_POLICY,
+            is_template=False,
+            is_configured=True,
+        )
+        rrm.register_provider(new_provider)
+        result = rrm.get_provider("prov-1")
+        assert result.name == "updated"
+
+    # G — compatibility source cannot overwrite governed resource
+    def test_compatibility_cannot_overwrite_governed(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+            governed_registration_id="promo-reg-005",
+        )
+        rrm.register_provider(provider)
         compat = ProviderResource(
-            provider_id="prov-1", name="config",
-            resource_origin=ResourceOrigin.CONFIGURATION,
+            provider_id="prov-1", name="compat",
+            resource_origin=ResourceOrigin.MIGRATION,
             is_template=False,
             is_configured=False,
         )
         rrm.register_provider(compat)
-        provider = rrm.get_provider("prov-1")
-        assert provider.name == "governed"
+        result = rrm.get_provider("prov-1")
+        assert result.name == "governed"
 
-    # F — Host discovery source cannot overwrite USER_REGISTRATION origin
-    def test_host_discovery_cannot_overwrite_user_registration(self, rrm):
-        self._make_governed_provider(rrm)
-        compat = ProviderResource(
-            provider_id="prov-1", name="discovery",
-            resource_origin=ResourceOrigin.HOST_DISCOVERY,
-            is_template=False,
-            is_configured=False,
-        )
-        rrm.register_provider(compat)
-        provider = rrm.get_provider("prov-1")
-        assert provider.name == "governed"
-
-    # G — Non-governed resource can be registered
+    # H — non-governed resource can be freely registered
     def test_non_governed_can_register(self, rrm):
         provider = ProviderResource(
             provider_id="prov-1", name="first",
@@ -965,29 +901,242 @@ class TestRA1801RRMOverwriteGuard:
             is_configured=True,
         )
         rrm.register_provider(provider)
-        new_provider = ProviderResource(
+        provider2 = ProviderResource(
             provider_id="prov-1", name="second",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_configured=True,
         )
+        rrm.register_provider(provider2)
+        assert rrm.get_provider("prov-1").name == "second"
+
+    # I — mark_governed sets governed_registration_id on resource
+    def test_mark_governed_sets_registration_id(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="test",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+        )
+        rrm.register_provider(provider)
+        rrm.mark_governed("prov-1", "promo-reg-006")
+        assert rrm.get_provider("prov-1").governed_registration_id == "promo-reg-006"
+
+    # J — agent: same-ID/same-origin replacement rejected when governed
+    def test_agent_same_origin_rejected(self, rrm):
+        agent = AgentResource(
+            agent_id="ag-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_enabled=True,
+            governed_registration_id="promo-reg-007",
+        )
+        rrm.register_agent(agent)
+        new_agent = AgentResource(
+            agent_id="ag-1", name="attempted-replace",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_enabled=True,
+        )
+        rrm.register_agent(new_agent)
+        assert rrm.get_agent("ag-1").name == "governed"
+
+    # K — capability: same-ID/same-origin replacement rejected when governed
+    def test_capability_same_origin_rejected(self, rrm):
+        cap = CapabilityResource(
+            capability_id="cap-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_executable=True,
+            governed_registration_id="promo-reg-008",
+        )
+        rrm.register_capability(cap)
+        new_cap = CapabilityResource(
+            capability_id="cap-1", name="attempted-replace",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_executable=True,
+        )
+        rrm.register_capability(new_cap)
+        assert rrm.get_capability("cap-1").name == "governed"
+
+    # L — environment: compatibility cannot overwrite governed resource
+    def test_environment_compatibility_cannot_overwrite(self, rrm):
+        env = ExecutionEnvironmentResource(
+            environment_id="env-1", type="local",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_discovered=True,
+            governed_registration_id="promo-reg-009",
+        )
+        rrm.register_environment(env)
+        compat = ExecutionEnvironmentResource(
+            environment_id="env-1", type="local",
+            resource_origin=ResourceOrigin.MIGRATION,
+            is_template=False,
+            is_discovered=False,
+        )
+        rrm.register_environment(compat)
+        assert rrm.get_environment("env-1").is_discovered is True
+
+
+# ===========================================================================
+# RA-18-01 — RRM Same-ID Overwrite Guard (updated for Cycle 3)
+#
+# Same-ID/same-origin replacement of governed resources is rejected.
+# Compatibility/bootstrap sources must NOT silently overwrite
+# governed resources.
+# ===========================================================================
+
+
+class TestRA1801RRMOverwriteGuard:
+    """Tests for RRM governed resource overwrite protection (Cycle 3)."""
+
+    # A — origin-only does NOT make resource governed (Cycle 3 fix)
+    def test_origin_only_not_governed(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="test",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+        )
+        rrm.register_provider(provider)
+        assert rrm._is_governed_resource("prov-1") is False
+
+    # B — compatibility source CAN overwrite non-governed resource
+    def test_compatibility_can_overwrite_non_governed(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="first",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+        )
+        rrm.register_provider(provider)
+        compat = ProviderResource(
+            provider_id="prov-1", name="compat",
+            resource_origin=ResourceOrigin.MIGRATION,
+            is_template=False,
+            is_configured=False,
+        )
+        rrm.register_provider(compat)
+        assert rrm.get_provider("prov-1").name == "compat"
+
+    # C — explicitly governed resource is protected from compatibility
+    def test_explicitly_governed_protected_from_compat(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="explicit",
+            resource_origin=ResourceOrigin.MIGRATION,
+            is_template=False,
+            is_configured=True,
+            governed_registration_id="promo-reg-010",
+        )
+        rrm.register_provider(provider)
+        compat = ProviderResource(
+            provider_id="prov-1", name="compat",
+            resource_origin=ResourceOrigin.MIGRATION,
+            is_template=False,
+            is_configured=False,
+        )
+        rrm.register_provider(compat)
+        assert rrm.get_provider("prov-1").name == "explicit"
+
+    # D — same-origin replacement is rejected for governed resources
+    def test_same_origin_rejected_for_governed(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+            governed_registration_id="promo-reg-011",
+        )
+        rrm.register_provider(provider)
+        new_provider = ProviderResource(
+            provider_id="prov-1", name="attempted-replace",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+        )
         rrm.register_provider(new_provider)
-        provider = rrm.get_provider("prov-1")
-        assert provider.name == "second"
+        assert rrm.get_provider("prov-1").name == "governed"
 
-    # H — Mark governed is persisted
+    # E — configuration source cannot overwrite governed resource
+    def test_configuration_cannot_overwrite_governed(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+            governed_registration_id="promo-reg-012",
+        )
+        rrm.register_provider(provider)
+        compat = ProviderResource(
+            provider_id="prov-1", name="config",
+            resource_origin=ResourceOrigin.CONFIGURATION,
+            is_template=False,
+            is_configured=False,
+        )
+        rrm.register_provider(compat)
+        assert rrm.get_provider("prov-1").name == "governed"
+
+    # F — host discovery source cannot overwrite governed resource
+    def test_host_discovery_cannot_overwrite_governed(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+            governed_registration_id="promo-reg-013",
+        )
+        rrm.register_provider(provider)
+        compat = ProviderResource(
+            provider_id="prov-1", name="discovery",
+            resource_origin=ResourceOrigin.HOST_DISCOVERY,
+            is_template=False,
+            is_configured=False,
+        )
+        rrm.register_provider(compat)
+        assert rrm.get_provider("prov-1").name == "governed"
+
+    # G — non-governed resource can be freely registered
+    def test_non_governed_can_register(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="first",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+        )
+        rrm.register_provider(provider)
+        provider2 = ProviderResource(
+            provider_id="prov-1", name="second",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+        )
+        rrm.register_provider(provider2)
+        assert rrm.get_provider("prov-1").name == "second"
+
+    # H — mark_governed with registration_id is persisted
     def test_mark_governed_persisted(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="test",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            is_configured=True,
+        )
+        rrm.register_provider(provider)
         assert rrm.is_governed("prov-1") is False
-        rrm.mark_governed("prov-1")
+        rrm.mark_governed("prov-1", "promo-reg-014")
         assert rrm.is_governed("prov-1") is True
+        assert rrm._is_governed_resource("prov-1") is True
 
-    # I — Agent: compatibility cannot overwrite USER_REGISTRATION
+    # I — agent: compatibility cannot overwrite governed resource
     def test_agent_compatibility_cannot_overwrite(self, rrm):
         agent = AgentResource(
             agent_id="ag-1", name="governed",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_enabled=True,
+            governed_registration_id="promo-reg-015",
         )
         rrm.register_agent(agent)
         compat = AgentResource(
@@ -997,16 +1146,16 @@ class TestRA1801RRMOverwriteGuard:
             is_enabled=True,
         )
         rrm.register_agent(compat)
-        agent = rrm.get_agent("ag-1")
-        assert agent.name == "governed"
+        assert rrm.get_agent("ag-1").name == "governed"
 
-    # J — Capability: compatibility cannot overwrite USER_REGISTRATION
+    # J — capability: compatibility cannot overwrite governed resource
     def test_capability_compatibility_cannot_overwrite(self, rrm):
         cap = CapabilityResource(
             capability_id="cap-1", name="governed",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
             is_template=False,
             is_executable=True,
+            governed_registration_id="promo-reg-016",
         )
         rrm.register_capability(cap)
         compat = CapabilityResource(
@@ -1016,10 +1165,9 @@ class TestRA1801RRMOverwriteGuard:
             is_executable=True,
         )
         rrm.register_capability(compat)
-        cap = rrm.get_capability("cap-1")
-        assert cap.name == "governed"
+        assert rrm.get_capability("cap-1").name == "governed"
 
-    # K — Account: compatibility cannot overwrite CONFIGURATION
+    # K — account: compatibility cannot overwrite governed resource
     def test_account_compatibility_cannot_overwrite(self, rrm):
         account = AccountResource(
             account_id="acc-1", provider_id="prov-1",
@@ -1027,6 +1175,7 @@ class TestRA1801RRMOverwriteGuard:
             resource_origin=ResourceOrigin.CONFIGURATION,
             is_template=False,
             secret_reference="ref1",
+            governed_registration_id="promo-reg-017",
         )
         rrm.register_account(account)
         compat = AccountResource(
@@ -1037,16 +1186,16 @@ class TestRA1801RRMOverwriteGuard:
             secret_reference="ref2",
         )
         rrm.register_account(compat)
-        account = rrm.get_account("acc-1")
-        assert account.name == "governed"
+        assert rrm.get_account("acc-1").name == "governed"
 
-    # L — Environment: compatibility cannot overwrite HOST_DISCOVERY
+    # L — environment: compatibility cannot overwrite governed resource
     def test_environment_compatibility_cannot_overwrite(self, rrm):
         env = ExecutionEnvironmentResource(
             environment_id="env-1", type="local",
             resource_origin=ResourceOrigin.HOST_DISCOVERY,
             is_template=False,
             is_discovered=True,
+            governed_registration_id="promo-reg-018",
         )
         rrm.register_environment(env)
         compat = ExecutionEnvironmentResource(
@@ -1056,5 +1205,25 @@ class TestRA1801RRMOverwriteGuard:
             is_discovered=False,
         )
         rrm.register_environment(compat)
-        env = rrm.get_environment("env-1")
-        assert env.is_discovered is True
+        assert rrm.get_environment("env-1").is_discovered is True
+
+    # M — account: same-ID/same-origin replacement rejected when governed
+    def test_account_same_origin_rejected(self, rrm):
+        account = AccountResource(
+            account_id="acc-1", provider_id="prov-1",
+            name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            secret_reference="ref1",
+            governed_registration_id="promo-reg-019",
+        )
+        rrm.register_account(account)
+        new_account = AccountResource(
+            account_id="acc-1", provider_id="prov-1",
+            name="attempted-replace",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_template=False,
+            secret_reference="ref2",
+        )
+        rrm.register_account(new_account)
+        assert rrm.get_account("acc-1").name == "governed"

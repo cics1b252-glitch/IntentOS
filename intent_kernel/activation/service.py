@@ -62,7 +62,7 @@ class CanonicalResourceActivationService:
         self._authority = CanonicalResourceActivationAuthority(rrm)
         self._application_boundary = ActivationApplicationBoundary(
             rrm, self._requests, self._decisions, self._consumed_decisions,
-            self._evidence_store,
+            self._evidence_store, self._evidence_authority,
         )
 
     # ------------------------------------------------------------------
@@ -98,8 +98,26 @@ class CanonicalResourceActivationService:
         return dict(self._evidence_store)
 
     # ------------------------------------------------------------------
-    # Evidence management
+    # Evidence management — derive from canonical sources only
     # ------------------------------------------------------------------
+
+    def collect_and_register_evidence(
+        self,
+        resource_id: str,
+        resource_kind: ResourceDiscoveryKind,
+    ) -> list[ResourceActivationEvidence]:
+        """Derive ALL valid prerequisite evidence from canonical sources.
+
+        This is the ONLY trusted entry point. Callers do NOT construct
+        evidence objects — the authority derives them by querying the
+        canonical source directly.
+        """
+        evidence_list = self._evidence_authority.collect_for_resource(resource_id, resource_kind)
+        for evidence in evidence_list:
+            self._evidence_store[evidence.evidence_id] = evidence
+            self._authority.register_evidence(evidence)
+            self._application_boundary.update_evidence(evidence)
+        return evidence_list
 
     def register_evidence(
         self,
@@ -107,6 +125,7 @@ class CanonicalResourceActivationService:
     ) -> EvidenceValidationResult:
         """Register prerequisite evidence for activation evaluation.
 
+        DEPRECATED: use collect_and_register_evidence() instead.
         Evidence is validated against canonical sources before storage.
         CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
         """

@@ -101,6 +101,7 @@ class ProviderResource:
     is_configured: bool = True
     has_active_account: bool = True
     endpoint_url: Optional[str] = None
+    governed_registration_id: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -130,6 +131,7 @@ class ProviderResource:
             d["resource_origin"] = ResourceOrigin(d["resource_origin"])
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
+        d.setdefault("governed_registration_id", "")
         return cls(**d)
 
 
@@ -151,6 +153,7 @@ class AccountResource:
     is_template: bool = False
     is_configured: bool = True
     allowed_policies: List[str] = field(default_factory=list)
+    governed_registration_id: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -180,6 +183,7 @@ class AccountResource:
             d["resource_origin"] = ResourceOrigin(d["resource_origin"])
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
+        d.setdefault("governed_registration_id", "")
         return cls(**d)
 
 
@@ -200,6 +204,7 @@ class ExecutionEnvironmentResource:
     latency_class: str = "low"  # "ultra_low", "low", "medium", "high"
     cost_class: str = "free"  # "free", "low", "medium", "high"
     resource_limits: Dict[str, Any] = field(default_factory=dict)
+    governed_registration_id: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -232,6 +237,7 @@ class ExecutionEnvironmentResource:
             d["resource_origin"] = ResourceOrigin(d["resource_origin"])
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
+        d.setdefault("governed_registration_id", "")
         return cls(**d)
 
 
@@ -253,6 +259,7 @@ class CapabilityResource:
     availability_source: AvailabilitySource = AvailabilitySource.UNKNOWN
     is_template: bool = False
     is_executable: bool = True
+    governed_registration_id: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -282,6 +289,7 @@ class CapabilityResource:
             d["resource_origin"] = ResourceOrigin(d["resource_origin"])
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
+        d.setdefault("governed_registration_id", "")
         return cls(**d)
 
 
@@ -304,6 +312,7 @@ class AgentResource:
     cost_tier: float = 0.01  # Normalized cost metric
     latency_tier: float = 0.2  # Normalized latency in seconds
     supported_domains: List[str] = field(default_factory=list)
+    governed_registration_id: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -341,6 +350,7 @@ class AgentResource:
             d["resource_origin"] = ResourceOrigin(d["resource_origin"])
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
+        d.setdefault("governed_registration_id", "")
         return cls(**d)
 
 
@@ -363,6 +373,7 @@ class ProjectResource:
     assigned_environments: List[str] = field(default_factory=list)
     budget_limit: float = 1000.0
     consumed_budget: float = 0.0
+    governed_registration_id: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -390,6 +401,7 @@ class ProjectResource:
             d["resource_origin"] = ResourceOrigin(d["resource_origin"])
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
+        d.setdefault("governed_registration_id", "")
         return cls(**d)
 
 

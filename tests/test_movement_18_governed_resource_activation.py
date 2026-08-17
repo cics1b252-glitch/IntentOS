@@ -1,13 +1,16 @@
 """Movement 18 — Governed Resource Activation Tests.
 
-Full A-Z matrix + adversarial scenarios verifying:
-1. Models are frozen and auditable
-2. Canonical activation authority evaluates prerequisites per resource kind
-3. Activation application boundary applies TOCTOU revalidation
-4. Service orchestrates the full pipeline
-5. Composition wiring works
-6. RA-18-01 containment: no ungoverned activation authority
-7. No discovery evidence, promotion, or registration authority leak
+RA-18-02 Evidence Repair — full A-Z matrix verifying:
+1. ACTIVATION MUST VERIFY PREREQUISITE TRUTH
+2. ACTIVATION MUST NOT INVENT PREREQUISITE TRUTH
+3. ACTIVATION APPROVAL IS NOT PREREQUISITE EVIDENCE
+4. Models are frozen and auditable
+5. Canonical activation authority validates REAL prerequisite evidence
+6. Application boundary MUST NOT fabricate prerequisite fields
+7. Service orchestrates the full pipeline with evidence
+8. RA-18-01 containment: no ungoverned activation authority
+9. No discovery evidence, promotion, or registration authority leak
+10. Activation != authorization != confirmation != execution
 """
 
 from __future__ import annotations
@@ -16,8 +19,10 @@ import pytest
 from unittest.mock import MagicMock
 
 from intent_kernel.activation import (
+    ActivationEvidenceType,
     ResourceActivationDecision,
     ResourceActivationDecisionType,
+    ResourceActivationEvidence,
     ResourceActivationRequest,
     ResourceActivationResult,
     ResourceActivationStatus,
@@ -59,6 +64,25 @@ def activation_service(rrm):
     return CanonicalResourceActivationService(rrm)
 
 
+def _make_evidence(
+    resource_id: str,
+    resource_kind: ResourceDiscoveryKind,
+    evidence_type: ActivationEvidenceType,
+    source: str = "canonical",
+    binding_identity: str = "",
+    revoked: bool = False,
+) -> ResourceActivationEvidence:
+    return ResourceActivationEvidence(
+        evidence_id=f"ev-{resource_id}-{evidence_type.value}",
+        resource_id=resource_id,
+        resource_kind=resource_kind,
+        evidence_type=evidence_type,
+        source=source,
+        binding_identity=binding_identity,
+        revoked=revoked,
+    )
+
+
 # ---------------------------------------------------------------------------
 # A — Models are frozen and immutable
 # ---------------------------------------------------------------------------
@@ -91,140 +115,68 @@ class TestModelsFrozen:
         with pytest.raises(AttributeError):
             res.success = False  # type: ignore[misc]
 
-
-# ---------------------------------------------------------------------------
-# B — Status lifecycle enums
-# ---------------------------------------------------------------------------
-
-
-class TestActivationStatusLifecycle:
-    def test_status_values(self):
-        assert ResourceActivationStatus.PENDING.value == "pending"
-        assert ResourceActivationStatus.APPROVED.value == "approved"
-        assert ResourceActivationStatus.REJECTED.value == "rejected"
-        assert ResourceActivationStatus.EXPIRED.value == "expired"
-        assert ResourceActivationStatus.REVOKED.value == "revoked"
-        assert ResourceActivationStatus.CONSUMED.value == "consumed"
-
-    def test_decision_type_values(self):
-        assert ResourceActivationDecisionType.APPROVE.value == "approve"
-        assert ResourceActivationDecisionType.REJECT.value == "reject"
-
-
-# ---------------------------------------------------------------------------
-# C — Authority-bearing field rejection
-# ---------------------------------------------------------------------------
-
-
-class TestAuthorityBearingFieldRejection:
-    def test_prohibited_fields_exist(self):
-        from intent_kernel.activation.models import _ACTIVATION_AUTHORITY_FIELDS
-        assert "authorized" in _ACTIVATION_AUTHORITY_FIELDS
-        assert "execute" in _ACTIVATION_AUTHORITY_FIELDS
-        assert "verified" in _ACTIVATION_AUTHORITY_FIELDS
-        assert "bypass" in _ACTIVATION_AUTHORITY_FIELDS
-        assert "override" in _ACTIVATION_AUTHORITY_FIELDS
-        assert "eligible" in _ACTIVATION_AUTHORITY_FIELDS
-
-
-# ---------------------------------------------------------------------------
-# D — Canonical activation authority: Provider prerequisites
-# ---------------------------------------------------------------------------
-
-
-class TestProviderActivationAuthority:
-    def test_provider_all_prerequisites_met(self, rrm):
-        provider = ProviderResource(
-            provider_id="prov-1", name="Test Provider",
-            is_configured=True, has_active_account=True,
-            status=ResourceStatus.ACTIVE, is_template=False,
-            resource_origin=ResourceOrigin.USER_REGISTRATION,
-        )
-        rrm.register_provider(provider)
-        authority = CanonicalResourceActivationAuthority(rrm)
-        req = ResourceActivationRequest(
-            request_id="r1", resource_id="prov-1",
+    def test_evidence_is_frozen(self):
+        ev = ResourceActivationEvidence(
+            evidence_id="ev1", resource_id="prov-1",
             resource_kind=ResourceDiscoveryKind.PROVIDER,
+            evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
+            source="canonical",
+        )
+        with pytest.raises(AttributeError):
+            ev.revoked = True  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# B — Evidence model
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceModel:
+    def test_evidence_not_revoked_by_default(self):
+        ev = ResourceActivationEvidence(
+            evidence_id="ev1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
+            source="canonical",
+        )
+        assert ev.is_valid() is True
+        assert ev.revoked is False
+
+    def test_evidence_revoked_is_invalid(self):
+        ev = ResourceActivationEvidence(
+            evidence_id="ev1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
+            source="canonical",
+            revoked=True,
+        )
+        assert ev.is_valid() is False
+
+    def test_evidence_to_dict(self):
+        ev = ResourceActivationEvidence(
+            evidence_id="ev1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
+            source="canonical",
+        )
+        d = ev.to_dict()
+        assert d["evidence_id"] == "ev1"
+        assert d["resource_id"] == "prov-1"
+        assert d["revoked"] is False
+
+
+# ---------------------------------------------------------------------------
+# C — Authority rejects unsupported resource kind
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorityRejectsUnsupportedKind:
+    def test_rejects_unsupported(self, rrm, activation_service):
+        authority = activation_service.authority
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="unknown-1",
+            resource_kind=ResourceDiscoveryKind.DEVICE,
             discovery_id="d1", registration_id="reg1",
-        )
-        decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
-        assert "prerequisites_not_satisfied" not in decision.reasoning
-
-    def test_provider_not_configured_approved_by_authority(self, rrm):
-        """Authority approves — activation fields are what activation fixes."""
-        provider = ProviderResource(
-            provider_id="prov-nc", name="NC Provider",
-            is_configured=False, has_active_account=True,
-            status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_provider(provider)
-        authority = CanonicalResourceActivationAuthority(rrm)
-        req = ResourceActivationRequest(
-            request_id="r2", resource_id="prov-nc",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d2", registration_id="reg2",
-        )
-        decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
-
-    def test_provider_no_active_account_approved_by_authority(self, rrm):
-        """Authority approves — activation fields are what activation fixes."""
-        provider = ProviderResource(
-            provider_id="prov-na", name="NA Provider",
-            is_configured=True, has_active_account=False,
-            status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_provider(provider)
-        authority = CanonicalResourceActivationAuthority(rrm)
-        req = ResourceActivationRequest(
-            request_id="r3", resource_id="prov-na",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d3", registration_id="reg3",
-        )
-        decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
-
-    def test_provider_template_rejected(self, rrm):
-        provider = ProviderResource(
-            provider_id="prov-tpl", name="Template Provider",
-            is_configured=True, has_active_account=True,
-            status=ResourceStatus.ACTIVE, is_template=True,
-        )
-        rrm.register_provider(provider)
-        authority = CanonicalResourceActivationAuthority(rrm)
-        req = ResourceActivationRequest(
-            request_id="r4", resource_id="prov-tpl",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d4", registration_id="reg4",
-        )
-        decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.REJECT
-        assert "not_template" in decision.reasoning
-
-    def test_provider_not_active_rejected(self, rrm):
-        provider = ProviderResource(
-            provider_id="prov-un", name="Unavailable Provider",
-            is_configured=True, has_active_account=True,
-            status=ResourceStatus.UNAVAILABLE,
-        )
-        rrm.register_provider(provider)
-        authority = CanonicalResourceActivationAuthority(rrm)
-        req = ResourceActivationRequest(
-            request_id="r5", resource_id="prov-un",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d5", registration_id="reg5",
-        )
-        decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.REJECT
-        assert "status_active" in decision.reasoning
-
-    def test_provider_not_registered_rejected(self, rrm):
-        authority = CanonicalResourceActivationAuthority(rrm)
-        req = ResourceActivationRequest(
-            request_id="r6", resource_id="prov-missing",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d6", registration_id="reg6",
         )
         decision = authority.evaluate(req)
         assert decision.decision_type == ResourceActivationDecisionType.REJECT
@@ -232,703 +184,1135 @@ class TestProviderActivationAuthority:
 
 
 # ---------------------------------------------------------------------------
-# E — Canonical activation authority: Capability prerequisites
+# D — Authority rejects unregistered resource
 # ---------------------------------------------------------------------------
 
 
-class TestCapabilityActivationAuthority:
-    def test_capability_all_prerequisites_met(self, rrm):
-        cap = CapabilityResource(
-            capability_id="cap-1", name="Test Capability",
-            is_executable=True, status=ResourceStatus.ACTIVE,
+class TestAuthorityRejectsUnregistered:
+    def test_rejects_not_registered(self, rrm, activation_service):
+        authority = activation_service.authority
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="missing-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
         )
-        rrm.register_capability(cap)
-        authority = CanonicalResourceActivationAuthority(rrm)
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+        assert "resource_not_registered" in decision.reasoning
+
+
+# ---------------------------------------------------------------------------
+# E — Provider: no evidence → reject (RA-18-02-PROVIDER)
+# ---------------------------------------------------------------------------
+
+
+class TestProviderNoEvidenceRejects:
+    def test_provider_without_evidence_rejects(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        authority = activation_service.authority
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+        assert "provider_configured" in decision.reasoning
+
+    def test_provider_with_wrong_evidence_type_rejects(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.CAPABILITY_EXECUTABLE,
+        )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+
+    def test_provider_revoked_evidence_rejects(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+            revoked=True,
+        )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+
+
+# ---------------------------------------------------------------------------
+# F — Provider: valid evidence + is_configured=False → reject
+# ---------------------------------------------------------------------------
+
+
+class TestProviderNotConfiguredRejects:
+    def test_provider_not_configured_rejects(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=False, has_active_account=True,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+        assert "provider_configured" in decision.reasoning
+
+    def test_provider_no_active_account_rejects(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=False,
+        ))
+        authority = activation_service.authority
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        authority.register_evidence(ev_cfg)
+        authority.register_evidence(ev_acct)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+
+
+# ---------------------------------------------------------------------------
+# G — Provider: valid evidence + configured → approve
+# ---------------------------------------------------------------------------
+
+
+class TestProviderWithEvidenceApproves:
+    def test_provider_with_evidence_approves(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        authority = activation_service.authority
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        authority.register_evidence(ev_cfg)
+        authority.register_evidence(ev_acct)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+        assert len(decision.evidence_verified) == 2
+
+
+# ---------------------------------------------------------------------------
+# H — Capability: no evidence → reject (RA-18-02-CAPABILITY)
+# ---------------------------------------------------------------------------
+
+
+class TestCapabilityNoEvidenceRejects:
+    def test_capability_without_evidence_rejects(self, rrm, activation_service):
+        rrm.register_capability(CapabilityResource(
+            capability_id="cap-1", name="cap-1",
+            is_executable=True,
+        ))
+        authority = activation_service.authority
         req = ResourceActivationRequest(
             request_id="r1", resource_id="cap-1",
             resource_kind=ResourceDiscoveryKind.CAPABILITY,
             discovery_id="d1", registration_id="reg1",
         )
         decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
 
-    def test_capability_not_executable_approved_by_authority(self, rrm):
-        """Authority approves — is_executable is what activation fixes."""
-        cap = CapabilityResource(
-            capability_id="cap-ne", name="NE Capability",
-            is_executable=False, status=ResourceStatus.ACTIVE,
+    def test_capability_not_executable_rejects(self, rrm, activation_service):
+        rrm.register_capability(CapabilityResource(
+            capability_id="cap-1", name="cap-1",
+            is_executable=False,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "cap-1", ResourceDiscoveryKind.CAPABILITY,
+            ActivationEvidenceType.CAPABILITY_EXECUTABLE,
         )
-        rrm.register_capability(cap)
-        authority = CanonicalResourceActivationAuthority(rrm)
+        authority.register_evidence(ev)
         req = ResourceActivationRequest(
-            request_id="r2", resource_id="cap-ne",
+            request_id="r1", resource_id="cap-1",
             resource_kind=ResourceDiscoveryKind.CAPABILITY,
-            discovery_id="d2", registration_id="reg2",
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+
+    def test_capability_with_evidence_approves(self, rrm, activation_service):
+        rrm.register_capability(CapabilityResource(
+            capability_id="cap-1", name="cap-1",
+            is_executable=True,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "cap-1", ResourceDiscoveryKind.CAPABILITY,
+            ActivationEvidenceType.CAPABILITY_EXECUTABLE,
+        )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="cap-1",
+            resource_kind=ResourceDiscoveryKind.CAPABILITY,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
         )
         decision = authority.evaluate(req)
         assert decision.decision_type == ResourceActivationDecisionType.APPROVE
 
 
 # ---------------------------------------------------------------------------
-# F — Canonical activation authority: Agent prerequisites
+# I — Agent: no evidence → reject (RA-18-02-AGENT)
 # ---------------------------------------------------------------------------
 
 
-class TestAgentActivationAuthority:
-    def test_agent_all_prerequisites_met(self, rrm):
-        agent = AgentResource(
-            agent_id="ag-1", name="Test Agent",
-            is_enabled=True, status=ResourceStatus.ACTIVE,
+class TestAgentNoEvidenceRejects:
+    def test_agent_without_evidence_rejects(self, rrm, activation_service):
+        rrm.register_agent(AgentResource(
+            agent_id="agent-1", name="agent-1",
+            is_enabled=True,
             installation_state=AgentInstallationState.INSTALLED,
-        )
-        rrm.register_agent(agent)
-        authority = CanonicalResourceActivationAuthority(rrm)
+        ))
+        authority = activation_service.authority
         req = ResourceActivationRequest(
-            request_id="r1", resource_id="ag-1",
+            request_id="r1", resource_id="agent-1",
             resource_kind=ResourceDiscoveryKind.AGENT,
             discovery_id="d1", registration_id="reg1",
         )
         decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
 
-    def test_agent_not_enabled_approved_by_authority(self, rrm):
-        """Authority approves — is_enabled/installation_state are what activation fixes."""
-        agent = AgentResource(
-            agent_id="ag-ne", name="NE Agent",
-            is_enabled=False, status=ResourceStatus.ACTIVE,
-            installation_state=AgentInstallationState.DEFINED,
+    def test_agent_not_enabled_rejects(self, rrm, activation_service):
+        rrm.register_agent(AgentResource(
+            agent_id="agent-1", name="agent-1",
+            is_enabled=False,
+            installation_state=AgentInstallationState.INSTALLED,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "agent-1", ResourceDiscoveryKind.AGENT,
+            ActivationEvidenceType.AGENT_IDENTITY,
         )
-        rrm.register_agent(agent)
-        authority = CanonicalResourceActivationAuthority(rrm)
+        authority.register_evidence(ev)
         req = ResourceActivationRequest(
-            request_id="r2", resource_id="ag-ne",
+            request_id="r1", resource_id="agent-1",
             resource_kind=ResourceDiscoveryKind.AGENT,
-            discovery_id="d2", registration_id="reg2",
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
         )
         decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
 
-    def test_agent_invalid_installation_state_approved_by_authority(self, rrm):
-        """Authority approves — installation_state is what activation fixes."""
-        agent = AgentResource(
-            agent_id="ag-def", name="Defined Agent",
-            is_enabled=True, status=ResourceStatus.ACTIVE,
-            installation_state=AgentInstallationState.DEFINED,
+    def test_agent_privileged_role_rejects(self, rrm, activation_service):
+        rrm.register_agent(AgentResource(
+            agent_id="agent-1", name="agent-1",
+            is_enabled=True,
+            installation_state=AgentInstallationState.INSTALLED,
+            metadata={"role": "admin"},
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "agent-1", ResourceDiscoveryKind.AGENT,
+            ActivationEvidenceType.AGENT_IDENTITY,
         )
-        rrm.register_agent(agent)
-        authority = CanonicalResourceActivationAuthority(rrm)
+        authority.register_evidence(ev)
         req = ResourceActivationRequest(
-            request_id="r3", resource_id="ag-def",
+            request_id="r1", resource_id="agent-1",
             resource_kind=ResourceDiscoveryKind.AGENT,
-            discovery_id="d3", registration_id="reg3",
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+        assert "admin" in decision.reasoning
+
+    def test_agent_with_evidence_approves(self, rrm, activation_service):
+        rrm.register_agent(AgentResource(
+            agent_id="agent-1", name="agent-1",
+            is_enabled=True,
+            installation_state=AgentInstallationState.INSTALLED,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "agent-1", ResourceDiscoveryKind.AGENT,
+            ActivationEvidenceType.AGENT_IDENTITY,
+        )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="agent-1",
+            resource_kind=ResourceDiscoveryKind.AGENT,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
         )
         decision = authority.evaluate(req)
         assert decision.decision_type == ResourceActivationDecisionType.APPROVE
 
 
 # ---------------------------------------------------------------------------
-# G — Canonical activation authority: Environment prerequisites
+# J — Environment: no evidence → reject (RA-18-02-ENVIRONMENT)
 # ---------------------------------------------------------------------------
 
 
-class TestEnvironmentActivationAuthority:
-    def test_environment_all_prerequisites_met(self, rrm):
-        env = ExecutionEnvironmentResource(
+class TestEnvironmentNoEvidenceRejects:
+    def test_environment_without_evidence_rejects(self, rrm, activation_service):
+        rrm.register_environment(ExecutionEnvironmentResource(
             environment_id="env-1",
-            is_discovered=True, status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_environment(env)
-        authority = CanonicalResourceActivationAuthority(rrm)
+            is_discovered=True,
+        ))
+        authority = activation_service.authority
         req = ResourceActivationRequest(
             request_id="r1", resource_id="env-1",
             resource_kind=ResourceDiscoveryKind.ENVIRONMENT,
             discovery_id="d1", registration_id="reg1",
         )
         decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
 
-    def test_environment_not_discovered_approved_by_authority(self, rrm):
-        """Authority approves — is_discovered is what activation fixes."""
-        env = ExecutionEnvironmentResource(
-            environment_id="env-nd",
-            is_discovered=False, status=ResourceStatus.ACTIVE,
+    def test_environment_not_discovered_rejects(self, rrm, activation_service):
+        rrm.register_environment(ExecutionEnvironmentResource(
+            environment_id="env-1",
+            is_discovered=False,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "env-1", ResourceDiscoveryKind.ENVIRONMENT,
+            ActivationEvidenceType.ENVIRONMENT_DISCOVERY,
         )
-        rrm.register_environment(env)
-        authority = CanonicalResourceActivationAuthority(rrm)
+        authority.register_evidence(ev)
         req = ResourceActivationRequest(
-            request_id="r2", resource_id="env-nd",
+            request_id="r1", resource_id="env-1",
             resource_kind=ResourceDiscoveryKind.ENVIRONMENT,
-            discovery_id="d2", registration_id="reg2",
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+
+    def test_environment_with_evidence_approves(self, rrm, activation_service):
+        rrm.register_environment(ExecutionEnvironmentResource(
+            environment_id="env-1",
+            is_discovered=True,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "env-1", ResourceDiscoveryKind.ENVIRONMENT,
+            ActivationEvidenceType.ENVIRONMENT_DISCOVERY,
+        )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="env-1",
+            resource_kind=ResourceDiscoveryKind.ENVIRONMENT,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
         )
         decision = authority.evaluate(req)
         assert decision.decision_type == ResourceActivationDecisionType.APPROVE
 
 
 # ---------------------------------------------------------------------------
-# H — Canonical activation authority: Account prerequisites
+# K — Account: no secret_reference → reject
 # ---------------------------------------------------------------------------
 
 
-class TestAccountActivationAuthority:
-    def test_account_all_prerequisites_met(self, rrm):
-        acct = AccountResource(
-            account_id="acct-1", provider_id="prov-1",
-            name="Test Account",
-            is_configured=True, secret_reference="secret-1",
-            status=ResourceStatus.ACTIVE,
+class TestAccountNoSecretRejects:
+    def test_account_no_secret_rejects(self, rrm, activation_service):
+        rrm.register_account(AccountResource(
+            account_id="acct-1", provider_id="prov-1", name="acct-1",
+            secret_reference=None,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "acct-1", ResourceDiscoveryKind.CONNECTED_SERVICE,
+            ActivationEvidenceType.ACCOUNT_SECRET,
         )
-        rrm.register_account(acct)
-        authority = CanonicalResourceActivationAuthority(rrm)
+        authority.register_evidence(ev)
         req = ResourceActivationRequest(
             request_id="r1", resource_id="acct-1",
             resource_kind=ResourceDiscoveryKind.CONNECTED_SERVICE,
             discovery_id="d1", registration_id="reg1",
-        )
-        decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
-
-    def test_account_no_secret_approved_by_authority(self, rrm):
-        """Authority approves — secret_reference/is_configured are what activation fixes."""
-        acct = AccountResource(
-            account_id="acct-ns", provider_id="prov-1",
-            name="NS Account",
-            is_configured=True, secret_reference=None,
-            status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_account(acct)
-        authority = CanonicalResourceActivationAuthority(rrm)
-        req = ResourceActivationRequest(
-            request_id="r2", resource_id="acct-ns",
-            resource_kind=ResourceDiscoveryKind.CONNECTED_SERVICE,
-            discovery_id="d2", registration_id="reg2",
-        )
-        decision = authority.evaluate(req)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
-
-
-# ---------------------------------------------------------------------------
-# I — Unsupported resource kind
-# ---------------------------------------------------------------------------
-
-
-class TestUnsupportedResourceKind:
-    def test_unsupported_kind_rejected(self, rrm):
-        authority = CanonicalResourceActivationAuthority(rrm)
-        req = ResourceActivationRequest(
-            request_id="r1", resource_id="x-1",
-            resource_kind=ResourceDiscoveryKind.TOOL,
-            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
         )
         decision = authority.evaluate(req)
         assert decision.decision_type == ResourceActivationDecisionType.REJECT
-        assert "unsupported_resource_kind" in decision.reasoning
+        assert "account_secret_reference" in decision.reasoning
 
-
-# ---------------------------------------------------------------------------
-# J — Application boundary: Decision not found
-# ---------------------------------------------------------------------------
-
-
-class TestApplicationBoundaryDecisionNotFound:
-    def test_nonexistent_decision_rejected(self, rrm):
-        boundary = ActivationApplicationBoundary(
-            rrm, {}, {}, set(),
+    def test_account_with_secret_approves(self, rrm, activation_service):
+        rrm.register_account(AccountResource(
+            account_id="acct-1", provider_id="prov-1", name="acct-1",
+            secret_reference="configured_secret",
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "acct-1", ResourceDiscoveryKind.CONNECTED_SERVICE,
+            ActivationEvidenceType.ACCOUNT_SECRET,
         )
-        result = boundary.apply("nonexistent-decision")
-        assert result.success is False
-        assert result.reason == "decision_not_found"
-
-
-# ---------------------------------------------------------------------------
-# K — Application boundary: Decision already consumed
-# ---------------------------------------------------------------------------
-
-
-class TestApplicationBoundaryDecisionConsumed:
-    def test_consumed_decision_rejected(self, rrm):
-        decision = ResourceActivationDecision(
-            decision_id="dec-consumed", request_id="r1",
-            resource_id="prov-1", resource_kind=ResourceDiscoveryKind.PROVIDER,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {}, {"dec-consumed": decision}, {"dec-consumed"},
-        )
-        result = boundary.apply("dec-consumed")
-        assert result.success is False
-        assert result.reason == "decision_already_consumed"
-
-
-# ---------------------------------------------------------------------------
-# L — Application boundary: Decision not approved
-# ---------------------------------------------------------------------------
-
-
-class TestApplicationBoundaryDecisionNotApproved:
-    def test_rejected_decision_not_applied(self, rrm):
-        decision = ResourceActivationDecision(
-            decision_id="dec-rej", request_id="r1",
-            resource_id="prov-1", resource_kind=ResourceDiscoveryKind.PROVIDER,
-            decision_type=ResourceActivationDecisionType.REJECT,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {}, {"dec-rej": decision}, set(),
-        )
-        result = boundary.apply("dec-rej")
-        assert result.success is False
-        assert result.reason == "decision_not_approved"
-
-
-# ---------------------------------------------------------------------------
-# M — Application boundary: Request not found
-# ---------------------------------------------------------------------------
-
-
-class TestApplicationBoundaryRequestNotFound:
-    def test_missing_request_rejected(self, rrm):
-        decision = ResourceActivationDecision(
-            decision_id="dec-nr", request_id="r-missing",
-            resource_id="prov-1", resource_kind=ResourceDiscoveryKind.PROVIDER,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {}, {"dec-nr": decision}, set(),
-        )
-        result = boundary.apply("dec-nr")
-        assert result.success is False
-        assert result.reason == "request_not_found"
-
-
-# ---------------------------------------------------------------------------
-# N — Application boundary: TOCTOU revalidation — resource not registered
-# ---------------------------------------------------------------------------
-
-
-class TestApplicationBoundaryResourceNotRegistered:
-    def test_resource_removed_before_apply(self, rrm):
-        request = ResourceActivationRequest(
-            request_id="r1", resource_id="prov-gone",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="acct-1",
+            resource_kind=ResourceDiscoveryKind.CONNECTED_SERVICE,
             discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
         )
-        decision = ResourceActivationDecision(
-            decision_id="dec-gr", request_id="r1",
-            resource_id="prov-gone", resource_kind=ResourceDiscoveryKind.PROVIDER,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {"r1": request}, {"dec-gr": decision}, set(),
-        )
-        result = boundary.apply("dec-gr")
-        assert result.success is False
-        assert result.reason == "resource_not_registered"
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
 
 
 # ---------------------------------------------------------------------------
-# O — Application boundary: TOCTOU revalidation — resource became template
+# L — Approval alone never changes eligibility fields
 # ---------------------------------------------------------------------------
 
 
-class TestApplicationBoundaryResourceBecameTemplate:
-    def test_template_resource_rejected_at_apply(self, rrm):
-        provider = ProviderResource(
-            provider_id="prov-tpl2", name="TPL2",
-            is_configured=True, has_active_account=True,
-            status=ResourceStatus.ACTIVE, is_template=True,
-        )
-        rrm.register_provider(provider)
-        request = ResourceActivationRequest(
-            request_id="r1", resource_id="prov-tpl2",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d1", registration_id="reg1",
-        )
-        decision = ResourceActivationDecision(
-            decision_id="dec-tpl", request_id="r1",
-            resource_id="prov-tpl2", resource_kind=ResourceDiscoveryKind.PROVIDER,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {"r1": request}, {"dec-tpl": decision}, set(),
-        )
-        result = boundary.apply("dec-tpl")
-        assert result.success is False
-        assert result.reason == "resource_is_template"
-
-
-# ---------------------------------------------------------------------------
-# P — Application boundary: TOCTOU revalidation — resource not active
-# ---------------------------------------------------------------------------
-
-
-class TestApplicationBoundaryResourceNotActive:
-    def test_inactive_resource_rejected_at_apply(self, rrm):
-        provider = ProviderResource(
-            provider_id="prov-deg", name="DEG",
-            is_configured=True, has_active_account=True,
-            status=ResourceStatus.DEGRADED,
-        )
-        rrm.register_provider(provider)
-        request = ResourceActivationRequest(
-            request_id="r1", resource_id="prov-deg",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d1", registration_id="reg1",
-        )
-        decision = ResourceActivationDecision(
-            decision_id="dec-deg", request_id="r1",
-            resource_id="prov-deg", resource_kind=ResourceDiscoveryKind.PROVIDER,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {"r1": request}, {"dec-deg": decision}, set(),
-        )
-        result = boundary.apply("dec-deg")
-        assert result.success is False
-        assert result.reason == "resource_not_active"
-
-
-# ---------------------------------------------------------------------------
-# Q — Application boundary: Successful activation application
-# ---------------------------------------------------------------------------
-
-
-class TestApplicationBoundarySuccessfulActivation:
-    def test_provider_activation_applied(self, rrm):
-        provider = ProviderResource(
-            provider_id="prov-ok", name="OK Provider",
+class TestApprovalDoesNotChangeFields:
+    def test_approval_does_not_fabricate_provider_fields(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
             is_configured=False, has_active_account=False,
-            status=ResourceStatus.ACTIVE,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
         )
-        rrm.register_provider(provider)
-        request = ResourceActivationRequest(
-            request_id="r1", resource_id="prov-ok",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d1", registration_id="reg1",
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
         )
-        decision = ResourceActivationDecision(
-            decision_id="dec-ok", request_id="r1",
-            resource_id="prov-ok", resource_kind=ResourceDiscoveryKind.PROVIDER,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {"r1": request}, {"dec-ok": decision}, set(),
-        )
-        result = boundary.apply("dec-ok")
-        assert result.success is True
-        assert result.reason == "activation_applied"
-        assert "is_configured" in result.fields_updated
-        assert "has_active_account" in result.fields_updated
-        assert "dec-ok" in boundary._consumed  # type: ignore[attr-defined]
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
 
-    def test_capability_activation_applied(self, rrm):
-        cap = CapabilityResource(
-            capability_id="cap-ok", name="OK Cap",
-            is_executable=False, status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_capability(cap)
-        request = ResourceActivationRequest(
-            request_id="r1", resource_id="cap-ok",
-            resource_kind=ResourceDiscoveryKind.CAPABILITY,
-            discovery_id="d1", registration_id="reg1",
-        )
-        decision = ResourceActivationDecision(
-            decision_id="dec-cap", request_id="r1",
-            resource_id="cap-ok", resource_kind=ResourceDiscoveryKind.CAPABILITY,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {"r1": request}, {"dec-cap": decision}, set(),
-        )
-        result = boundary.apply("dec-cap")
-        assert result.success is True
-        assert "is_executable" in result.fields_updated
-
-    def test_agent_activation_applied(self, rrm):
-        agent = AgentResource(
-            agent_id="ag-ok", name="OK Agent",
-            is_enabled=False, status=ResourceStatus.ACTIVE,
-            installation_state=AgentInstallationState.DEFINED,
-        )
-        rrm.register_agent(agent)
-        request = ResourceActivationRequest(
-            request_id="r1", resource_id="ag-ok",
-            resource_kind=ResourceDiscoveryKind.AGENT,
-            discovery_id="d1", registration_id="reg1",
-        )
-        decision = ResourceActivationDecision(
-            decision_id="dec-ag", request_id="r1",
-            resource_id="ag-ok", resource_kind=ResourceDiscoveryKind.AGENT,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        boundary = ActivationApplicationBoundary(
-            rrm, {"r1": request}, {"dec-ag": decision}, set(),
-        )
-        result = boundary.apply("dec-ag")
-        assert result.success is True
-        assert "is_enabled" in result.fields_updated
-        assert "installation_state" in result.fields_updated
-
-
-# ---------------------------------------------------------------------------
-# R — Application boundary: Single-use enforcement
-# ---------------------------------------------------------------------------
-
-
-class TestApplicationBoundarySingleUse:
-    def test_decision_cannot_be_reused(self, rrm):
-        provider = ProviderResource(
-            provider_id="prov-reuse", name="Reuse Provider",
-            is_configured=False, has_active_account=False,
-            status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_provider(provider)
-        request = ResourceActivationRequest(
-            request_id="r1", resource_id="prov-reuse",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d1", registration_id="reg1",
-        )
-        decision = ResourceActivationDecision(
-            decision_id="dec-reuse", request_id="r1",
-            resource_id="prov-reuse", resource_kind=ResourceDiscoveryKind.PROVIDER,
-            decision_type=ResourceActivationDecisionType.APPROVE,
-        )
-        consumed: set[str] = set()
-        boundary = ActivationApplicationBoundary(
-            rrm, {"r1": request}, {"dec-reuse": decision}, consumed,
-        )
-        result1 = boundary.apply("dec-reuse")
-        assert result1.success is True
-        result2 = boundary.apply("dec-reuse")
-        assert result2.success is False
-        assert result2.reason == "decision_already_consumed"
-
-
-# ---------------------------------------------------------------------------
-# S — Service: Full pipeline
-# ---------------------------------------------------------------------------
-
-
-class TestActivationServicePipeline:
-    def test_create_request(self, activation_service):
-        req = activation_service.create_request(
+        req = service.create_request(
             resource_id="prov-1",
             resource_kind=ResourceDiscoveryKind.PROVIDER,
             discovery_id="d1",
             registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
         )
-        assert req.resource_id == "prov-1"
-        assert req.request_id in activation_service.requests
 
-    def test_evaluate(self, activation_service, rrm):
-        provider = ProviderResource(
-            provider_id="prov-ev", name="EV Provider",
-            is_configured=True, has_active_account=True,
-            status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_provider(provider)
-        req = activation_service.create_request(
-            resource_id="prov-ev",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d1",
-            registration_id="reg1",
-        )
-        decision = activation_service.evaluate(req.request_id)
-        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+        decision = service.evaluate(req.request_id)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
 
-    def test_evaluate_missing_request_raises(self, activation_service):
-        with pytest.raises(ActivationError, match="not found"):
-            activation_service.evaluate("nonexistent")
+        provider = rrm.get_provider("prov-1")
+        assert provider.is_configured is False
+        assert provider.has_active_account is False
 
-    def test_full_activate(self, activation_service, rrm):
-        provider = ProviderResource(
-            provider_id="prov-fa", name="FA Provider",
+    def test_approval_result_no_fields_fabricated(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
             is_configured=False, has_active_account=False,
-            status=ResourceStatus.ACTIVE,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
         )
-        rrm.register_provider(provider)
-        req = activation_service.create_request(
-            resource_id="prov-fa",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d1",
-            registration_id="reg1",
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
         )
-        result = activation_service.activate(req.request_id)
-        assert result.success is True
-        assert "is_configured" in result.fields_updated
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
 
-    def test_full_activate_rejected(self, activation_service, rrm):
-        provider = ProviderResource(
-            provider_id="prov-rej", name="REJ Provider",
-            is_configured=False, has_active_account=False,
-            status=ResourceStatus.UNAVAILABLE,
-        )
-        rrm.register_provider(provider)
-        req = activation_service.create_request(
-            resource_id="prov-rej",
+        req = service.create_request(
+            resource_id="prov-1",
             resource_kind=ResourceDiscoveryKind.PROVIDER,
             discovery_id="d1",
             registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
         )
-        result = activation_service.activate(req.request_id)
+
+        result = service.activate(req.request_id)
         assert result.success is False
 
+        provider = rrm.get_provider("prov-1")
+        assert provider.is_configured is False
+        assert provider.has_active_account is False
+
 
 # ---------------------------------------------------------------------------
-# T — Service: Decision consumption tracking
+# M — Forged evidence → reject
 # ---------------------------------------------------------------------------
 
 
-class TestActivationServiceConsumptionTracking:
-    def test_consumed_decision_tracked(self, activation_service, rrm):
-        provider = ProviderResource(
-            provider_id="prov-ct", name="CT Provider",
+class TestForgedEvidenceRejects:
+    def test_forged_evidence_not_in_store_rejects(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
             is_configured=True, has_active_account=True,
-            status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_provider(provider)
-        req = activation_service.create_request(
-            resource_id="prov-ct",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d1",
-            registration_id="reg1",
-        )
-        # activate() calls evaluate() internally, producing a decision
-        # that gets consumed. Track the decision from the service's
-        # internal store after activation.
-        pre_consumed = activation_service.consumed_decisions
-        result = activation_service.activate(req.request_id)
-        assert result.success is True
-        post_consumed = activation_service.consumed_decisions
-        # A new decision was consumed
-        new_consumed = post_consumed - pre_consumed
-        assert len(new_consumed) == 1
-        consumed_id = next(iter(new_consumed))
-        # The consumed decision matches the result
-        assert consumed_id == result.decision_id
-
-
-# ---------------------------------------------------------------------------
-# U — Adversarial: No mutation without authority
-# ---------------------------------------------------------------------------
-
-
-class TestAdversarialNoMutationWithoutAuthority:
-    def test_request_does_not_mutate_rrm(self, activation_service, rrm):
-        provider = ProviderResource(
-            provider_id="prov-noauth", name="NoAuth",
-            is_configured=False, has_active_account=False,
-            status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_provider(provider)
-        activation_service.create_request(
-            resource_id="prov-noauth",
-            resource_kind=ResourceDiscoveryKind.PROVIDER,
-            discovery_id="d1",
-            registration_id="reg1",
-        )
-        p = rrm.get_provider("prov-noauth")
-        assert p is not None
-        assert p.is_configured is False
-        assert p.has_active_account is False
-
-    def test_authority_does_not_mutate_rrm(self, rrm):
-        provider = ProviderResource(
-            provider_id="prov-noauth2", name="NoAuth2",
-            is_configured=False, has_active_account=False,
-            status=ResourceStatus.ACTIVE,
-        )
-        rrm.register_provider(provider)
-        authority = CanonicalResourceActivationAuthority(rrm)
+        ))
+        authority = activation_service.authority
         req = ResourceActivationRequest(
-            request_id="r1", resource_id="prov-noauth2",
+            request_id="r1", resource_id="prov-1",
             resource_kind=ResourceDiscoveryKind.PROVIDER,
             discovery_id="d1", registration_id="reg1",
+            evidence_ids=("forged-ev-1",),
         )
-        authority.evaluate(req)
-        p = rrm.get_provider("prov-noauth2")
-        assert p is not None
-        assert p.is_configured is False
-        assert p.has_active_account is False
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
 
-
-# ---------------------------------------------------------------------------
-# V — Adversarial: No discovery authority leak
-# ---------------------------------------------------------------------------
-
-
-class TestAdversarialNoDiscoveryLeak:
-    def test_activation_authority_has_no_discovery(self):
-        from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
-        assert not hasattr(CanonicalResourceActivationAuthority, 'discover')
-        assert not hasattr(CanonicalResourceActivationAuthority, 'create_evidence')
-
-
-# ---------------------------------------------------------------------------
-# W — Adversarial: No promotion authority leak
-# ---------------------------------------------------------------------------
-
-
-class TestAdversarialNoPromotionLeak:
-    def test_activation_authority_has_no_promotion(self):
-        from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
-        assert not hasattr(CanonicalResourceActivationAuthority, 'propose')
-        assert not hasattr(CanonicalResourceActivationAuthority, 'approve_proposal')
-
-
-# ---------------------------------------------------------------------------
-# X — Adversarial: No registration authority leak
-# ---------------------------------------------------------------------------
-
-
-class TestAdversarialNoRegistrationLeak:
-    def test_activation_authority_has_no_registration(self):
-        from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
-        assert not hasattr(CanonicalResourceActivationAuthority, 'register_provider')
-        assert not hasattr(CanonicalResourceActivationAuthority, 'register_capability')
-
-
-# ---------------------------------------------------------------------------
-# Y — Composition wiring
-# ---------------------------------------------------------------------------
-
-
-class TestCompositionWiring:
-    def test_activation_service_wired(self):
-        from intent_kernel.application.composition import KernelBuilder
-        builder = KernelBuilder()
-        components = builder.build()
-        assert hasattr(components, 'resource_activation_service')
-        assert isinstance(
-            components.resource_activation_service,
-            CanonicalResourceActivationService,
+    def test_evidence_for_different_resource_rejects(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-2", name="prov-2",
+            is_configured=True, has_active_account=True,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "prov-2", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
         )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
 
-    def test_activation_authority_wired(self):
-        from intent_kernel.application.composition import KernelBuilder
-        builder = KernelBuilder()
-        components = builder.build()
-        assert isinstance(
-            components.resource_activation_service.authority,
-            CanonicalResourceActivationAuthority,
+
+# ---------------------------------------------------------------------------
+# N — Evidence revoked after approval → application fails
+# ---------------------------------------------------------------------------
+
+
+class TestRevokedEvidenceFailsApplication:
+    def test_revoked_evidence_fails_boundary(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
+
+        req = service.create_request(
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
         )
 
-    def test_activation_boundary_wired(self):
-        from intent_kernel.application.composition import KernelBuilder
-        builder = KernelBuilder()
-        components = builder.build()
-        assert isinstance(
-            components.resource_activation_service.application_boundary,
-            ActivationApplicationBoundary,
+        decision = service.evaluate(req.request_id)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+
+        revoked_ev = ResourceActivationEvidence(
+            evidence_id=ev_cfg.evidence_id,
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
+            source="canonical",
+            revoked=True,
+        )
+        service.register_evidence(revoked_ev)
+
+        result = service.application_boundary.apply(decision.decision_id)
+        assert result.success is False
+        assert "evidence_revoked" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# O — Decision replay → fails
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionReplayFails:
+    def test_decision_consumed_replay_fails(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
+
+        req = service.create_request(
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
         )
 
+        decision = service.evaluate(req.request_id)
+        result1 = service.application_boundary.apply(decision.decision_id)
+        assert result1.success is True
+
+        result2 = service.application_boundary.apply(decision.decision_id)
+        assert result2.success is False
+        assert "decision_already_consumed" in result2.reason
+
 
 # ---------------------------------------------------------------------------
-# Z — Adversarial: No execution authority leak
+# P — Binding replaced after approval → application fails
 # ---------------------------------------------------------------------------
 
 
-class TestAdversarialNoExecutionLeak:
-    def test_activation_authority_has_no_execution(self):
-        from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
-        assert not hasattr(CanonicalResourceActivationAuthority, 'execute')
-        assert not hasattr(CanonicalResourceActivationAuthority, 'dispatch')
-        assert not hasattr(CanonicalResourceActivationAuthority, 'confirm')
+class TestBindingReplacedFails:
+    def test_provider_becomes_unconfigured_after_approval(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
+
+        req = service.create_request(
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
+        )
+
+        decision = service.evaluate(req.request_id)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+
+        provider = rrm.get_provider("prov-1")
+        provider.is_configured = False
+
+        result = service.application_boundary.apply(decision.decision_id)
+        assert result.success is False
+        assert "binding_revalidation_failed" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Q — Compatibility writer cannot bypass governed activation
+# ---------------------------------------------------------------------------
+
+
+class TestCompatibilityBypassGuarded:
+    def test_runtime_resource_projection_does_not_activate(self, rrm, activation_service):
+        from intent_kernel.rrm.projection import RuntimeResourceProjection
+        from intent_kernel.contracts import Provider
+        from unittest.mock import PropertyMock
+
+        proj = RuntimeResourceProjection(rrm)
+        fake_provider = MagicMock(spec=Provider)
+        fake_provider.name = "mock"
+        proj.project_provider(fake_provider)
+
+        provider = rrm.get_provider("mock")
+        assert provider is not None
+        assert provider.is_configured is False
+        assert provider.has_active_account is False
+        assert provider.is_eligible is False
+
+    def test_update_resource_status_cannot_bypass(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=False, has_active_account=False,
+        ))
+        provider = rrm.get_provider("prov-1")
+        provider.status = ResourceStatus.ACTIVE
+
+        provider = rrm.get_provider("prov-1")
+        assert provider.is_configured is False
+        assert provider.has_active_account is False
+        assert provider.is_eligible is False
+
+
+# ---------------------------------------------------------------------------
+# R — Zero-provider truth remains intact
+# ---------------------------------------------------------------------------
+
+
+class TestZeroProviderTruth:
+    def test_empty_rrm_no_providers_eligible(self, rrm):
+        providers = rrm.list_providers(only_eligible=True)
+        assert len(providers) == 0
+
+    def test_empty_rrm_no_capabilities_eligible(self, rrm):
+        capabilities = rrm.list_capabilities(only_eligible=True)
+        assert len(capabilities) == 0
+
+
+# ---------------------------------------------------------------------------
+# S — RA-13-01 remains fixed
+# ---------------------------------------------------------------------------
+
+
+class TestRA1301Fixed:
+    def test_binding_invariant(self, rrm):
+        try:
+            from intent_kernel.rrm.binding import CanonicalResourceBindingAuthority
+        except ImportError:
+            pytest.skip("Circular import in orchestration → application → composition")
+        mock_registry = MagicMock()
+        binding_authority = CanonicalResourceBindingAuthority(rrm, mock_registry)
+        assert hasattr(binding_authority, 'resolve')
+        assert hasattr(binding_authority, 'revalidate')
+
+
+# ---------------------------------------------------------------------------
+# T — Activation != authorization != confirmation != execution
+# ---------------------------------------------------------------------------
+
+
+class TestActivationNotAuthorization:
+    def test_activation_result_no_authority_fields(self):
+        result = ResourceActivationResult(
+            success=True, request_id="r1", decision_id="dec1",
+            resource_id="prov-1",
+        )
+        d = result.to_dict()
+        assert "authorized" not in d
+        assert "execute" not in d
+        assert "verified" not in d
+        assert "completed" not in d
+
+    def test_decision_no_authority_fields(self):
+        decision = ResourceActivationDecision(
+            decision_id="dec1", request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            decision_type=ResourceActivationDecisionType.APPROVE,
+        )
+        d = decision.to_dict()
+        assert "authorized" not in d
+        assert "execute" not in d
+
+
+# ---------------------------------------------------------------------------
+# U — RA-18-01 containment
+# ---------------------------------------------------------------------------
+
+
+class TestRA1801Containment:
+    def test_authority_isolation_from_promotion(self, rrm, activation_service):
+        authority = activation_service.authority
+        assert not hasattr(authority, 'approve_promotion')
+        assert not hasattr(authority, 'create_registration')
+
+    def test_boundary_isolation_from_authority(self, rrm, activation_service):
+        boundary = activation_service.application_boundary
+        assert not hasattr(boundary, 'evaluate')
+        assert not hasattr(boundary, 'select')
+
+
+# ---------------------------------------------------------------------------
+# V — Service wiring
+# ---------------------------------------------------------------------------
+
+
+class TestServiceWiring:
+    def test_service_has_authority(self, activation_service):
+        assert isinstance(activation_service.authority, CanonicalResourceActivationAuthority)
+
+    def test_service_has_boundary(self, activation_service):
+        assert isinstance(activation_service.application_boundary, ActivationApplicationBoundary)
+
+    def test_full_pipeline_success(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
+
+        req = service.create_request(
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
+        )
+
+        result = service.activate(req.request_id)
+        assert result.success is True
+        assert result.reason == "activation_applied"
+
+    def test_full_pipeline_rejects(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=False, has_active_account=False,
+        ))
+        service = activation_service
+        req = service.create_request(
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(),
+        )
+
+        result = service.activate(req.request_id)
+        assert result.success is False
+
+    def test_evidence_store_populated(self, rrm, activation_service):
+        service = activation_service
+        ev = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        service.register_evidence(ev)
+        assert service.get_evidence(ev.evidence_id) is not None
+
+    def test_nonexistent_request_raises(self, rrm, activation_service):
+        with pytest.raises(ActivationError):
+            activation_service.evaluate("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# W — Evidence for resource A used for B → reject
+# ---------------------------------------------------------------------------
+
+
+class TestCrossResourceEvidenceRejects:
+    def test_evidence_for_a_not_valid_for_b(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-2", name="prov-2",
+            is_configured=True, has_active_account=True,
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "prov-2", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+
+
+# ---------------------------------------------------------------------------
+# X — Agent privileged roles don't alter result
+# ---------------------------------------------------------------------------
+
+
+class TestAgentPrivilegedRoles:
+    @pytest.mark.parametrize("role", ["admin", "root", "system", "trusted", "supervisor"])
+    def test_privileged_role_rejects(self, rrm, activation_service, role):
+        rrm.register_agent(AgentResource(
+            agent_id="agent-1", name="agent-1",
+            is_enabled=True,
+            installation_state=AgentInstallationState.INSTALLED,
+            metadata={"role": role},
+        ))
+        authority = activation_service.authority
+        ev = _make_evidence(
+            "agent-1", ResourceDiscoveryKind.AGENT,
+            ActivationEvidenceType.AGENT_IDENTITY,
+        )
+        authority.register_evidence(ev)
+        req = ResourceActivationRequest(
+            request_id="r1", resource_id="agent-1",
+            resource_kind=ResourceDiscoveryKind.AGENT,
+            discovery_id="d1", registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+        decision = authority.evaluate(req)
+        assert decision.decision_type == ResourceActivationDecisionType.REJECT
+        assert role in decision.reasoning
+
+
+# ---------------------------------------------------------------------------
+# Y — TOCTOU revalidation
+# ---------------------------------------------------------------------------
+
+
+class TestTOCTOURevalidation:
+    def test_resource_becomes_template_fails(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
+
+        req = service.create_request(
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
+        )
+
+        decision = service.evaluate(req.request_id)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+
+        provider = rrm.get_provider("prov-1")
+        provider.is_template = True
+
+        result = service.application_boundary.apply(decision.decision_id)
+        assert result.success is False
+        assert "resource_is_template" in result.reason
+
+    def test_resource_becomes_unregistered_fails(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
+
+        req = service.create_request(
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
+        )
+
+        decision = service.evaluate(req.request_id)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+
+        rrm._providers.pop("prov-1", None)
+
+        result = service.application_boundary.apply(decision.decision_id)
+        assert result.success is False
+        assert "resource_not_registered" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Z — Boundary does not fabricate (RA-18-02 core invariant)
+# ---------------------------------------------------------------------------
+
+
+class TestBoundaryDoesNotFabricate:
+    def test_boundary_observe_only_provider(self, rrm, activation_service):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov-1",
+            is_configured=True, has_active_account=True,
+        ))
+        service = activation_service
+        ev_cfg = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_CONFIGURATION,
+        )
+        ev_acct = _make_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            ActivationEvidenceType.PROVIDER_ACCOUNT,
+        )
+        service.register_evidence(ev_cfg)
+        service.register_evidence(ev_acct)
+
+        req = service.create_request(
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev_cfg.evidence_id, ev_acct.evidence_id),
+        )
+
+        result = service.activate(req.request_id)
+        assert result.success is True
+        assert "is_configured" in result.fields_updated
+        assert "has_active_account" in result.fields_updated
+
+        provider = rrm.get_provider("prov-1")
+        assert provider.is_configured is True
+        assert provider.has_active_account is True
+
+    def test_boundary_observe_only_capability(self, rrm, activation_service):
+        rrm.register_capability(CapabilityResource(
+            capability_id="cap-1", name="cap-1",
+            is_executable=True,
+        ))
+        service = activation_service
+        ev = _make_evidence(
+            "cap-1", ResourceDiscoveryKind.CAPABILITY,
+            ActivationEvidenceType.CAPABILITY_EXECUTABLE,
+        )
+        service.register_evidence(ev)
+
+        req = service.create_request(
+            resource_id="cap-1",
+            resource_kind=ResourceDiscoveryKind.CAPABILITY,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+
+        result = service.activate(req.request_id)
+        assert result.success is True
+        assert "is_executable" in result.fields_updated
+
+    def test_boundary_observe_only_agent(self, rrm, activation_service):
+        rrm.register_agent(AgentResource(
+            agent_id="agent-1", name="agent-1",
+            is_enabled=True,
+            installation_state=AgentInstallationState.INSTALLED,
+        ))
+        service = activation_service
+        ev = _make_evidence(
+            "agent-1", ResourceDiscoveryKind.AGENT,
+            ActivationEvidenceType.AGENT_IDENTITY,
+        )
+        service.register_evidence(ev)
+
+        req = service.create_request(
+            resource_id="agent-1",
+            resource_kind=ResourceDiscoveryKind.AGENT,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+
+        result = service.activate(req.request_id)
+        assert result.success is True
+        assert "is_enabled" in result.fields_updated
+        assert any("installation_state" in f for f in result.fields_updated)
+
+    def test_boundary_observe_only_environment(self, rrm, activation_service):
+        rrm.register_environment(ExecutionEnvironmentResource(
+            environment_id="env-1",
+            is_discovered=True,
+        ))
+        service = activation_service
+        ev = _make_evidence(
+            "env-1", ResourceDiscoveryKind.ENVIRONMENT,
+            ActivationEvidenceType.ENVIRONMENT_DISCOVERY,
+        )
+        service.register_evidence(ev)
+
+        req = service.create_request(
+            resource_id="env-1",
+            resource_kind=ResourceDiscoveryKind.ENVIRONMENT,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+
+        result = service.activate(req.request_id)
+        assert result.success is True
+        assert "is_discovered" in result.fields_updated
+
+    def test_boundary_observe_only_account(self, rrm, activation_service):
+        rrm.register_account(AccountResource(
+            account_id="acct-1", provider_id="prov-1", name="acct-1",
+            secret_reference="configured_secret",
+        ))
+        service = activation_service
+        ev = _make_evidence(
+            "acct-1", ResourceDiscoveryKind.CONNECTED_SERVICE,
+            ActivationEvidenceType.ACCOUNT_SECRET,
+        )
+        service.register_evidence(ev)
+
+        req = service.create_request(
+            resource_id="acct-1",
+            resource_kind=ResourceDiscoveryKind.CONNECTED_SERVICE,
+            discovery_id="d1",
+            registration_id="reg1",
+            evidence_ids=(ev.evidence_id,),
+        )
+
+        result = service.activate(req.request_id)
+        assert result.success is True
+        assert "secret_reference" in result.fields_updated

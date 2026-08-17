@@ -1,29 +1,40 @@
 """Movement 18 — Governed Resource Activation.
 
-REGISTERED != ACTIVATED
-ACTIVATED != AVAILABLE
-AVAILABLE != ELIGIBLE
-ELIGIBLE != SELECTED
-SELECTED != AUTHORIZED
-AUTHORIZED != EXECUTED
+ACTIVATION MUST VERIFY PREREQUISITE TRUTH.
+ACTIVATION MUST NOT INVENT PREREQUISITE TRUTH.
+ACTIVATION APPROVAL IS NOT PREREQUISITE EVIDENCE.
 
-Registration proves a resource is known to the canonical system.
-Activation proves a resource satisfies governed prerequisites.
-Activation does NOT manufacture eligibility, authorization, or execution.
+The activation pipeline:
+  INDEPENDENT EVIDENCE → AUTHORITY VALIDATES → APPROVED →
+  BOUNDARY APPLIES TRANSITION → RRM DERIVES ELIGIBILITY
+
+Evidence is INPUT to activation.
+Approval is NOT evidence.
 """
 
+from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
+from intent_kernel.activation.application_boundary import ActivationApplicationBoundary
+from intent_kernel.activation.service import CanonicalResourceActivationService, ActivationError
 from intent_kernel.activation.models import (
-    ResourceActivationDecision,
+    ResourceActivationStatus,
     ResourceActivationDecisionType,
     ResourceActivationRequest,
+    ResourceActivationDecision,
     ResourceActivationResult,
-    ResourceActivationStatus,
+    ResourceActivationEvidence,
+    ActivationEvidenceType,
 )
 
 __all__ = [
-    "ResourceActivationDecision",
+    "CanonicalResourceActivationAuthority",
+    "ActivationApplicationBoundary",
+    "CanonicalResourceActivationService",
+    "ActivationError",
+    "ResourceActivationStatus",
     "ResourceActivationDecisionType",
     "ResourceActivationRequest",
+    "ResourceActivationDecision",
     "ResourceActivationResult",
-    "ResourceActivationStatus",
+    "ResourceActivationEvidence",
+    "ActivationEvidenceType",
 ]

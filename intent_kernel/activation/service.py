@@ -3,14 +3,16 @@
 Orchestrates the full governed activation pipeline:
 
   REGISTERED RESOURCE
+  + INDEPENDENT PREREQUISITE EVIDENCE
   → ACTIVATION REQUEST
-  → PREREQUISITE EVALUATION
+  → PREREQUISITE EVALUATION WITH EVIDENCE
   → TYPED DECISION
   → TOCTOU REVALIDATION
   → ACTIVATION APPLICATION
   → ACTIVATED RESOURCE
 
 No stage may impersonate another.
+ACTIVATION APPROVAL IS NOT PREREQUISITE EVIDENCE.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from intent_kernel.activation.application_boundary import ActivationApplicationB
 from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
 from intent_kernel.activation.models import (
     ResourceActivationDecisionType,
+    ResourceActivationEvidence,
     ResourceActivationRequest,
     ResourceActivationResult,
     ResourceActivationStatus,
@@ -41,9 +44,11 @@ class CanonicalResourceActivationService:
         self._requests: dict[str, ResourceActivationRequest] = {}
         self._decisions: dict[str, object] = {}
         self._consumed_decisions: set[str] = set()
+        self._evidence_store: dict[str, ResourceActivationEvidence] = {}
         self._authority = CanonicalResourceActivationAuthority(rrm)
         self._application_boundary = ActivationApplicationBoundary(
-            rrm, self._requests, self._decisions, self._consumed_decisions,  # type: ignore[arg-type]
+            rrm, self._requests, self._decisions, self._consumed_decisions,
+            self._evidence_store,
         )
 
     # ------------------------------------------------------------------
@@ -70,6 +75,26 @@ class CanonicalResourceActivationService:
     def consumed_decisions(self) -> frozenset[str]:
         return frozenset(self._consumed_decisions)
 
+    @property
+    def evidence_store(self) -> dict[str, ResourceActivationEvidence]:
+        return dict(self._evidence_store)
+
+    # ------------------------------------------------------------------
+    # Evidence management
+    # ------------------------------------------------------------------
+
+    def register_evidence(self, evidence: ResourceActivationEvidence) -> None:
+        """Register prerequisite evidence for activation evaluation.
+
+        Evidence must exist BEFORE activation approval.
+        """
+        self._evidence_store[evidence.evidence_id] = evidence
+        self._authority.register_evidence(evidence)
+        self._application_boundary.update_evidence(evidence)
+
+    def get_evidence(self, evidence_id: str) -> ResourceActivationEvidence | None:
+        return self._evidence_store.get(evidence_id)
+
     # ------------------------------------------------------------------
     # Convenience entry points
     # ------------------------------------------------------------------
@@ -82,6 +107,7 @@ class CanonicalResourceActivationService:
         registration_id: str,
         *,
         scope: str = "global",
+        evidence_ids: tuple[str, ...] = (),
         metadata: dict[str, object] | None = None,
     ) -> ResourceActivationRequest:
         """Create an activation request for a registered resource."""
@@ -92,6 +118,7 @@ class CanonicalResourceActivationService:
             discovery_id=discovery_id,
             registration_id=registration_id,
             scope=scope,
+            evidence_ids=evidence_ids,
             metadata=metadata or {},
         )
         self._requests[request.request_id] = request
@@ -101,7 +128,7 @@ class CanonicalResourceActivationService:
         self,
         request_id: str,
     ):
-        """Evaluate activation prerequisites for a request."""
+        """Evaluate activation prerequisites for a request using evidence."""
         request = self._requests.get(request_id)
         if request is None:
             raise ActivationError(f"Request {request_id} not found")

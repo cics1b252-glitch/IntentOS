@@ -1,11 +1,13 @@
 {
   "movement": 18,
   "title": "Governed Resource Activation Convergence",
+  "invariant": "ACTIVATION MUST VERIFY PREREQUISITE TRUTH. ACTIVATION MUST NOT INVENT PREREQUISITE TRUTH. ACTIVATION APPROVAL IS NOT PREREQUISITE EVIDENCE.",
   "pipeline": {
     "stages": [
       "REGISTERED_RESOURCE",
+      "INDEPENDENT_PREREQUISITE_EVIDENCE",
       "ACTIVATION_REQUEST",
-      "PREREQUISITE_EVALUATION",
+      "PREREQUISITE_EVALUATION_WITH_EVIDENCE",
       "TYPED_DECISION",
       "TOCTOU_REVALIDATION",
       "ACTIVATION_APPLICATION",
@@ -17,15 +19,29 @@
       "CanonicalResourceActivationService (ORCHESTRATION_ONLY)"
     ]
   },
+  "evidence_model": {
+    "ResourceActivationEvidence": {
+      "fields": ["evidence_id", "resource_id", "resource_kind", "evidence_type", "source", "observed_at", "scope", "binding_identity", "revoked"],
+      "immutable": true
+    },
+    "ActivationEvidenceType": {
+      "PROVIDER_CONFIGURATION": "proves is_configured = True",
+      "PROVIDER_ACCOUNT": "proves has_active_account = True",
+      "CAPABILITY_EXECUTABLE": "proves is_executable = True",
+      "AGENT_IDENTITY": "proves is_enabled = True + installation_state valid",
+      "ENVIRONMENT_DISCOVERY": "proves is_discovered = True",
+      "ACCOUNT_SECRET": "proves secret_reference exists"
+    }
+  },
   "resource_kind_mapping": {
-    "PROVIDER": {"rrm_type": "Provider", "activation_fields": ["is_configured", "has_active_account"]},
-    "CAPABILITY": {"rrm_type": "Capability", "activation_fields": ["is_executable"]},
-    "AGENT": {"rrm_type": "Agent", "activation_fields": ["is_enabled", "installation_state"]},
-    "ENVIRONMENT": {"rrm_type": "ExecutionEnvironment", "activation_fields": ["is_discovered"]},
-    "CONNECTED_SERVICE": {"rrm_type": "Account", "activation_fields": ["is_configured"]},
-    "DEVICE": {"rrm_type": "Capability", "activation_fields": ["is_executable"]},
-    "LOCAL_PROGRAM": {"rrm_type": "Capability", "activation_fields": ["is_executable"]},
-    "CUSTOM": {"rrm_type": "Capability", "activation_fields": ["is_executable"]}
+    "PROVIDER": {"rrm_type": "Provider", "evidence_required": ["PROVIDER_CONFIGURATION", "PROVIDER_ACCOUNT"]},
+    "CAPABILITY": {"rrm_type": "Capability", "evidence_required": ["CAPABILITY_EXECUTABLE"]},
+    "AGENT": {"rrm_type": "Agent", "evidence_required": ["AGENT_IDENTITY"], "privileged_roles_rejected": ["admin", "root", "system", "trusted", "supervisor"]},
+    "ENVIRONMENT": {"rrm_type": "ExecutionEnvironment", "evidence_required": ["ENVIRONMENT_DISCOVERY"]},
+    "CONNECTED_SERVICE": {"rrm_type": "Account", "evidence_required": ["ACCOUNT_SECRET"]},
+    "DEVICE": {"rrm_type": "Capability", "evidence_required": ["CAPABILITY_EXECUTABLE"]},
+    "LOCAL_PROGRAM": {"rrm_type": "Capability", "evidence_required": ["CAPABILITY_EXECUTABLE"]},
+    "CUSTOM": {"rrm_type": "Capability", "evidence_required": ["CAPABILITY_EXECUTABLE"]}
   },
   "structural_invariants": [
     "resource_registered",
@@ -33,13 +49,6 @@
     "origin_not_template",
     "status_active"
   ],
-  "activation_fields_by_type": {
-    "Provider": ["is_configured", "has_active_account"],
-    "Capability": ["is_executable"],
-    "Agent": ["is_enabled", "installation_state"],
-    "ExecutionEnvironment": ["is_discovered"],
-    "Account": ["is_configured"]
-  },
   "toctou_checks": [
     "activation_request_exists",
     "decision_exists",
@@ -49,20 +58,33 @@
     "resource_registered",
     "registration_unchanged",
     "resource_not_replaced",
-    "pre_activation_prereqs_satisfied",
+    "evidence_still_exists_and_valid",
+    "evidence_applies_to_exact_resource",
+    "evidence_not_stale_or_revoked",
+    "binding_configuration_unchanged",
     "scope_valid",
-    "decision_not_consumed",
-    "binding_configuration_matches"
+    "decision_not_consumed"
   ],
   "anti_bypass": {
     "RA-18-01": {
       "defect": "Ungoverned activation authority",
       "containment": [
-        "Authority evaluates structural invariants only",
-        "Boundary applies activation fields with TOCTOU revalidation",
+        "Authority validates ALL prerequisites using independent evidence",
+        "Boundary observes, does not fabricate prerequisite fields",
         "Single-use decision consumption",
         "No authority-bearing fields in activation models",
         "No discovery, promotion, or registration authority leak"
+      ]
+    },
+    "RA-18-02": {
+      "defect": "Activation fabricated prerequisite fields without independent evidence",
+      "repair": [
+        "Authority validates prerequisite evidence BEFORE approval",
+        "Boundary MUST NOT manufacture prerequisite truth",
+        "Evidence is INPUT to activation, not OUTPUT",
+        "Approval is NOT evidence",
+        "Forged/revoked/cross-resource evidence rejected",
+        "Binding revalidation at application time"
       ]
     }
   },
@@ -75,29 +97,44 @@
     "CONSUMED": "decision applied"
   },
   "test_coverage": {
-    "total_tests": 48,
+    "total_tests": 62,
     "categories": [
-      "models_frozen",
-      "status_lifecycle",
-      "authority_bearing_field_rejection",
-      "provider_prerequisites",
-      "capability_prerequisites",
-      "agent_prerequisites",
-      "environment_prerequisites",
-      "account_prerequisites",
-      "unsupported_resource_kind",
-      "decision_not_found",
-      "decision_consumed",
-      "decision_not_approved",
-      "request_not_found",
+      "models_frozen_including_evidence",
+      "evidence_model_revocation_validity",
+      "authority_rejects_unsupported_kind",
+      "authority_rejects_unregistered_resource",
+      "provider_no_evidence_rejects",
+      "provider_wrong_evidence_type_rejects",
+      "provider_revoked_evidence_rejects",
+      "provider_not_configured_rejects",
+      "provider_no_active_account_rejects",
+      "provider_with_evidence_approves",
+      "capability_no_evidence_rejects",
+      "capability_not_executable_rejects",
+      "capability_with_evidence_approves",
+      "agent_no_evidence_rejects",
+      "agent_not_enabled_rejects",
+      "agent_privileged_role_rejects",
+      "agent_with_evidence_approves",
+      "environment_no_evidence_rejects",
+      "environment_not_discovered_rejects",
+      "environment_with_evidence_approves",
+      "account_no_secret_rejects",
+      "account_with_secret_approves",
+      "approval_does_not_change_fields",
+      "forged_evidence_rejects",
+      "cross_resource_evidence_rejects",
+      "revoked_evidence_fails_application",
+      "decision_replay_fails",
+      "binding_replaced_fails",
+      "compatibility_bypass_guarded",
+      "zero_provider_truth",
+      "ra1301_fixed",
+      "activation_not_authorization",
+      "ra1801_containment",
+      "service_wiring",
       "toctou_revalidation",
-      "successful_activation",
-      "single_use_enforcement",
-      "service_pipeline",
-      "consumption_tracking",
-      "adversarial_no_mutation",
-      "adversarial_no_authority_leak",
-      "composition_wiring"
+      "boundary_observe_only"
     ]
   }
 }

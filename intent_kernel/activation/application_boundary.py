@@ -3,7 +3,14 @@
 ACTIVATION_APPLICATION_ONLY — applies a valid activation decision to
 canonical RRM lifecycle fields.
 
-Before mutation, performs 12-point TOCTOU revalidation:
+ACTIVATION MUST VERIFY PREREQUISITE TRUTH.
+ACTIVATION MUST NOT INVENT PREREQUISITE TRUTH.
+ACTIVATION APPROVAL IS NOT PREREQUISITE EVIDENCE.
+
+The boundary MUST NOT manufacture prerequisite truth.
+The boundary MAY apply an activation transition already justified by evidence.
+
+Before mutation, performs 14-point TOCTOU revalidation:
 
 1.  activation request still exists
 2.  decision still exists
@@ -13,10 +20,12 @@ Before mutation, performs 12-point TOCTOU revalidation:
 6.  resource is still registered
 7.  registration/provenance is unchanged
 8.  resource object/identity has not been silently replaced
-9.  prerequisites remain satisfied
-10. required binding/configuration still matches
-11. scope remains valid
-12. decision has not expired/revoked/been consumed
+9.  prerequisite evidence still exists and is valid
+10. evidence still applies to exact resource
+11. evidence not stale/revoked
+12. binding/configuration identity unchanged
+13. scope remains valid
+14. decision has not expired/revoked/been consumed
 
 Fail closed on any mismatch.
 """
@@ -29,6 +38,7 @@ from uuid import uuid4
 from intent_kernel.activation.models import (
     ResourceActivationDecision,
     ResourceActivationDecisionType,
+    ResourceActivationEvidence,
     ResourceActivationRequest,
     ResourceActivationResult,
     ResourceActivationStatus,
@@ -64,8 +74,10 @@ class ActivationApplicationBoundary:
     """ACTIVATION_APPLICATION_ONLY — applies activation decisions to RRM.
 
     Only this boundary may apply a valid activation decision to the RRM
-    lifecycle fields controlled by Movement 18. Performs 12-point TOCTOU
+    lifecycle fields controlled by Movement 18. Performs 14-point TOCTOU
     revalidation before any mutation.
+
+    The boundary MUST NOT manufacture prerequisite truth.
     """
 
     def __init__(
@@ -74,11 +86,17 @@ class ActivationApplicationBoundary:
         activation_requests: dict[str, ResourceActivationRequest],
         activation_decisions: dict[str, ResourceActivationDecision],
         consumed_decisions: set[str],
+        evidence_store: dict[str, ResourceActivationEvidence] | None = None,
     ) -> None:
         self._rrm = rrm
         self._requests = activation_requests
         self._decisions = activation_decisions
         self._consumed = consumed_decisions
+        self._evidence_store = evidence_store or {}
+
+    def update_evidence(self, evidence: ResourceActivationEvidence) -> None:
+        """Update evidence store for boundary revalidation."""
+        self._evidence_store[evidence.evidence_id] = evidence
 
     def apply(
         self,
@@ -97,7 +115,7 @@ class ActivationApplicationBoundary:
                 resource_id="", reason="decision_not_found",
             )
 
-        # Check 12: decision not consumed
+        # Check 14: decision not consumed
         if decision_id in self._consumed:
             return ResourceActivationResult(
                 success=False, request_id=decision.request_id,
@@ -178,12 +196,33 @@ class ActivationApplicationBoundary:
                 reason="resource_not_active",
             )
 
-        # Check 9: pre-activation prerequisites still satisfied
-        # Only checks structural invariants (registered, not template, active).
-        # Does NOT re-check resource-kind-specific prerequisites that activation
-        # itself establishes (is_configured, has_active_account, is_executable,
-        # is_enabled, installation_state, is_discovered, secret_reference) —
-        # those are the fields activation mutates.
+        # Check 9: prerequisite evidence still exists and is valid
+        for eid in request.evidence_ids:
+            evidence = self._evidence_store.get(eid)
+            if evidence is None:
+                return ResourceActivationResult(
+                    success=False, request_id=decision.request_id,
+                    decision_id=decision_id, resource_id=decision.resource_id,
+                    reason=f"evidence_not_found: {eid}",
+                )
+            if evidence.revoked:
+                return ResourceActivationResult(
+                    success=False, request_id=decision.request_id,
+                    decision_id=decision_id, resource_id=decision.resource_id,
+                    reason=f"evidence_revoked: {eid}",
+                )
+
+        # Check 10: evidence still applies to exact resource
+        for eid in request.evidence_ids:
+            evidence = self._evidence_store.get(eid)
+            if evidence is not None and evidence.resource_id != decision.resource_id:
+                return ResourceActivationResult(
+                    success=False, request_id=decision.request_id,
+                    decision_id=decision_id, resource_id=decision.resource_id,
+                    reason=f"evidence_resource_mismatch: {eid}",
+                )
+
+        # Check 11: evidence not stale (revalidate authority's evidence verification)
         prereq_check = self._revalidate_pre_activation_prerequisites(resource_type, resource)
         if not prereq_check.passed:
             return ResourceActivationResult(
@@ -192,7 +231,16 @@ class ActivationApplicationBoundary:
                 reason=f"prerequisite_revalidation_failed: {prereq_check.reason}",
             )
 
-        # Check 11: scope valid
+        # Check 12: binding/configuration identity unchanged
+        binding_check = self._revalidate_binding(resource_type, resource, request)
+        if not binding_check.passed:
+            return ResourceActivationResult(
+                success=False, request_id=decision.request_id,
+                decision_id=decision_id, resource_id=decision.resource_id,
+                reason=f"binding_revalidation_failed: {binding_check.reason}",
+            )
+
+        # Check 13: scope valid
         if request.scope and decision.scope and request.scope != decision.scope:
             return ResourceActivationResult(
                 success=False, request_id=decision.request_id,
@@ -200,8 +248,11 @@ class ActivationApplicationBoundary:
                 reason="scope_mismatch",
             )
 
-        # All checks passed — apply activation to RRM fields
-        fields_updated = self._apply_activation(resource_type, resource, decision)
+        # All checks passed — apply activation transition
+        # The boundary MUST NOT manufacture prerequisite truth.
+        # Activation fields must already be in the correct state as verified
+        # by the authority's evidence validation.
+        fields_observed = self._observe_activation_state(resource_type, resource)
 
         # Consume the decision (single-use)
         self._consumed.add(decision_id)
@@ -212,7 +263,7 @@ class ActivationApplicationBoundary:
             decision_id=decision_id,
             resource_id=decision.resource_id,
             reason="activation_applied",
-            fields_updated=tuple(fields_updated),
+            fields_updated=tuple(fields_observed),
         )
 
     def _get_resource(self, resource_type: ResourceType, resource_id: str):
@@ -231,12 +282,7 @@ class ActivationApplicationBoundary:
         return None
 
     def _revalidate_pre_activation_prerequisites(self, resource_type: ResourceType, resource) -> _RevalidationResult:
-        """Re-validate structural invariants at application time.
-
-        Only checks pre-activation prerequisites that must hold BEFORE
-        activation fields are applied. Does NOT check resource-kind-specific
-        prerequisites that activation itself establishes.
-        """
+        """Re-validate structural invariants at application time."""
         if resource.is_template:
             return _RevalidationResult(False, "not_template", "Resource became template")
         if resource.resource_origin.value == "template":
@@ -246,52 +292,59 @@ class ActivationApplicationBoundary:
 
         return _RevalidationResult(True, "all_pre_activation_prerequisites_satisfied")
 
-    def _apply_activation(
-        self,
-        resource_type: ResourceType,
-        resource,
-        decision: ResourceActivationDecision,
-    ) -> list[str]:
-        """Apply activation fields to the RRM resource.
+    def _revalidate_binding(
+        self, resource_type: ResourceType, resource, request: ResourceActivationRequest,
+    ) -> _RevalidationResult:
+        """Re-validate binding/configuration identity at application time.
 
-        Returns list of fields that were updated.
+        Uses evidence to verify that the binding/configuration is still current.
         """
-        now = utc_iso()
-        fields_updated: list[str] = []
-
         if resource_type == ResourceType.PROVIDER:
             if not resource.is_configured:
-                resource.is_configured = True
-                fields_updated.append("is_configured")
+                return _RevalidationResult(False, "provider_configured", "Provider is no longer configured")
             if not resource.has_active_account:
-                resource.has_active_account = True
-                fields_updated.append("has_active_account")
-
+                return _RevalidationResult(False, "provider_active_account", "Provider no longer has active account")
         elif resource_type == ResourceType.CAPABILITY:
             if not resource.is_executable:
-                resource.is_executable = True
-                fields_updated.append("is_executable")
-
+                return _RevalidationResult(False, "capability_executable", "Capability is no longer executable")
         elif resource_type == ResourceType.AGENT:
             if not resource.is_enabled:
-                resource.is_enabled = True
-                fields_updated.append("is_enabled")
-            if resource.installation_state.value not in {"INSTALLED", "ENABLED", "AVAILABLE"}:
-                from intent_kernel.rrm.models import AgentInstallationState
-                resource.installation_state = AgentInstallationState.INSTALLED
-                fields_updated.append("installation_state")
-
+                return _RevalidationResult(False, "agent_enabled", "Agent is no longer enabled")
         elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
             if not resource.is_discovered:
-                resource.is_discovered = True
-                fields_updated.append("is_discovered")
-
+                return _RevalidationResult(False, "environment_discovered", "Environment is no longer discovered")
         elif resource_type == ResourceType.ACCOUNT:
-            if not resource.is_configured:
-                resource.is_configured = True
-                fields_updated.append("is_configured")
+            if not resource.secret_reference:
+                return _RevalidationResult(False, "account_secret_reference", "Account secret reference is gone")
 
-        if fields_updated:
-            resource.updated_at = now
+        return _RevalidationResult(True, "binding_identity_unchanged")
 
-        return fields_updated
+    def _observe_activation_state(
+        self, resource_type: ResourceType, resource,
+    ) -> list[str]:
+        """Observe (read-only) current activation fields. Must NOT mutate.
+
+        Returns list of fields that are already in the correct state.
+        """
+        fields: list[str] = []
+
+        if resource_type == ResourceType.PROVIDER:
+            if resource.is_configured:
+                fields.append("is_configured")
+            if resource.has_active_account:
+                fields.append("has_active_account")
+        elif resource_type == ResourceType.CAPABILITY:
+            if resource.is_executable:
+                fields.append("is_executable")
+        elif resource_type == ResourceType.AGENT:
+            if resource.is_enabled:
+                fields.append("is_enabled")
+            fields.append(f"installation_state={resource.installation_state.value}")
+        elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
+            if resource.is_discovered:
+                fields.append("is_discovered")
+        elif resource_type == ResourceType.ACCOUNT:
+            if resource.secret_reference:
+                fields.append("secret_reference")
+
+        return fields

@@ -3,7 +3,7 @@
 Orchestrates the full governed activation pipeline:
 
   REGISTERED RESOURCE
-  + INDEPENDENT PREREQUISITE EVIDENCE
+  + CANONICAL PREREQUISITE EVIDENCE (validated against canonical sources)
   → ACTIVATION REQUEST
   → PREREQUISITE EVALUATION WITH EVIDENCE
   → TYPED DECISION
@@ -13,14 +13,20 @@ Orchestrates the full governed activation pipeline:
 
 No stage may impersonate another.
 ACTIVATION APPROVAL IS NOT PREREQUISITE EVIDENCE.
+CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
 """
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
 from intent_kernel.activation.application_boundary import ActivationApplicationBoundary
 from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
+from intent_kernel.activation.evidence_authority import (
+    CanonicalActivationEvidenceAuthority,
+    EvidenceValidationResult,
+)
 from intent_kernel.activation.models import (
     ResourceActivationDecisionType,
     ResourceActivationEvidence,
@@ -39,12 +45,20 @@ class CanonicalResourceActivationService:
     independent mutation logic.
     """
 
-    def __init__(self, rrm: RegistryResourceManager) -> None:
+    def __init__(
+        self,
+        rrm: RegistryResourceManager,
+        provider_manager: Any = None,
+        capability_registry: Any = None,
+    ) -> None:
         self._rrm = rrm
         self._requests: dict[str, ResourceActivationRequest] = {}
         self._decisions: dict[str, object] = {}
         self._consumed_decisions: set[str] = set()
         self._evidence_store: dict[str, ResourceActivationEvidence] = {}
+        self._evidence_authority = CanonicalActivationEvidenceAuthority(
+            rrm, provider_manager, capability_registry,
+        )
         self._authority = CanonicalResourceActivationAuthority(rrm)
         self._application_boundary = ActivationApplicationBoundary(
             rrm, self._requests, self._decisions, self._consumed_decisions,
@@ -62,6 +76,10 @@ class CanonicalResourceActivationService:
     @property
     def application_boundary(self) -> ActivationApplicationBoundary:
         return self._application_boundary
+
+    @property
+    def evidence_authority(self) -> CanonicalActivationEvidenceAuthority:
+        return self._evidence_authority
 
     @property
     def requests(self) -> dict[str, ResourceActivationRequest]:
@@ -83,14 +101,21 @@ class CanonicalResourceActivationService:
     # Evidence management
     # ------------------------------------------------------------------
 
-    def register_evidence(self, evidence: ResourceActivationEvidence) -> None:
+    def register_evidence(
+        self,
+        evidence: ResourceActivationEvidence,
+    ) -> EvidenceValidationResult:
         """Register prerequisite evidence for activation evaluation.
 
-        Evidence must exist BEFORE activation approval.
+        Evidence is validated against canonical sources before storage.
+        CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
         """
-        self._evidence_store[evidence.evidence_id] = evidence
-        self._authority.register_evidence(evidence)
-        self._application_boundary.update_evidence(evidence)
+        validation = self._evidence_authority.validate_and_store(evidence)
+        if validation.valid:
+            self._evidence_store[evidence.evidence_id] = evidence
+            self._authority.register_evidence(evidence)
+            self._application_boundary.update_evidence(evidence)
+        return validation
 
     def get_evidence(self, evidence_id: str) -> ResourceActivationEvidence | None:
         return self._evidence_store.get(evidence_id)

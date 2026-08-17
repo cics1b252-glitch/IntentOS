@@ -6,6 +6,7 @@
     "stages": [
       "REGISTERED_RESOURCE",
       "INDEPENDENT_PREREQUISITE_EVIDENCE",
+      "EVIDENCE_VALIDATION",
       "ACTIVATION_REQUEST",
       "PREREQUISITE_EVALUATION_WITH_EVIDENCE",
       "TYPED_DECISION",
@@ -14,6 +15,7 @@
       "ACTIVATED_RESOURCE"
     ],
     "authority_chain": [
+      "CanonicalActivationEvidenceAuthority (EVIDENCE_VALIDATION_ONLY)",
       "CanonicalResourceActivationAuthority (ACTIVATION_ONLY)",
       "ActivationApplicationBoundary (ACTIVATION_APPLICATION_ONLY)",
       "CanonicalResourceActivationService (ORCHESTRATION_ONLY)"
@@ -21,7 +23,7 @@
   },
   "evidence_model": {
     "ResourceActivationEvidence": {
-      "fields": ["evidence_id", "resource_id", "resource_kind", "evidence_type", "source", "observed_at", "scope", "binding_identity", "revoked"],
+      "fields": ["evidence_id", "resource_id", "resource_kind", "evidence_type", "source", "source_identity", "observed_at", "scope", "binding_identity", "revoked"],
       "immutable": true
     },
     "ActivationEvidenceType": {
@@ -97,10 +99,10 @@
     "CONSUMED": "decision applied"
   },
   "test_coverage": {
-    "total_tests": 62,
+    "total_tests": 51,
     "categories": [
       "models_frozen_including_evidence",
-      "evidence_model_revocation_validity",
+      "evidence_model_revocation_validity_source_identity",
       "authority_rejects_unsupported_kind",
       "authority_rejects_unregistered_resource",
       "provider_no_evidence_rejects",
@@ -111,10 +113,11 @@
       "provider_with_evidence_approves",
       "capability_no_evidence_rejects",
       "capability_not_executable_rejects",
+      "capability_binding_not_in_registry_rejects",
       "capability_with_evidence_approves",
       "agent_no_evidence_rejects",
       "agent_not_enabled_rejects",
-      "agent_privileged_role_rejects",
+      "agent_invalid_installation_state_rejects",
       "agent_with_evidence_approves",
       "environment_no_evidence_rejects",
       "environment_not_discovered_rejects",
@@ -134,7 +137,15 @@
       "ra1801_containment",
       "service_wiring",
       "toctou_revalidation",
-      "boundary_observe_only"
+      "boundary_observe_only",
+      "ra1803_canonical_evidence_validation",
+      "ra1803_unsupported_resource_kind_rejected",
+      "ra1801_rrm_overwrite_guard",
+      "ra1801_governed_by_origin_detection",
+      "ra1801_explicitly_governed_protected",
+      "ra1801_same_origin_can_overwrite",
+      "ra1801_mark_governed_persistence",
+      "ra1801_agent_capability_account_environment_protection"
     ]
   }
 }

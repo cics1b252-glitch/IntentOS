@@ -91,8 +91,10 @@ class ResourceActivationEvidence:
     Evidence is INPUT to activation authority.
     Evidence is NOT produced by activation.
     Evidence must exist BEFORE activation approval.
+    Evidence must be validated against canonical sources.
 
     ACTIVATION APPROVAL IS NOT PREREQUISITE EVIDENCE.
+    CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
     """
 
     evidence_id: str
@@ -100,6 +102,7 @@ class ResourceActivationEvidence:
     resource_kind: ResourceDiscoveryKind
     evidence_type: ActivationEvidenceType
     source: str
+    source_identity: str = ""
     observed_at: str = field(default_factory=utc_iso)
     scope: str = "global"
     binding_identity: str = ""
@@ -117,6 +120,7 @@ class ResourceActivationEvidence:
             "resource_kind": self.resource_kind.value,
             "evidence_type": self.evidence_type.value,
             "source": self.source,
+            "source_identity": self.source_identity,
             "observed_at": self.observed_at,
             "scope": self.scope,
             "binding_identity": self.binding_identity,

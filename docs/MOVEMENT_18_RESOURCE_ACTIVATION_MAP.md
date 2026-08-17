@@ -5,6 +5,7 @@
 ```
 REGISTERED RESOURCE
   + INDEPENDENT PREREQUISITE EVIDENCE
+  → EVIDENCE VALIDATION (CanonicalActivationEvidenceAuthority)
   → ACTIVATION REQUEST (typed, immutable)
   → PREREQUISITE EVALUATION WITH EVIDENCE (ACTIVATION_ONLY authority)
   → TYPED DECISION (APPROVE / REJECT)
@@ -18,6 +19,7 @@ REGISTERED RESOURCE
 **ACTIVATION MUST VERIFY PREREQUISITE TRUTH.**
 **ACTIVATION MUST NOT INVENT PREREQUISITE TRUTH.**
 **ACTIVATION APPROVAL IS NOT PREREQUISITE EVIDENCE.**
+**CALLER ASSERTION ≠ CANONICAL SOURCE OF TRUTH.**
 
 Evidence is INPUT to activation.
 Approval is NOT evidence.
@@ -36,6 +38,21 @@ INDEPENDENT EVIDENCE
 ```
 
 ## Separation of Concerns
+
+### Evidence Authority — EVIDENCE_VALIDATION_ONLY
+
+Validates every evidence against live canonical sources before storage:
+- Unregistered resource evidence → rejected
+- Revoked evidence → rejected
+- Unsupported resource kind → rejected
+- Provider: is_configured validated against canonical RRM state
+- Provider: has_active_account validated against canonical RRM state
+- Capability: is_executable validated against canonical RRM state
+- Capability: binding_identity validated against canonical capability registry
+- Agent: is_enabled validated against canonical RRM state
+- Agent: installation_state validated against canonical RRM state
+- Environment: is_discovered validated against canonical RRM state
+- Account: secret_reference validated against canonical RRM state
 
 ### Authority — ACTIVATION_ONLY
 
@@ -89,6 +106,7 @@ Delegates to authority and boundary; contains no independent mutation logic.
 | resource_kind | Discovery kind |
 | evidence_type | Typed category |
 | source | Canonical source |
+| source_identity | Source identity for validation |
 | observed_at | Timestamp |
 | scope | Scope where applicable |
 | binding_identity | Binding identity where applicable |
@@ -131,6 +149,9 @@ Delegates to authority and boundary; contains no independent mutation logic.
 - No authority-bearing fields in activation models
 - No discovery, promotion, or registration authority leak
 - Compatibility/bootstrap paths documented but not silently activated
+- RRM same-ID overwrite guard: compatibility sources cannot overwrite governed resources
+- Governed resource provenance detection: USER_REGISTRATION, ORGANIZATION_POLICY, CONFIGURATION, HOST_DISCOVERY origins are governed
+- Explicit mark_governed() API for runtime governance
 
 ### RA-18-02: Activation Evidence Repair
 
@@ -144,15 +165,41 @@ Delegates to authority and boundary; contains no independent mutation logic.
 - Forged/revoked/cross-resource evidence rejected
 - Binding revalidation at application time
 
+### RA-18-03: Canonical Evidence Validation (Repair Cycle 2)
+
+**Defect:** Public callers could assert arbitrary evidence accepted as canonical prerequisite truth.
+
+**Repair:**
+- CanonicalActivationEvidenceAuthority (EVIDENCE_VALIDATION_ONLY) validates every evidence against live canonical sources before storage
+- Evidence validated against: ProviderManager bindings, CanonicalCapabilityRegistry, agent lifecycle state, environment discovery provenance, account configuration state
+- register_evidence() now goes through evidence authority validation
+- Unregistered resource evidence rejected
+- Revoked evidence rejected
+- Unsupported resource kind rejected
+- Binding identity validated against canonical registry
+- Evidence store contains only validated evidence
+
+### RA-18-01 (Revised): Compatibility/Bootstrap Overwrite Guard (Repair Cycle 2)
+
+**Defect:** RRM register_* methods silently replaced same-ID objects, allowing compatibility writers to overwrite governed M17 resources.
+
+**Repair:**
+- _is_governed_resource() detects governed resources by provenance (USER_REGISTRATION, ORGANIZATION_POLICY, CONFIGURATION, HOST_DISCOVERY) or explicit mark_governed()
+- _is_compatibility_source() identifies MIGRATION, CONFIGURATION, HOST_DISCOVERY origins
+- register_provider/capability/agent/account/environment: compatibility sources rejected when target is governed
+- Same-origin overwrites still permitted (legitimate updates)
+- mark_governed()/is_governed() API for explicit governance
+
 ### Paths Contained
 
 | Path | Type | Containment |
 |---|---|---|
-| RuntimeResourceProjection | COMPATIBILITY_ONLY | Projection callback, not governed activation |
-| RRMToCORAdapter | COMPATIBILITY_ONLY | Adapter bridge, not governed activation |
-| ProviderManager.register | BOOTSTRAP_ONLY | Registration path, not activation |
-| Composition direct calls | BOOTSTRAP_ONLY | Bootstrap initialization, not activation |
-| update_resource_status | GOVERNED | Status mutation, not activation |
+| RuntimeResourceProjection | COMPATIBILITY_ONLY | Projection callback, not governed activation. Cannot overwrite governed resources. |
+| RRMToCORAdapter | COMPATIBILITY_ONLY | Adapter bridge, not governed activation. Cannot overwrite governed resources. |
+| ProviderManager.register | BOOTSTRAP_ONLY | Registration path, not activation. Cannot overwrite governed resources. |
+| Composition direct calls | BOOTSTRAP_ONLY | Bootstrap initialization, not activation. Cannot overwrite governed resources. |
+| update_resource_status | GOVERNED | Status mutation, not activation. Cannot overwrite governed resources. |
+| Public register_evidence | GOVERNED | Evidence validated by CanonicalActivationEvidenceAuthority before storage. |
 
 ## Lifecycle States
 
@@ -163,9 +210,9 @@ ResourceActivationStatus:
 
 ## Test Coverage
 
-62 tests (A-Z matrix + adversarial scenarios):
+51 tests (A-Z matrix + RA-18-03 evidence validation + RA-18-01 overwrite guard):
 - Models frozen and immutable (including evidence)
-- Evidence model (revocation, validity)
+- Evidence model (revocation, validity, source_identity)
 - Authority rejects unsupported/unregistered resources
 - Provider: no evidence → reject, wrong evidence type → reject, revoked → reject
 - Provider: not configured → reject, no active account → reject
@@ -189,3 +236,25 @@ ResourceActivationStatus:
 - RA-18-01 containment
 - TOCTOU revalidation (template, unregistered)
 - Boundary observe-only (all resource kinds)
+- RA-18-03: Canonical evidence validation (19 tests)
+  - Unregistered resource evidence → rejected
+  - Revoked evidence → rejected
+  - Provider config valid/invalid → accepted/rejected
+  - Provider account valid/invalid → accepted/rejected
+  - Capability executable valid/invalid/non-existent binding → accepted/rejected
+  - Agent identity valid/disabled/invalid state → accepted/rejected
+  - Environment discovery valid/not discovered → accepted/rejected
+  - Account secret valid/no reference → accepted/rejected
+  - Only validated evidence stored
+  - Service wires evidence authority
+  - Unsupported resource kind → rejected
+- RA-18-01: RRM overwrite guard (12 tests)
+  - Governed by origin detection
+  - Compatibility source cannot overwrite USER_REGISTRATION
+  - Explicitly governed resource protected
+  - Same origin can overwrite
+  - Configuration cannot overwrite USER_REGISTRATION
+  - Host discovery cannot overwrite USER_REGISTRATION
+  - Non-governed resource can register
+  - mark_governed/is_governed persistence
+  - Agent capability account environment overwrite protection

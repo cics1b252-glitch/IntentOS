@@ -42,6 +42,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         self._capabilities: Dict[str, CapabilityResource] = {}  # keyed by name or capability_id
         self._agents: Dict[str, AgentResource] = {}
         self._projects: Dict[str, ProjectResource] = {}
+        self._governed_ids: Set[str] = set()
 
         if populate_defaults:
             self.populate_default_catalog()
@@ -50,6 +51,10 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_provider(self, provider: ProviderResource) -> ProviderResource:
         with self._lock:
+            existing = self._providers.get(provider.provider_id)
+            if existing is not None and self._is_governed_resource(provider.provider_id):
+                if self._is_compatibility_source(provider.resource_origin):
+                    return existing
             provider.updated_at = utc_iso()
             self._providers[provider.provider_id] = provider
             return provider
@@ -78,6 +83,10 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_account(self, account: AccountResource) -> AccountResource:
         with self._lock:
+            existing = self._accounts.get(account.account_id)
+            if existing is not None and self._is_governed_resource(account.account_id):
+                if self._is_compatibility_source(account.resource_origin):
+                    return existing
             account.updated_at = utc_iso()
             self._accounts[account.account_id] = account
             return account
@@ -113,6 +122,10 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_environment(self, environment: ExecutionEnvironmentResource) -> ExecutionEnvironmentResource:
         with self._lock:
+            existing = self._environments.get(environment.environment_id)
+            if existing is not None and self._is_governed_resource(environment.environment_id):
+                if self._is_compatibility_source(environment.resource_origin):
+                    return existing
             environment.updated_at = utc_iso()
             self._environments[environment.environment_id] = environment
             return environment
@@ -141,6 +154,10 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_capability(self, capability: CapabilityResource) -> CapabilityResource:
         with self._lock:
+            existing = self._capabilities.get(capability.capability_id)
+            if existing is not None and self._is_governed_resource(capability.capability_id):
+                if self._is_compatibility_source(capability.resource_origin):
+                    return existing
             capability.updated_at = utc_iso()
             self._capabilities[capability.capability_id] = capability
             if capability.name and capability.name != capability.capability_id:
@@ -175,6 +192,10 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_agent(self, agent: AgentResource) -> AgentResource:
         with self._lock:
+            existing = self._agents.get(agent.agent_id)
+            if existing is not None and self._is_governed_resource(agent.agent_id):
+                if self._is_compatibility_source(agent.resource_origin):
+                    return existing
             agent.updated_at = utc_iso()
             self._agents[agent.agent_id] = agent
             return agent
@@ -236,6 +257,59 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 del self._projects[project_id]
                 return True
             return False
+
+    # --- Governed Resource Provenance ---
+
+    def mark_governed(self, resource_id: str) -> None:
+        """Mark a resource ID as governed (e.g., promoted via M17).
+
+        Governed resources cannot be silently overwritten by
+        compatibility/bootstrap writers.
+        """
+        with self._lock:
+            self._governed_ids.add(resource_id)
+
+    def is_governed(self, resource_id: str) -> bool:
+        """Check if a resource ID is governed."""
+        with self._lock:
+            return resource_id in self._governed_ids
+
+    def _is_governed_resource(self, resource_id: str) -> bool:
+        """Check if an existing resource is governed.
+
+        A resource is considered governed if:
+        - It is in the governed IDs set, OR
+        - Its origin is USER_REGISTRATION, ORGANIZATION_POLICY,
+          CONFIGURATION, or HOST_DISCOVERY (non-compatibility origins)
+        """
+        if resource_id in self._governed_ids:
+            return True
+        existing = (
+            self._providers.get(resource_id)
+            or self._capabilities.get(resource_id)
+            or self._agents.get(resource_id)
+            or self._environments.get(resource_id)
+            or self._accounts.get(resource_id)
+            or self._projects.get(resource_id)
+        )
+        if existing is not None:
+            origin = getattr(existing, "resource_origin", None)
+            if origin in (
+                ResourceOrigin.USER_REGISTRATION,
+                ResourceOrigin.ORGANIZATION_POLICY,
+                ResourceOrigin.CONFIGURATION,
+                ResourceOrigin.HOST_DISCOVERY,
+            ):
+                return True
+        return False
+
+    def _is_compatibility_source(self, resource_origin: ResourceOrigin) -> bool:
+        """Check if a resource origin represents a compatibility/bootstrap source."""
+        return resource_origin in (
+            ResourceOrigin.MIGRATION,
+            ResourceOrigin.CONFIGURATION,
+            ResourceOrigin.HOST_DISCOVERY,
+        )
 
     # --- Generic Query & Status Operations ---
 

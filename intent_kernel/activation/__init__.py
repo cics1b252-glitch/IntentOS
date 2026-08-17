@@ -15,6 +15,10 @@ Approval is NOT evidence.
 from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
 from intent_kernel.activation.application_boundary import ActivationApplicationBoundary
 from intent_kernel.activation.service import CanonicalResourceActivationService, ActivationError
+from intent_kernel.activation.evidence_authority import (
+    CanonicalActivationEvidenceAuthority,
+    EvidenceValidationResult,
+)
 from intent_kernel.activation.models import (
     ResourceActivationStatus,
     ResourceActivationDecisionType,
@@ -30,6 +34,8 @@ __all__ = [
     "ActivationApplicationBoundary",
     "CanonicalResourceActivationService",
     "ActivationError",
+    "CanonicalActivationEvidenceAuthority",
+    "EvidenceValidationResult",
     "ResourceActivationStatus",
     "ResourceActivationDecisionType",
     "ResourceActivationRequest",

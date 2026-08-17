@@ -73,6 +73,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_provider(self, provider_id: str) -> bool:
         with self._lock:
+            if self._is_governed_resource(provider_id):
+                return False
             if provider_id in self._providers:
                 del self._providers[provider_id]
                 return True
@@ -111,6 +113,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_account(self, account_id: str) -> bool:
         with self._lock:
+            if self._is_governed_resource(account_id):
+                return False
             if account_id in self._accounts:
                 del self._accounts[account_id]
                 return True
@@ -142,6 +146,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_environment(self, environment_id: str) -> bool:
         with self._lock:
+            if self._is_governed_resource(environment_id):
+                return False
             if environment_id in self._environments:
                 del self._environments[environment_id]
                 return True
@@ -176,6 +182,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_capability(self, capability_id: str) -> bool:
         with self._lock:
+            if self._is_governed_resource(capability_id):
+                return False
             cap = self._capabilities.get(capability_id)
             if cap:
                 keys_to_del = [k for k, v in self._capabilities.items() if v is cap]
@@ -210,6 +218,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_agent(self, agent_id: str) -> bool:
         with self._lock:
+            if self._is_governed_resource(agent_id):
+                return False
             if agent_id in self._agents:
                 del self._agents[agent_id]
                 return True

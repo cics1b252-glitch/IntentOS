@@ -231,6 +231,19 @@ class ActivationApplicationBoundary:
                     reason=f"evidence_resource_mismatch: {eid}",
                 )
 
+        # Check 16: evidence governed_registration_id matches resource
+        # Prevents cross-identity evidence reuse (evidence from A authorizing B)
+        resource_grid = getattr(resource, "governed_registration_id", "")
+        if resource_grid:
+            for eid in request.evidence_ids:
+                evidence = self._evidence_store.get(eid)
+                if evidence is not None and evidence.governed_registration_id != resource_grid:
+                    return ResourceActivationResult(
+                        success=False, request_id=decision.request_id,
+                        decision_id=decision_id, resource_id=decision.resource_id,
+                        reason=f"evidence_governed_identity_mismatch: {eid}",
+                    )
+
         # Check 11: evidence not stale (revalidate authority's evidence verification)
         prereq_check = self._revalidate_pre_activation_prerequisites(resource_type, resource)
         if not prereq_check.passed:

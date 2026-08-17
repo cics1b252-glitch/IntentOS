@@ -196,6 +196,7 @@ class CanonicalActivationEvidenceAuthority:
         """Derive provider prerequisite evidence from canonical source."""
         evidence_list: list[ResourceActivationEvidence] = []
         ts = utc_iso()
+        grid = getattr(resource, "governed_registration_id", "")
 
         if resource.is_configured:
             binding = ""
@@ -212,6 +213,7 @@ class CanonicalActivationEvidenceAuthority:
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
                 binding_identity=binding,
+                governed_registration_id=grid,
                 _trusted=True,
             ))
 
@@ -224,6 +226,7 @@ class CanonicalActivationEvidenceAuthority:
                 source="canonical:rrm",
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
+                governed_registration_id=grid,
                 _trusted=True,
             ))
 
@@ -235,6 +238,7 @@ class CanonicalActivationEvidenceAuthority:
         """Derive capability prerequisite evidence from canonical registry."""
         evidence_list: list[ResourceActivationEvidence] = []
         ts = utc_iso()
+        grid = getattr(resource, "governed_registration_id", "")
 
         if resource.is_executable:
             binding = ""
@@ -256,6 +260,7 @@ class CanonicalActivationEvidenceAuthority:
                 source_identity="CanonicalCapabilityRegistry",
                 observed_at=ts,
                 binding_identity=binding,
+                governed_registration_id=grid,
                 _trusted=True,
             ))
 
@@ -269,6 +274,7 @@ class CanonicalActivationEvidenceAuthority:
 
         evidence_list: list[ResourceActivationEvidence] = []
         ts = utc_iso()
+        grid = getattr(resource, "governed_registration_id", "")
 
         valid_states = (
             AgentInstallationState.INSTALLED,
@@ -284,6 +290,7 @@ class CanonicalActivationEvidenceAuthority:
                 source="canonical:rrm",
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
+                governed_registration_id=grid,
                 _trusted=True,
             ))
 
@@ -295,6 +302,7 @@ class CanonicalActivationEvidenceAuthority:
         """Derive environment prerequisite evidence from canonical source."""
         evidence_list: list[ResourceActivationEvidence] = []
         ts = utc_iso()
+        grid = getattr(resource, "governed_registration_id", "")
 
         if resource.is_discovered:
             evidence_list.append(ResourceActivationEvidence(
@@ -305,6 +313,7 @@ class CanonicalActivationEvidenceAuthority:
                 source="canonical:rrm",
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
+                governed_registration_id=grid,
                 _trusted=True,
             ))
 
@@ -316,6 +325,7 @@ class CanonicalActivationEvidenceAuthority:
         """Derive account prerequisite evidence from canonical source."""
         evidence_list: list[ResourceActivationEvidence] = []
         ts = utc_iso()
+        grid = getattr(resource, "governed_registration_id", "")
 
         if resource.secret_reference:
             evidence_list.append(ResourceActivationEvidence(
@@ -326,6 +336,7 @@ class CanonicalActivationEvidenceAuthority:
                 source="canonical:rrm",
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
+                governed_registration_id=grid,
                 _trusted=True,
             ))
 

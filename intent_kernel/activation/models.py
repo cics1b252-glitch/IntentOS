@@ -106,6 +106,7 @@ class ResourceActivationEvidence:
     observed_at: str = field(default_factory=utc_iso)
     scope: str = "global"
     binding_identity: str = ""
+    governed_registration_id: str = ""
     evidence_payload: dict[str, Any] = field(default_factory=dict, compare=False)
     revoked: bool = False
     _trusted: bool = field(default=False, compare=False)
@@ -135,6 +136,7 @@ class ResourceActivationEvidence:
             "observed_at": self.observed_at,
             "scope": self.scope,
             "binding_identity": self.binding_identity,
+            "governed_registration_id": self.governed_registration_id,
             "revoked": self.revoked,
             "_trusted": self._trusted,
         }

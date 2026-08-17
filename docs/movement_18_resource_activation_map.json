@@ -22,8 +22,9 @@
   },
   "evidence_model": {
     "ResourceActivationEvidence": {
-      "fields": ["evidence_id", "resource_id", "resource_kind", "evidence_type", "source", "source_identity", "observed_at", "scope", "binding_identity", "revoked"],
-      "immutable": true
+      "fields": ["evidence_id", "resource_id", "resource_kind", "evidence_type", "source", "source_identity", "observed_at", "scope", "binding_identity", "revoked", "_trusted"],
+      "immutable": true,
+      "trusted_field": "_trusted — only True when produced by collect_for_resource()"
     },
     "ActivationEvidenceType": {
       "PROVIDER_CONFIGURATION": "proves is_configured = True",
@@ -74,7 +75,9 @@
         "Boundary observes, does not fabricate prerequisite fields",
         "Single-use decision consumption",
         "No authority-bearing fields in activation models",
-        "No discovery, promotion, or registration authority leak"
+        "No discovery, promotion, or registration authority leak",
+        "ALL register_* reject governed replacement unconditionally",
+        "update_resource_status returns False for governed resources"
       ]
     },
     "RA-18-02": {
@@ -87,6 +90,25 @@
         "Forged/revoked/cross-resource evidence rejected",
         "Binding revalidation at application time"
       ]
+    },
+    "RA-18-03": {
+      "defect": "Callers could construct arbitrary evidence accepted as canonical truth",
+      "repair": [
+        "collect_for_resource() is ONLY trusted evidence entry point",
+        "validate_and_store() is COMPATIBILITY_ONLY — does NOT produce trusted evidence",
+        "Evidence model has _trusted field, default False",
+        "is_evidence_trusted() checks canonical trusted store",
+        "TOCTOU check 15 verifies is_evidence_trusted() at application time"
+      ]
+    },
+    "RA-18-04": {
+      "defect": "resource_origin alone classified resources as governed",
+      "repair": [
+        "governed_registration_id required for governed classification",
+        "mark_governed() is COMPATIBILITY_ONLY — not canonical source",
+        "M17 CanonicalPromotionRegistrationBoundary creates canonical governed_registration_id",
+        "Same-ID replacement of governed resources rejected regardless of origin"
+      ]
     }
   },
   "lifecycle_states": {
@@ -98,7 +120,7 @@
     "CONSUMED": "decision applied"
   },
   "test_coverage": {
-    "total_tests": 51,
+    "total_tests": 102,
     "categories": [
       "models_frozen_including_evidence",
       "evidence_model_revocation_validity_source_identity",
@@ -144,7 +166,32 @@
       "ra1801_explicitly_governed_protected",
       "ra1801_same_origin_can_overwrite",
       "ra1801_mark_governed_persistence",
-      "ra1801_agent_capability_account_environment_protection"
+      "ra1801_agent_capability_account_environment_protection",
+      "cycle4_ra1803_caller_evidence_not_trusted",
+      "cycle4_ra1803_collect_for_resource_trusted",
+      "cycle4_ra1803_validate_and_store_compatibility_only",
+      "cycle4_ra1803_source_string_not_sufficient",
+      "cycle4_ra1803_evidence_ids_unique",
+      "cycle4_ra1803_trusted_store_additive",
+      "cycle4_ra1803_all_resource_kinds_trusted",
+      "cycle4_ra1804_mark_governed_compatibility_only",
+      "cycle4_ra1804_origin_insufficient",
+      "cycle4_ra1804_configuration_not_governed",
+      "cycle4_ra1804_migration_not_governed",
+      "cycle4_ra1804_host_discovery_not_governed",
+      "cycle4_ra1804_governed_id_special_characters",
+      "cycle4_ra1804_governed_id_preserved",
+      "cycle4_ra1801_all_origins_rejected_for_governed",
+      "cycle4_ra1801_provider_migration_rejected",
+      "cycle4_ra1801_provider_configuration_rejected",
+      "cycle4_ra1801_capability_migration_rejected",
+      "cycle4_ra1801_agent_migration_rejected",
+      "cycle4_ra1801_environment_migration_rejected",
+      "cycle4_ra1801_account_migration_rejected",
+      "cycle4_ra1802_regression_full_pipeline",
+      "cycle4_ra1802_regression_boundary_applies",
+      "cycle4_ra1301_typed_enums",
+      "cycle4_ra1301_frozen_evidence_no_mutation"
     ]
   }
 }

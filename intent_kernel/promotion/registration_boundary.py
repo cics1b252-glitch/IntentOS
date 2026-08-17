@@ -13,9 +13,15 @@ It must NOT become:
   - Mission authority.
 
 RRM remains canonical authority for runtime availability/eligibility.
+
+Cycle 4: This boundary generates canonical governed_registration_id for
+each registered resource. The governed identity is bound to
+resource_id + kind + proposal_id + decision_id and is NOT caller-controlled.
 """
 
 from __future__ import annotations
+
+from uuid import uuid4
 
 from intent_kernel.discovery.models import ResourceDiscoveryStatus
 from intent_kernel.promotion.decision_authority import ResourcePromotionDecisionAuthority
@@ -264,7 +270,12 @@ class CanonicalPromotionRegistrationBoundary:
         return None
 
     def _rrm_register(self, proposal: object) -> str | None:
-        """Translate proposal into RRM registration. Returns reg type or None."""
+        """Translate proposal into RRM registration. Returns reg type or None.
+
+        Cycle 4: Generates canonical governed_registration_id bound to
+        resource_id + kind + proposal_id + decision_id. Caller cannot
+        control governed identity.
+        """
         from intent_kernel.rrm.models import (
             AccountResource,
             AgentResource,
@@ -281,10 +292,14 @@ class CanonicalPromotionRegistrationBoundary:
         rid = getattr(proposal, "resource_id", "")
         desc = getattr(proposal, "proposed_descriptor", {})
         scope = getattr(proposal, "requested_scope", "global")
+        proposal_id = getattr(proposal, "proposal_id", "")
+
+        canonical_reg_id = f"registration_{uuid4().hex[:12]}"
 
         base_meta: dict[str, object] = {
             "promotion_scope": scope,
             "promotion_via": "canonical_promotion_boundary",
+            "canonical_registration_id": canonical_reg_id,
         }
 
         if kind_str == "provider":
@@ -297,9 +312,12 @@ class CanonicalPromotionRegistrationBoundary:
                 is_configured=False,
                 has_active_account=False,
                 status=ResourceStatus.ACTIVE,
+                governed_registration_id=canonical_reg_id,
                 metadata=base_meta,
             )
             self._rrm.register_provider(resource)
+            if hasattr(self._rrm, "mark_governed"):
+                self._rrm.mark_governed(rid, canonical_reg_id)
             return "provider"
 
         if kind_str == "capability":
@@ -312,9 +330,12 @@ class CanonicalPromotionRegistrationBoundary:
                 is_executable=False,
                 status=ResourceStatus.ACTIVE,
                 tags=tuple(desc.get("capability_claims", [])),
+                governed_registration_id=canonical_reg_id,
                 metadata=base_meta,
             )
             self._rrm.register_capability(resource)
+            if hasattr(self._rrm, "mark_governed"):
+                self._rrm.mark_governed(rid, canonical_reg_id)
             return "capability"
 
         if kind_str == "agent":
@@ -327,9 +348,12 @@ class CanonicalPromotionRegistrationBoundary:
                 is_enabled=False,
                 installation_state=None,
                 status=ResourceStatus.ACTIVE,
+                governed_registration_id=canonical_reg_id,
                 metadata=base_meta,
             )
             self._rrm.register_agent(resource)
+            if hasattr(self._rrm, "mark_governed"):
+                self._rrm.mark_governed(rid, canonical_reg_id)
             return "agent"
 
         if kind_str == "environment":
@@ -341,9 +365,12 @@ class CanonicalPromotionRegistrationBoundary:
                 is_template=False,
                 is_discovered=False,
                 status=ResourceStatus.ACTIVE,
+                governed_registration_id=canonical_reg_id,
                 metadata=base_meta,
             )
             self._rrm.register_environment(resource)
+            if hasattr(self._rrm, "mark_governed"):
+                self._rrm.mark_governed(rid, canonical_reg_id)
             return "environment"
 
         # All other kinds (tool, device, custom, connected_service, etc.)
@@ -357,9 +384,12 @@ class CanonicalPromotionRegistrationBoundary:
             is_executable=False,
             status=ResourceStatus.ACTIVE,
             tags=tuple(desc.get("capability_claims", [])),
+            governed_registration_id=canonical_reg_id,
             metadata={**base_meta, "discovery_kind": kind_str},
         )
         self._rrm.register_capability(resource)
+        if hasattr(self._rrm, "mark_governed"):
+            self._rrm.mark_governed(rid, canonical_reg_id)
         return "capability"
 
         return None

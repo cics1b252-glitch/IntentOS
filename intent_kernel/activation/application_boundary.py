@@ -258,6 +258,7 @@ class ActivationApplicationBoundary:
             )
 
         # Check 15: evidence TOCTOU — revalidate against canonical source
+        # and verify evidence is in the canonical trusted store
         if self._evidence_authority is not None:
             fresh_evidence = self._evidence_authority.collect_for_resource(
                 decision.resource_id, decision.resource_kind,
@@ -276,6 +277,12 @@ class ActivationApplicationBoundary:
                         success=False, request_id=decision.request_id,
                         decision_id=decision_id, resource_id=decision.resource_id,
                         reason=f"evidence_no_longer_canonical: {eid}",
+                    )
+                if not self._evidence_authority.is_evidence_trusted(eid):
+                    return ResourceActivationResult(
+                        success=False, request_id=decision.request_id,
+                        decision_id=decision_id, resource_id=decision.resource_id,
+                        reason=f"evidence_not_trusted: {eid}",
                     )
 
         # All checks passed — apply activation transition

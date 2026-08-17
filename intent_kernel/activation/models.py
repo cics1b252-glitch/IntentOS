@@ -108,10 +108,21 @@ class ResourceActivationEvidence:
     binding_identity: str = ""
     evidence_payload: dict[str, Any] = field(default_factory=dict, compare=False)
     revoked: bool = False
+    _trusted: bool = field(default=False, compare=False)
 
     def is_valid(self) -> bool:
         """Evidence is valid if not revoked."""
         return not self.revoked
+
+    @property
+    def is_trusted(self) -> bool:
+        """Whether this evidence was derived from a canonical source.
+
+        Only evidence produced by CanonicalActivationEvidenceAuthority
+        via collect_for_resource() is trusted. Caller-constructed evidence
+        is NEVER trusted.
+        """
+        return self._trusted
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +136,7 @@ class ResourceActivationEvidence:
             "scope": self.scope,
             "binding_identity": self.binding_identity,
             "revoked": self.revoked,
+            "_trusted": self._trusted,
         }
 
 

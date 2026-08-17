@@ -9,8 +9,12 @@ CALLER ASSERTION != CANONICAL SOURCE OF TRUTH
 ACTIVATION APPROVAL != PREREQUISITE EVIDENCE
 
 collect_for_resource() produces evidence by querying the canonical
-source directly. validate_and_store() is retained for backward
-compatibility but only stores evidence that was previously collected.
+source directly. Only collect_for_resource() produces TRUSTED evidence.
+
+validate_and_store() is COMPATIBILITY_ONLY / TEST_ONLY — it validates
+caller-provided evidence against canonical sources but does NOT grant
+it trusted status. Trusted evidence is ONLY produced by
+collect_for_resource().
 """
 
 from __future__ import annotations
@@ -45,6 +49,10 @@ class CanonicalActivationEvidenceAuthority:
     source directly. Callers cannot submit arbitrary evidence objects
     and have them accepted as truth.
 
+    Only collect_for_resource() produces TRUSTED evidence stored in the
+    canonical evidence trust store. validate_and_store() is
+    COMPATIBILITY_ONLY / TEST_ONLY and does NOT produce trusted evidence.
+
     CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
     """
 
@@ -69,6 +77,7 @@ class CanonicalActivationEvidenceAuthority:
         self._provider_manager = provider_manager
         self._capability_registry = capability_registry
         self._collected_evidence: dict[str, ResourceActivationEvidence] = {}
+        self._compatibility_evidence: dict[str, ResourceActivationEvidence] = {}
 
     # ------------------------------------------------------------------
     # Primary API — derive evidence from canonical sources
@@ -84,6 +93,8 @@ class CanonicalActivationEvidenceAuthority:
         This is the ONLY trusted entry point. Callers do NOT construct
         evidence objects — the authority derives them by querying the
         canonical source directly.
+
+        ALL evidence produced by this method is marked as TRUSTED.
         """
         resource_type = self._RESOURCE_TYPE_MAP.get(resource_kind)
         if resource_type is None:
@@ -117,18 +128,25 @@ class CanonicalActivationEvidenceAuthority:
     def get_all_collected(self) -> dict[str, ResourceActivationEvidence]:
         return dict(self._collected_evidence)
 
+    def is_evidence_trusted(self, evidence_id: str) -> bool:
+        """Check if an evidence object is in the canonical trusted store."""
+        return evidence_id in self._collected_evidence
+
     # ------------------------------------------------------------------
-    # Backward-compatible entry point — validates then stores
+    # Backward-compatible entry point — COMPATIBILITY_ONLY / TEST_ONLY
     # ------------------------------------------------------------------
 
     def validate_and_store(
         self,
         evidence: ResourceActivationEvidence,
     ) -> EvidenceValidationResult:
-        """Validate evidence against canonical sources and store if valid.
+        """Validate evidence against canonical sources. COMPATIBILITY_ONLY.
 
-        Retained for backward compatibility. New code should use
-        collect_for_resource() instead.
+        Retained for backward compatibility and test infrastructure only.
+        Does NOT grant evidence trusted status. Does NOT store in the
+        canonical evidence trust store.
+
+        For production canonical evidence: use collect_for_resource().
         """
         if evidence.revoked:
             return EvidenceValidationResult(
@@ -158,15 +176,15 @@ class CanonicalActivationEvidenceAuthority:
         )
 
         if validation.valid:
-            self._collected_evidence[evidence.evidence_id] = evidence
+            self._compatibility_evidence[evidence.evidence_id] = evidence
 
         return validation
 
     def get_validated_evidence(self, evidence_id: str) -> ResourceActivationEvidence | None:
-        return self._collected_evidence.get(evidence_id)
+        return self._compatibility_evidence.get(evidence_id)
 
     def get_all_validated(self) -> dict[str, ResourceActivationEvidence]:
-        return dict(self._collected_evidence)
+        return dict(self._compatibility_evidence)
 
     # ------------------------------------------------------------------
     # Canonical evidence producers — derive from source, not caller
@@ -194,6 +212,7 @@ class CanonicalActivationEvidenceAuthority:
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
                 binding_identity=binding,
+                _trusted=True,
             ))
 
         if resource.has_active_account:
@@ -205,6 +224,7 @@ class CanonicalActivationEvidenceAuthority:
                 source="canonical:rrm",
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
+                _trusted=True,
             ))
 
         return evidence_list
@@ -236,6 +256,7 @@ class CanonicalActivationEvidenceAuthority:
                 source_identity="CanonicalCapabilityRegistry",
                 observed_at=ts,
                 binding_identity=binding,
+                _trusted=True,
             ))
 
         return evidence_list
@@ -263,6 +284,7 @@ class CanonicalActivationEvidenceAuthority:
                 source="canonical:rrm",
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
+                _trusted=True,
             ))
 
         return evidence_list
@@ -283,6 +305,7 @@ class CanonicalActivationEvidenceAuthority:
                 source="canonical:rrm",
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
+                _trusted=True,
             ))
 
         return evidence_list
@@ -303,6 +326,7 @@ class CanonicalActivationEvidenceAuthority:
                 source="canonical:rrm",
                 source_identity="RegistryResourceManager",
                 observed_at=ts,
+                _trusted=True,
             ))
 
         return evidence_list

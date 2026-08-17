@@ -127,6 +127,9 @@ class CanonicalResourceActivationService:
 
         DEPRECATED: use collect_and_register_evidence() instead.
         Evidence is validated against canonical sources before storage.
+        Evidence from this path is NOT trusted — only collect_for_resource()
+        produces trusted evidence.
+
         CALLER ASSERTION != CANONICAL SOURCE OF TRUTH.
         """
         validation = self._evidence_authority.validate_and_store(evidence)

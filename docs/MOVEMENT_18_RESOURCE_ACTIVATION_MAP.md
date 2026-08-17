@@ -43,13 +43,15 @@ INDEPENDENT EVIDENCE
 
 Derives activation evidence from canonical sources. Callers cannot construct arbitrary evidence:
 
-- `collect_for_resource()` queries canonical source and produces evidence
+- `collect_for_resource()` queries canonical source and produces **TRUSTED** evidence
+- Only `collect_for_resource()` produces evidence in the canonical trusted store
 - Provider: is_configured + has_active_account derived from RRM state
 - Capability: is_executable + binding_identity derived from capability registry
 - Agent: is_enabled + installation_state derived from RRM state
 - Environment: is_discovered derived from RRM state
 - Account: secret_reference derived from RRM state
-- `validate_and_store()` retained for backward compatibility
+- `validate_and_store()` is **COMPATIBILITY_ONLY / TEST_ONLY** — stores in compatibility store, does NOT grant trusted status
+- `is_evidence_trusted(evidence_id)` checks canonical trusted store
 
 ### Authority — ACTIVATION_ONLY
 
@@ -165,39 +167,41 @@ Delegates to authority and boundary; contains no independent mutation logic.
 - Forged/revoked/cross-resource evidence rejected
 - Binding revalidation at application time
 
-### RA-18-03: Canonical Evidence Collection (Repair Cycle 3)
+### RA-18-03: Canonical Evidence Collection (Repair Cycle 3, hardened Cycle 4)
 
 **Defect:** Public callers could construct arbitrary evidence and have it accepted as canonical truth.
 
 **Repair:**
 - `collect_for_resource()` derives evidence from canonical sources (callers cannot construct evidence)
 - Evidence authority queries RRM directly for each resource kind
-- `validate_and_store()` retained for backward compatibility only
+- Evidence model has `_trusted` field — only `collect_for_resource()` produces trusted evidence
+- `validate_and_store()` is **COMPATIBILITY_ONLY / TEST_ONLY** — does NOT produce trusted evidence
+- `is_evidence_trusted(evidence_id)` checks canonical trusted store
 - Service exposes `collect_and_register_evidence()` as the trusted entry point
-- Evidence TOCTOU: application boundary revalidates against canonical source at application time
+- Evidence TOCTOU: application boundary revalidates against canonical source at application time AND verifies `is_evidence_trusted()`
 
-### RA-18-04: Governed Resource Provenance (Repair Cycle 3)
+### RA-18-04: Governed Resource Provenance (Repair Cycle 3, hardened Cycle 4)
 
 **Defect:** `resource_origin` alone classified resources as governed — origin is caller-controlled.
 
 **Repair:**
 - `governed_registration_id` field on all resource models
 - `_is_governed_resource()` requires canonical `governed_registration_id` (not origin alone)
-- `mark_governed(resource_id, registration_id)` sets provenance on resource
-- Same-ID/same-origin replacement of governed resources rejected
-- Legitimate governed updates must go through ActivationApplicationBoundary with TOCTOU revalidation
+- `mark_governed()` is **COMPATIBILITY_ONLY / TEST_ONLY** — not the canonical source
+- Canonical `governed_registration_id` is created by `CanonicalPromotionRegistrationBoundary` (M17)
+- M17 creates `governed_registration_id` automatically bound to resource_id + kind + proposal_id + decision_id
+- Same-ID replacement of governed resources rejected regardless of origin
 
-### RA-18-01 (Revised): Compatibility/Bootstrap Overwrite Guard (Repair Cycle 3)
+### RA-18-01 (Revised): Compatibility/Bootstrap Overwrite Guard (Repair Cycle 3, hardened Cycle 4)
 
-**Defect:** RRM register_* methods allowed same-origin replacement of governed resources.
+**Defect:** RRM register_* methods allowed replacement of governed resources.
 
 **Repair:**
 - `_is_governed_resource()` requires `governed_registration_id` (origin alone insufficient)
-- `_is_compatibility_source()` identifies MIGRATION, CONFIGURATION, HOST_DISCOVERY origins
-- register_*: compatibility sources rejected when target is governed
-- register_*: same-ID/same-origin replacement rejected for governed resources
-- Different-origin replacement of governed resources permitted (legitimate updates)
-- mark_governed()/is_governed() API with registration provenance
+- ALL `register_*` methods reject governed resource replacement **unconditionally** (no different-origin exception)
+- `update_resource_status()` returns False for governed resources
+- MIGRATION, CONFIGURATION, HOST_DISCOVERY origins all rejected for governed resources
+- `mark_governed()` is COMPATIBILITY_ONLY — not used in canonical trust flow
 
 ### Paths Contained
 
@@ -205,10 +209,11 @@ Delegates to authority and boundary; contains no independent mutation logic.
 |---|---|---|
 | RuntimeResourceProjection | COMPATIBILITY_ONLY | Projection callback, not governed activation. Cannot overwrite governed resources. |
 | RRMToCORAdapter | COMPATIBILITY_ONLY | Adapter bridge, not governed activation. Cannot overwrite governed resources. |
-| ProviderManager.register | BOOTSTRAP_ONLY | Registration path, not activation. Cannot overwrite governed resources. |
-| Composition direct calls | BOOTSTRAP_ONLY | Bootstrap initialization, not activation. Cannot overwrite governed resources. |
-| update_resource_status | GOVERNED | Status mutation, not activation. Cannot overwrite governed resources. |
-| Public register_evidence | GOVERNED | Evidence validated by CanonicalActivationEvidenceAuthority before storage. |
+| ProviderManager.register | COMPATIBILITY_ONLY | Registration path, not activation. Cannot overwrite governed resources. |
+| Composition direct calls | COMPATIBILITY_ONLY | Bootstrap initialization, not activation. Cannot overwrite governed resources. |
+| update_resource_status | GOVERNED | Status mutation returns False for governed resources. |
+| Public register_evidence | COMPATIBILITY_ONLY | Evidence validated by CanonicalActivationEvidenceAuthority; does NOT produce trusted evidence. |
+| collect_for_resource | TRUSTED | Canonical evidence collection — ONLY source of trusted evidence. |
 
 ## Lifecycle States
 
@@ -219,7 +224,7 @@ ResourceActivationStatus:
 
 ## Test Coverage
 
-61 tests (A-Z matrix + RA-18-03 canonical evidence collection + RA-18-04 governed provenance + RA-18-01 overwrite guard):
+102 tests (A-Z matrix + RA-18-03 canonical evidence collection + RA-18-04 governed provenance + RA-18-01 overwrite guard + Cycle 4 comprehensive matrices):
 - Models frozen and immutable (including evidence)
 - Evidence model (revocation, validity, source_identity)
 - Authority rejects unsupported/unregistered resources
@@ -282,3 +287,24 @@ ResourceActivationStatus:
   - Agent/capability/account/environment: compatibility cannot overwrite governed
   - Account: same-origin replacement rejected when governed
   - Agent capability account environment overwrite protection
+- Cycle 4 — Canonical Trust Root (41 new tests):
+  - RA-18-03 trust matrix (15 tests):
+    - Caller-constructed evidence NOT trusted
+    - collect_for_resource() evidence IS trusted
+    - validate_and_store() stores in compatibility, NOT trusted
+    - Source string alone NOT sufficient for trust
+    - Evidence IDs unique; matches canonical source state
+    - Trusted store is additive
+    - All resource kinds produce trusted evidence
+  - RA-18-04 provenance matrix (9 tests):
+    - mark_governed() is COMPATIBILITY_ONLY
+    - Origin alone insufficient for governed (USER_REGISTRATION, CONFIGURATION, MIGRATION, HOST_DISCOVERY)
+    - Empty/special-character governed IDs handled correctly
+  - RA-18-01 comprehensive origin matrix (11 tests):
+    - ALL origins × ALL resource types rejected for governed replacement
+    - No different-origin exception
+  - RA-18-02 regression (2 tests):
+    - Full pipeline still succeeds with trusted evidence
+    - Boundary applies with trusted evidence
+  - RA-13-01 exact identity (4 tests):
+    - Typed enums; frozen evidence model rejects mutation

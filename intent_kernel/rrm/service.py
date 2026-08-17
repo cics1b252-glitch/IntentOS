@@ -53,10 +53,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         with self._lock:
             existing = self._providers.get(provider.provider_id)
             if existing is not None and self._is_governed_resource(provider.provider_id):
-                if self._is_compatibility_source(provider.resource_origin):
-                    return existing
-                if existing.resource_origin == provider.resource_origin:
-                    return existing
+                return existing
             provider.updated_at = utc_iso()
             self._providers[provider.provider_id] = provider
             return provider
@@ -87,10 +84,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         with self._lock:
             existing = self._accounts.get(account.account_id)
             if existing is not None and self._is_governed_resource(account.account_id):
-                if self._is_compatibility_source(account.resource_origin):
-                    return existing
-                if existing.resource_origin == account.resource_origin:
-                    return existing
+                return existing
             account.updated_at = utc_iso()
             self._accounts[account.account_id] = account
             return account
@@ -128,10 +122,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         with self._lock:
             existing = self._environments.get(environment.environment_id)
             if existing is not None and self._is_governed_resource(environment.environment_id):
-                if self._is_compatibility_source(environment.resource_origin):
-                    return existing
-                if existing.resource_origin == environment.resource_origin:
-                    return existing
+                return existing
             environment.updated_at = utc_iso()
             self._environments[environment.environment_id] = environment
             return environment
@@ -162,10 +153,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         with self._lock:
             existing = self._capabilities.get(capability.capability_id)
             if existing is not None and self._is_governed_resource(capability.capability_id):
-                if self._is_compatibility_source(capability.resource_origin):
-                    return existing
-                if existing.resource_origin == capability.resource_origin:
-                    return existing
+                return existing
             capability.updated_at = utc_iso()
             self._capabilities[capability.capability_id] = capability
             if capability.name and capability.name != capability.capability_id:
@@ -202,10 +190,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         with self._lock:
             existing = self._agents.get(agent.agent_id)
             if existing is not None and self._is_governed_resource(agent.agent_id):
-                if self._is_compatibility_source(agent.resource_origin):
-                    return existing
-                if existing.resource_origin == agent.resource_origin:
-                    return existing
+                return existing
             agent.updated_at = utc_iso()
             self._agents[agent.agent_id] = agent
             return agent
@@ -273,12 +258,13 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
     def mark_governed(self, resource_id: str, registration_id: str = "") -> None:
         """Mark a resource ID as governed with canonical registration provenance.
 
-        Governed resources cannot be silently overwritten by
-        compatibility/bootstrap writers.
+        COMPATIBILITY_ONLY / TEST_ONLY — retained for backward compatibility.
+        Production governed identity is created by
+        CanonicalPromotionRegistrationBoundary which generates a canonical
+        governed_registration_id bound to resource_id + kind + proposal_id
+        + decision_id.
 
-        registration_id must be a non-empty canonical identifier
-        from the promotion registration boundary (M17). Origin alone
-        is NOT sufficient for governed classification.
+        New code should NOT call mark_governed() directly.
         """
         with self._lock:
             self._governed_ids.add(resource_id)
@@ -393,7 +379,16 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         resource_id: str,
         status: ResourceStatus,
     ) -> bool:
+        """Update status of a non-governed resource.
+
+        Governed resources cannot have their lifecycle mutated by
+        generic status updates. Use the activation application boundary
+        for governed resource lifecycle transitions.
+        """
         with self._lock:
+            if self._is_governed_resource(resource_id):
+                return False
+
             now = utc_iso()
             if resource_type == ResourceType.PROVIDER:
                 res = self._providers.get(resource_id)

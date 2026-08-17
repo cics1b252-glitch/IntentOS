@@ -105,9 +105,11 @@
       "defect": "resource_origin alone classified resources as governed",
       "repair": [
         "governed_registration_id required for governed classification",
-        "mark_governed() is COMPATIBILITY_ONLY — not canonical source",
-        "M17 CanonicalPromotionRegistrationBoundary creates canonical governed_registration_id",
-        "Same-ID replacement of governed resources rejected regardless of origin"
+        "_is_governed_resource() only checks governed_registration_id on resource object",
+        "mark_governed() is COMPATIBILITY_ONLY — does NOT populate _governed_ids or set governed_registration_id",
+        "M17 CanonicalPromotionRegistrationBoundary creates canonical governed_registration_id exclusively",
+        "Same-ID replacement of governed resources rejected regardless of origin",
+        "Compatibility markers cannot weaponize overwrite guards"
       ]
     }
   },
@@ -120,7 +122,7 @@
     "CONSUMED": "decision applied"
   },
   "test_coverage": {
-    "total_tests": 102,
+    "total_tests": 118,
     "categories": [
       "models_frozen_including_evidence",
       "evidence_model_revocation_validity_source_identity",
@@ -191,7 +193,23 @@
       "cycle4_ra1802_regression_full_pipeline",
       "cycle4_ra1802_regression_boundary_applies",
       "cycle4_ra1301_typed_enums",
-      "cycle4_ra1301_frozen_evidence_no_mutation"
+      "cycle4_ra1301_frozen_evidence_no_mutation",
+      "cycle5_forged_mark_not_canonically_governed",
+      "cycle5_forged_mark_no_overwrite_policy",
+      "cycle5_forged_mark_no_trusted_flow",
+      "cycle5_forged_mark_no_eligibility",
+      "cycle5_forged_mark_no_binding",
+      "cycle5_forged_mark_no_authorization",
+      "cycle5_real_m17_creates_governed_identity",
+      "cycle5_real_m17_identity_recognized",
+      "cycle5_register_cannot_overwrite_real_governed",
+      "cycle5_same_origin_overwrite_rejected",
+      "cycle5_different_origin_overwrite_rejected",
+      "cycle5_activation_pipeline_works",
+      "cycle5_ra1801_regression",
+      "cycle5_ra1802_regression",
+      "cycle5_ra1803_regression",
+      "cycle5_ra1301_regression"
     ]
   }
 }

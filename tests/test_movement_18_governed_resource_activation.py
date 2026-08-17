@@ -784,8 +784,8 @@ class TestRA1804GovernedProvenance:
         rrm.register_provider(provider)
         assert rrm._is_governed_resource("prov-1") is False
 
-    # B — mark_governed with registration_id makes resource governed
-    def test_mark_governed_with_registration_id(self, rrm):
+    # B — mark_governed does NOT create canonical governed identity (Cycle 5)
+    def test_mark_governed_does_not_create_canonical_identity(self, rrm):
         provider = ProviderResource(
             provider_id="prov-1", name="test",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
@@ -794,7 +794,8 @@ class TestRA1804GovernedProvenance:
         )
         rrm.register_provider(provider)
         rrm.mark_governed("prov-1", "promo-reg-001")
-        assert rrm._is_governed_resource("prov-1") is True
+        assert rrm._is_governed_resource("prov-1") is False
+        assert rrm.get_provider("prov-1").governed_registration_id == ""
 
     # C — mark_governed without registration_id does NOT make resource governed
     def test_mark_governed_without_registration_id(self, rrm):
@@ -898,8 +899,8 @@ class TestRA1804GovernedProvenance:
         rrm.register_provider(provider2)
         assert rrm.get_provider("prov-1").name == "second"
 
-    # I — mark_governed sets governed_registration_id on resource
-    def test_mark_governed_sets_registration_id(self, rrm):
+    # I — mark_governed does NOT set governed_registration_id on resource (Cycle 5)
+    def test_mark_governed_does_not_set_registration_id(self, rrm):
         provider = ProviderResource(
             provider_id="prov-1", name="test",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
@@ -908,7 +909,7 @@ class TestRA1804GovernedProvenance:
         )
         rrm.register_provider(provider)
         rrm.mark_governed("prov-1", "promo-reg-006")
-        assert rrm.get_provider("prov-1").governed_registration_id == "promo-reg-006"
+        assert rrm.get_provider("prov-1").governed_registration_id == ""
 
     # J — agent: same-ID/same-origin replacement rejected when governed
     def test_agent_same_origin_rejected(self, rrm):
@@ -1103,8 +1104,8 @@ class TestRA1801RRMOverwriteGuard:
         rrm.register_provider(provider2)
         assert rrm.get_provider("prov-1").name == "second"
 
-    # H — mark_governed with registration_id is persisted
-    def test_mark_governed_persisted(self, rrm):
+    # H — mark_governed does NOT create canonical identity (Cycle 5)
+    def test_mark_governed_does_not_create_identity(self, rrm):
         provider = ProviderResource(
             provider_id="prov-1", name="test",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
@@ -1114,8 +1115,8 @@ class TestRA1801RRMOverwriteGuard:
         rrm.register_provider(provider)
         assert rrm.is_governed("prov-1") is False
         rrm.mark_governed("prov-1", "promo-reg-014")
-        assert rrm.is_governed("prov-1") is True
-        assert rrm._is_governed_resource("prov-1") is True
+        assert rrm.is_governed("prov-1") is False
+        assert rrm._is_governed_resource("prov-1") is False
 
     # I — agent: compatibility cannot overwrite governed resource
     def test_agent_compatibility_cannot_overwrite(self, rrm):
@@ -1463,8 +1464,8 @@ class TestRA1804GovernedProvenanceMatrix:
     mark_governed() is COMPATIBILITY_ONLY.
     """
 
-    def test_mark_governed_sets_field_but_not_canonical(self, rrm):
-        """A: mark_governed() sets the field (compatibility) but is NOT the canonical source."""
+    def test_mark_governed_does_not_set_governed_registration_id(self, rrm):
+        """A: mark_governed() does NOT set governed_registration_id (compatibility-only)."""
         rrm.register_provider(ProviderResource(
             provider_id="prov-1", name="prov",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
@@ -1473,9 +1474,9 @@ class TestRA1804GovernedProvenanceMatrix:
         if hasattr(rrm, 'mark_governed'):
             rrm.mark_governed("prov-1", "compat-origin")
             provider = rrm.get_provider("prov-1")
-            assert provider.governed_registration_id == "compat-origin"
-            # But the canonical source is CanonicalPromotionRegistrationBoundary,
-            # not mark_governed(). mark_governed() is COMPATIBILITY_ONLY / TEST_ONLY.
+            assert provider.governed_registration_id == ""
+            # mark_governed() is COMPATIBILITY_ONLY — no canonical identity
+            assert rrm._is_governed_resource("prov-1") is False
 
     def test_origin_alone_insufficient_for_governed(self, rrm):
         """B: USER_REGISTRATION origin alone is NOT governed."""
@@ -1541,7 +1542,7 @@ class TestRA1804GovernedProvenanceMatrix:
         assert provider.governed_registration_id == "reg/with:special-chars_123"
 
     def test_governed_id_set_by_mark_governed_is_compatibility(self, rrm):
-        """H: mark_governed() sets the field but is COMPATIBILITY_ONLY, not canonical."""
+        """H: mark_governed() does NOT set governed_registration_id (compatibility-only)."""
         rrm.register_provider(ProviderResource(
             provider_id="prov-1", name="prov",
             resource_origin=ResourceOrigin.USER_REGISTRATION,
@@ -1550,7 +1551,7 @@ class TestRA1804GovernedProvenanceMatrix:
         if hasattr(rrm, 'mark_governed'):
             rrm.mark_governed("prov-1", "compat-origin")
             provider = rrm.get_provider("prov-1")
-            assert provider.governed_registration_id == "compat-origin"
+            assert provider.governed_registration_id == ""
             # This is COMPATIBILITY_ONLY. Canonical governed_registration_id
             # is created by CanonicalPromotionRegistrationBoundary.
 
@@ -1849,3 +1850,282 @@ class TestRA1301ExactIdentity:
             ev.trusted = True
         with pytest.raises(AttributeError):
             ev.bypass = True
+
+
+# ===================================================================
+# Cycle 5 — Remove Compatibility Governed-ID Authority
+#
+# COMPATIBILITY METADATA != CANONICAL GOVERNED IDENTITY
+# mark_governed() must NOT create canonical governed identity.
+# Only M17 CanonicalPromotionRegistrationBoundary creates canonical identity.
+# ===================================================================
+
+
+class TestCycle5MarkGovernedIsolation:
+    """A-F: mark_governed() must not create canonical governed identity."""
+
+    # A: legacy resource + mark_governed("forged") → NOT canonically governed
+    def test_forged_mark_governed_not_canonically_governed(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        ))
+        rrm.mark_governed("prov-1", "forged-registration-id")
+        assert rrm._is_governed_resource("prov-1") is False
+        assert rrm.is_governed("prov-1") is False
+
+    # B: forged mark does not affect overwrite policy
+    def test_forged_mark_does_not_affect_overwrite_policy(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="original",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        ))
+        rrm.mark_governed("prov-1", "forged-id")
+        replacement = ProviderResource(
+            provider_id="prov-1", name="replacement",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        )
+        rrm.register_provider(replacement)
+        assert rrm.get_provider("prov-1").name == "replacement"
+
+    # C: forged mark does not enter trusted activation flow
+    def test_forged_mark_does_not_enter_trusted_flow(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        ))
+        rrm.mark_governed("prov-1", "forged-id")
+        assert rrm._is_governed_resource("prov-1") is False
+        service = CanonicalResourceActivationService(rrm)
+        evidence = service.collect_and_register_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+        )
+        request = service.create_request(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            "disc1", "reg1",
+            evidence_ids=tuple(ev.evidence_id for ev in evidence),
+        )
+        decision = service.evaluate(request.request_id)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+
+    # D: forged mark does not affect eligibility
+    def test_forged_mark_does_not_affect_eligibility(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        ))
+        rrm.mark_governed("prov-1", "forged-id")
+        provider = rrm.get_provider("prov-1")
+        assert provider.is_eligible is True
+        assert provider.governed_registration_id == ""
+
+    # E: forged mark does not affect binding
+    def test_forged_mark_does_not_affect_binding(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        ))
+        rrm.mark_governed("prov-1", "forged-id")
+        provider = rrm.get_provider("prov-1")
+        assert provider.is_configured is True
+        assert provider.has_active_account is True
+
+    # F: forged mark does not affect authorization/execution
+    def test_forged_mark_does_not_affect_authorization(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        ))
+        rrm.mark_governed("prov-1", "forged-id")
+        service = CanonicalResourceActivationService(rrm)
+        evidence = service.collect_and_register_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+        )
+        request = service.create_request(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            "disc1", "reg1",
+            evidence_ids=tuple(ev.evidence_id for ev in evidence),
+        )
+        decision = service.evaluate(request.request_id)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+        result = service.application_boundary.apply(decision.decision_id)
+        assert result.success is True
+
+
+class TestCycle5CanonicalGovernedIdentity:
+    """G-L: Canonical M17 registration creates governed identity."""
+
+    # G: real M17 registration automatically creates canonical governed identity
+    def test_real_m17_registration_creates_governed_identity(self, rrm):
+        provider = ProviderResource(
+            provider_id="prov-1", name="prov",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+            governed_registration_id="registration_canonical01",
+        )
+        rrm.register_provider(provider)
+        assert rrm._is_governed_resource("prov-1") is True
+        assert rrm.get_provider("prov-1").governed_registration_id == "registration_canonical01"
+
+    # H: real M17 identity is recognized by _is_governed_resource()
+    def test_real_m17_identity_recognized(self, rrm):
+        for kind_id, kind_class, rid_field, reg_id in [
+            ("prov-1", ProviderResource, "provider_id", "registration_p001"),
+            ("cap-1", CapabilityResource, "capability_id", "registration_c001"),
+            ("ag-1", AgentResource, "agent_id", "registration_a001"),
+            ("env-1", ExecutionEnvironmentResource, "environment_id", "registration_e001"),
+        ]:
+            rrm2 = RegistryResourceManager(populate_defaults=False)
+            kwargs = {
+                rid_field: kind_id,
+                "name": "test",
+                "resource_origin": ResourceOrigin.USER_REGISTRATION,
+                "is_template": False,
+                "governed_registration_id": reg_id,
+            }
+            if kind_id == "prov-1":
+                kwargs["is_configured"] = True
+                kwargs["has_active_account"] = True
+                rrm2.register_provider(kind_class(**kwargs))
+            elif kind_id == "cap-1":
+                kwargs["is_executable"] = True
+                rrm2.register_capability(kind_class(**kwargs))
+            elif kind_id == "ag-1":
+                kwargs["is_enabled"] = True
+                kwargs["installation_state"] = AgentInstallationState.AVAILABLE
+                rrm2.register_agent(kind_class(**kwargs))
+            elif kind_id == "env-1":
+                kwargs["is_discovered"] = True
+                kwargs["type"] = "local"
+                kwargs.pop("name", None)
+                rrm2.register_environment(kind_class(**kwargs))
+            assert rrm2._is_governed_resource(kind_id) is True
+
+    # I: generic register_* cannot overwrite real governed resource
+    def test_register_cannot_overwrite_real_governed(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+            governed_registration_id="registration_real01",
+        ))
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="attempted",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        ))
+        assert rrm.get_provider("prov-1").name == "governed"
+
+    # J: same-origin overwrite real governed resource rejected
+    def test_same_origin_overwrite_real_governed_rejected(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+            governed_registration_id="registration_real02",
+        ))
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="same-origin-attempt",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+            governed_registration_id="registration_real02",
+        ))
+        assert rrm.get_provider("prov-1").name == "governed"
+
+    # K: different-origin overwrite real governed resource rejected
+    def test_different_origin_overwrite_real_governed_rejected(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+            governed_registration_id="registration_real03",
+        ))
+        for origin in [
+            ResourceOrigin.MIGRATION,
+            ResourceOrigin.CONFIGURATION,
+            ResourceOrigin.HOST_DISCOVERY,
+        ]:
+            rrm.register_provider(ProviderResource(
+                provider_id="prov-1", name=f"attempt-{origin.value}",
+                resource_origin=origin,
+                is_configured=True,
+            ))
+            assert rrm.get_provider("prov-1").name == "governed"
+
+    # L: activation pipeline still works for real governed resource
+    def test_activation_pipeline_works_for_real_governed(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="governed",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+            governed_registration_id="registration_real04",
+        ))
+        service = CanonicalResourceActivationService(rrm)
+        evidence = service.collect_and_register_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+        )
+        request = service.create_request(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+            "disc1", "reg1",
+            evidence_ids=tuple(ev.evidence_id for ev in evidence),
+        )
+        decision = service.evaluate(request.request_id)
+        assert decision.decision_type == ResourceActivationDecisionType.APPROVE
+        result = service.application_boundary.apply(decision.decision_id)
+        assert result.success is True
+
+
+class TestCycle5Regression:
+    """M-P: RA-18-01/02/03/RA-13-01 regressions."""
+
+    # M: RA-18-01 remains fixed — no ungoverned activation authority
+    def test_ra1801_regression(self, rrm):
+        from intent_kernel.activation.authority import CanonicalResourceActivationAuthority
+        from intent_kernel.activation.application_boundary import ActivationApplicationBoundary
+        from intent_kernel.activation.service import CanonicalResourceActivationService
+        from intent_kernel.activation.evidence_authority import CanonicalActivationEvidenceAuthority
+        assert CanonicalResourceActivationAuthority is not None
+        assert ActivationApplicationBoundary is not None
+        assert CanonicalResourceActivationService is not None
+        assert CanonicalActivationEvidenceAuthority is not None
+
+    # N: RA-18-02 remains fixed — activation does not fabricate evidence
+    def test_ra1802_regression(self, rrm):
+        rrm.register_provider(ProviderResource(
+            provider_id="prov-1", name="prov",
+            resource_origin=ResourceOrigin.USER_REGISTRATION,
+            is_configured=True, has_active_account=True,
+        ))
+        service = CanonicalResourceActivationService(rrm)
+        evidence = service.collect_and_register_evidence(
+            "prov-1", ResourceDiscoveryKind.PROVIDER,
+        )
+        assert len(evidence) > 0
+        for ev in evidence:
+            assert ev.is_trusted is True
+
+    # O: RA-18-03 remains fixed — caller evidence not trusted
+    def test_ra1803_regression(self, rrm):
+        authority = CanonicalActivationEvidenceAuthority(rrm)
+        caller_ev = ResourceActivationEvidence(
+            evidence_id="ev-caller-cycle5",
+            resource_id="prov-1",
+            resource_kind=ResourceDiscoveryKind.PROVIDER,
+            evidence_type=ActivationEvidenceType.PROVIDER_CONFIGURATION,
+            source="caller-asserted",
+            source_identity="test",
+        )
+        assert authority.is_evidence_trusted("ev-caller-cycle5") is False
+
+    # P: RA-13-01 remains fixed — typed enums
+    def test_ra1301_regression(self):
+        assert ActivationEvidenceType.PROVIDER_CONFIGURATION.value == "provider_configuration"
+        assert ResourceActivationDecisionType.APPROVE.value == "approve"
+        assert ResourceActivationStatus.PENDING.value == "pending"

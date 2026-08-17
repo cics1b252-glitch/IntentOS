@@ -180,17 +180,18 @@ Delegates to authority and boundary; contains no independent mutation logic.
 - Service exposes `collect_and_register_evidence()` as the trusted entry point
 - Evidence TOCTOU: application boundary revalidates against canonical source at application time AND verifies `is_evidence_trusted()`
 
-### RA-18-04: Governed Resource Provenance (Repair Cycle 3, hardened Cycle 4)
+### RA-18-04: Governed Resource Provenance (Repair Cycle 3, hardened Cycle 4, isolated Cycle 5)
 
 **Defect:** `resource_origin` alone classified resources as governed — origin is caller-controlled.
 
 **Repair:**
 - `governed_registration_id` field on all resource models
-- `_is_governed_resource()` requires canonical `governed_registration_id` (not origin alone)
-- `mark_governed()` is **COMPATIBILITY_ONLY / TEST_ONLY** — not the canonical source
-- Canonical `governed_registration_id` is created by `CanonicalPromotionRegistrationBoundary` (M17)
+- `_is_governed_resource()` requires canonical `governed_registration_id` ONLY (ignores `_governed_ids` set)
+- `mark_governed()` is **COMPATIBILITY_ONLY** — does NOT populate `_governed_ids`, does NOT set `governed_registration_id`, does NOT cause `_is_governed_resource()` to return True
+- Canonical `governed_registration_id` is created exclusively by `CanonicalPromotionRegistrationBoundary` (M17)
 - M17 creates `governed_registration_id` automatically bound to resource_id + kind + proposal_id + decision_id
 - Same-ID replacement of governed resources rejected regardless of origin
+- Compatibility markers cannot weaponize overwrite guards
 
 ### RA-18-01 (Revised): Compatibility/Bootstrap Overwrite Guard (Repair Cycle 3, hardened Cycle 4)
 
@@ -224,7 +225,7 @@ ResourceActivationStatus:
 
 ## Test Coverage
 
-102 tests (A-Z matrix + RA-18-03 canonical evidence collection + RA-18-04 governed provenance + RA-18-01 overwrite guard + Cycle 4 comprehensive matrices):
+118 tests (A-Z matrix + RA-18-03 canonical evidence collection + RA-18-04 governed provenance + RA-18-01 overwrite guard + Cycle 4 comprehensive matrices + Cycle 5 mark_governed isolation):
 - Models frozen and immutable (including evidence)
 - Evidence model (revocation, validity, source_identity)
 - Authority rejects unsupported/unregistered resources
@@ -308,3 +309,13 @@ ResourceActivationStatus:
     - Boundary applies with trusted evidence
   - RA-13-01 exact identity (4 tests):
     - Typed enums; frozen evidence model rejects mutation
+- Cycle 5 — Mark Governed Isolation (16 new tests):
+  - mark_governed() does NOT create canonical governed identity (A-F)
+  - mark_governed() does NOT set governed_registration_id on resource
+  - mark_governed() does NOT affect overwrite policy
+  - mark_governed() does NOT affect eligibility, binding, authorization
+  - Real M17 registration creates canonical governed identity (G)
+  - Real M17 identity recognized by _is_governed_resource() (H)
+  - register_* cannot overwrite real governed resource (I-J-K)
+  - Activation pipeline works for real governed resource (L)
+  - RA-18-01/02/03/RA-13-01 regressions all pass (M-P)

@@ -1,0 +1,103 @@
+{
+  "movement": 18,
+  "title": "Governed Resource Activation Convergence",
+  "pipeline": {
+    "stages": [
+      "REGISTERED_RESOURCE",
+      "ACTIVATION_REQUEST",
+      "PREREQUISITE_EVALUATION",
+      "TYPED_DECISION",
+      "TOCTOU_REVALIDATION",
+      "ACTIVATION_APPLICATION",
+      "ACTIVATED_RESOURCE"
+    ],
+    "authority_chain": [
+      "CanonicalResourceActivationAuthority (ACTIVATION_ONLY)",
+      "ActivationApplicationBoundary (ACTIVATION_APPLICATION_ONLY)",
+      "CanonicalResourceActivationService (ORCHESTRATION_ONLY)"
+    ]
+  },
+  "resource_kind_mapping": {
+    "PROVIDER": {"rrm_type": "Provider", "activation_fields": ["is_configured", "has_active_account"]},
+    "CAPABILITY": {"rrm_type": "Capability", "activation_fields": ["is_executable"]},
+    "AGENT": {"rrm_type": "Agent", "activation_fields": ["is_enabled", "installation_state"]},
+    "ENVIRONMENT": {"rrm_type": "ExecutionEnvironment", "activation_fields": ["is_discovered"]},
+    "CONNECTED_SERVICE": {"rrm_type": "Account", "activation_fields": ["is_configured"]},
+    "DEVICE": {"rrm_type": "Capability", "activation_fields": ["is_executable"]},
+    "LOCAL_PROGRAM": {"rrm_type": "Capability", "activation_fields": ["is_executable"]},
+    "CUSTOM": {"rrm_type": "Capability", "activation_fields": ["is_executable"]}
+  },
+  "structural_invariants": [
+    "resource_registered",
+    "not_template",
+    "origin_not_template",
+    "status_active"
+  ],
+  "activation_fields_by_type": {
+    "Provider": ["is_configured", "has_active_account"],
+    "Capability": ["is_executable"],
+    "Agent": ["is_enabled", "installation_state"],
+    "ExecutionEnvironment": ["is_discovered"],
+    "Account": ["is_configured"]
+  },
+  "toctou_checks": [
+    "activation_request_exists",
+    "decision_exists",
+    "decision_approved",
+    "decision_matches_request",
+    "request_matches_resource",
+    "resource_registered",
+    "registration_unchanged",
+    "resource_not_replaced",
+    "pre_activation_prereqs_satisfied",
+    "scope_valid",
+    "decision_not_consumed",
+    "binding_configuration_matches"
+  ],
+  "anti_bypass": {
+    "RA-18-01": {
+      "defect": "Ungoverned activation authority",
+      "containment": [
+        "Authority evaluates structural invariants only",
+        "Boundary applies activation fields with TOCTOU revalidation",
+        "Single-use decision consumption",
+        "No authority-bearing fields in activation models",
+        "No discovery, promotion, or registration authority leak"
+      ]
+    }
+  },
+  "lifecycle_states": {
+    "PENDING": "initial",
+    "APPROVED": "decision approved",
+    "REJECTED": "decision rejected",
+    "EXPIRED": "decision expired",
+    "REVOKED": "decision revoked",
+    "CONSUMED": "decision applied"
+  },
+  "test_coverage": {
+    "total_tests": 48,
+    "categories": [
+      "models_frozen",
+      "status_lifecycle",
+      "authority_bearing_field_rejection",
+      "provider_prerequisites",
+      "capability_prerequisites",
+      "agent_prerequisites",
+      "environment_prerequisites",
+      "account_prerequisites",
+      "unsupported_resource_kind",
+      "decision_not_found",
+      "decision_consumed",
+      "decision_not_approved",
+      "request_not_found",
+      "toctou_revalidation",
+      "successful_activation",
+      "single_use_enforcement",
+      "service_pipeline",
+      "consumption_tracking",
+      "adversarial_no_mutation",
+      "adversarial_no_authority_leak",
+      "composition_wiring"
+    ]
+  }
+}

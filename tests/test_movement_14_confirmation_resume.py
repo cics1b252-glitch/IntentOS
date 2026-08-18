@@ -121,6 +121,7 @@ async def _pending_runtime(runtime_stack):
         side_effect_level=SideEffectLevel.EXTERNAL_REVERSIBLE,
         confirmation_required=True,
         provenance={"tool_id": "synthetic-tool"},
+        expected_output="echo",
     )
     instance = runtime.create_instance(
         str(mission.id),

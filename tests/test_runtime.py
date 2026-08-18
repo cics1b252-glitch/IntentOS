@@ -79,13 +79,13 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
         n1 = RuntimeNode(
             node_id="n1",
             capability="test.echo",
-            action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "step1"}),
+            action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "step1"}, expected_output="step1"),
         )
         n2 = RuntimeNode(
             node_id="n2",
             capability="test.echo",
             dependencies=["n1"],
-            action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "step2"}),
+            action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "step2"}, expected_output="step2"),
         )
         inst = self.runtime.create_instance("m_dag", "g_dag", [n1, n2])
 
@@ -104,6 +104,7 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
             action_contract=ActionContract(
                 capability="test.echo",
                 side_effect_level=SideEffectLevel.EXTERNAL_IRREVERSIBLE,
+                expected_output="echo",
             ),
         )
         inst = self.runtime.create_instance("m_conf", "g_conf", [n_side_effect])
@@ -159,6 +160,7 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
             capability="test.echo",
             idempotency_key="idemp_12345",
             inputs_reference={"message": "idempotent_test"},
+            expected_output="idempotent_test",
         )
         n = RuntimeNode(node_id="n_idemp", capability="test.echo", action_contract=contract)
         inst = self.runtime.create_instance("m_idemp", "g_idemp", [n])
@@ -171,8 +173,8 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
     # R, S, T, U, V: Checkpoints, Pause, Resume, and Process Restart
     # -------------------------------------------------------------------------
     async def test_r_s_t_u_v_checkpoints_pause_resume_restart(self):
-        n1 = RuntimeNode(node_id="n1", capability="test.echo", action_contract=ActionContract(capability="test.echo"))
-        n2 = RuntimeNode(node_id="n2", capability="test.echo", dependencies=["n1"], action_contract=ActionContract(capability="test.echo"))
+        n1 = RuntimeNode(node_id="n1", capability="test.echo", action_contract=ActionContract(capability="test.echo", expected_output="echo"))
+        n2 = RuntimeNode(node_id="n2", capability="test.echo", dependencies=["n1"], action_contract=ActionContract(capability="test.echo", expected_output="echo"))
         inst = self.runtime.create_instance("m_rest", "g_rest", [n1, n2])
 
         # Run n1
@@ -244,13 +246,13 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
         nA = RuntimeNode(
             node_id="node_A",
             capability="test.echo",
-            action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "Result A"}),
+            action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "Result A"}, expected_output="Result A"),
         )
         nB = RuntimeNode(
             node_id="node_B",
             capability="test.transform",
             dependencies=["node_A"],
-            action_contract=ActionContract(capability="test.transform", inputs_reference={"text": "hello", "mode": "upper"}),
+            action_contract=ActionContract(capability="test.transform", inputs_reference={"text": "hello", "mode": "upper"}, expected_output="HELLO"),
         )
         inst = self.runtime.create_instance("m_case1", "g_case1", [nA, nB])
 
@@ -263,8 +265,8 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
     # CASO 2 — RESTART (A completed, Checkpoint, Restart, A not rerun, B continues)
     # -------------------------------------------------------------------------
     async def test_caso_2_restart(self):
-        nA = RuntimeNode(node_id="node_A", capability="test.echo", action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "A"}))
-        nB = RuntimeNode(node_id="node_B", capability="test.echo", dependencies=["node_A"], action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "B"}))
+        nA = RuntimeNode(node_id="node_A", capability="test.echo", action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "A"}, expected_output="A"))
+        nB = RuntimeNode(node_id="node_B", capability="test.echo", dependencies=["node_A"], action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "B"}, expected_output="B"))
 
         inst = self.runtime.create_instance("m_case2", "g_case2", [nA, nB])
 
@@ -297,6 +299,7 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
             action_contract=ActionContract(
                 capability="test.echo",
                 side_effect_level=SideEffectLevel.EXTERNAL_IRREVERSIBLE,
+                expected_output="echo",
             ),
         )
         inst = self.runtime.create_instance("m_case3", "g_case3", [n_ext])
@@ -338,7 +341,7 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
         n_report = RuntimeNode(
             node_id="node_rep",
             capability="test.echo",
-            action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "Generated report text"}),
+            action_contract=ActionContract(capability="test.echo", inputs_reference={"message": "Generated report text"}, expected_output="Generated report text"),
         )
         inst = self.runtime.create_instance("m_case5", "g_case5", [n_report])
 

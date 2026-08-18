@@ -90,10 +90,8 @@ class InMemoryActionVerificationAdapter(ActionVerificationPort):
             else:
                 return VerificationStatus.VERIFIED_FAILURE
 
-        # Default verification for successful return without explicit expected_output
-        if result is not None and not isinstance(result, Exception):
-            return VerificationStatus.VERIFIED_SUCCESS
-
+        # Without an explicit verification contract, no result can be considered
+        # verified. Mere execution or result existence is not verification.
         return VerificationStatus.VERIFIED_FAILURE
 
 

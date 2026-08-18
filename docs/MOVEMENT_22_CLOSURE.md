@@ -1,4 +1,4 @@
-# MOVEMENT 22 — CLOSURE
+# MOVEMENT 22 — FORMAL CLOSURE
 
 ## STATUS
 
@@ -10,591 +10,420 @@
 
 ---
 
-## PURPOSE
-
-Post-Movement-21 full runtime authority re-derivation and next-gap discovery. Independent architectural investigation of the Intent OS canonical runtime, searching for the next independently demonstrated authority defect meeting Movement blocker criteria.
-
-**Result:** No runtime-reachable canonical authority defect meeting Movement blocker criteria was independently demonstrated in the audited post-M21 runtime. No implementation was required.
-
----
-
-## AUDITED SOURCE HEAD
-
-`7eb05334dd7e5e450003b20533080a2bb22c3365`
-
-- M21 closure: `7eb0533`
-- Premature M22 closure: `7f219e2` (published before final source-gated audit; reconciled through follow-up documentation commit without rewriting history)
-
----
-
 ## SOURCE VERIFICATION
 
 | Field | Value |
 |---|---|
-| Repository root | `C:\Users\Kelly Cordeiro\.codex\.chatgpt-projects\IntentOS-publicacao` |
+| Repository | `C:\Users\Kelly Cordeiro\.codex\.chatgpt-projects\IntentOS-publicacao` |
 | Branch | `architecture/governed-resource-activation-convergence` |
-| Audited HEAD | `7eb05334dd7e5e450003b20533080a2bb22c3365` |
+| Starting SHA | `7eb05334dd7e5e450003b20533080a2bb22c3365` |
+| Ending SHA | `c41e106d894b3d070f371f46e2ff351da69f7c35` |
+| M21 closure SHA | `7eb05334dd7e5e450003b20533080a2bb22c3365` |
+| Remote state | `origin/architecture/governed-resource-activation-convergence` matches local HEAD |
 | Working tree | Clean (only untracked bundles + nested copy) |
-| M21 closure | Present in ancestry ✅ |
-| M11-M20 closures | All present ✅ |
-| Import origin | `intent_kernel` v0.1.0 local in-tree package ✅ |
 
 ---
 
-## POST-M21 STATE MACHINE
+## POST-M21 COMMIT INTEGRITY
 
-```
-USER / PRODUCT REQUEST
-  → INTENT / PLANNING (ECC/CPE/COR — diagnostic, non-executing)
-  → CONSTITUTION PLAN EVALUATION (mission.plan)
-  → MISSION LIFECYCLE (MissionEngine.create → .start)
-  → RESOURCE BINDING (CanonicalResourceBindingAuthority.resolve)
-  → PROVIDER / TOOL / AGENT SELECTION (RRM-eligible, health-verified)
-  → AUTHORIZATION (ToolAuthorizationGate.evaluate_tool)
-  → ACTION GATE (ActionGate.evaluate — constitution, policy, constraints, confirmation, idempotency)
-  → CONFIRMATION (CanonicalConfirmationService — bind/submit/recheck/consume)
-  → EXECUTION (MissionRuntime.run_mission → ActionExecutorPort.execute)
-  → VERIFICATION (VerificationGate.evaluate_node — M21: expected_output=None → VERIFIED_FAILURE)
-  → COMPLETION (MissionCompletionGate.decide → MissionEngine.complete)
-  → PRODUCT RESPONSE (CognitiveResponseAssembler → CognitiveProductPresenter)
-  → MEMORY (CanonicalMemoryService — independent authority)
-```
+### 7f219e2
+
+| Field | Value |
+|---|---|
+| Full SHA | `7f219e21712e677a43a4e6c74232bef915023537` |
+| Commit message | "docs: close movement 22 authority investigation" |
+| Files changed | `docs/MOVEMENT_22_CLOSURE.md` only (348 insertions) |
+| Classification | AUDIT_DOCUMENTATION_ONLY |
+
+**Why legitimate:** This commit created the initial M22 closure document before the final source-gated Phase 22.0/22.1 audit completed. It was published to remote prematurely. The document focused narrowly on subprocess execution in SymbioticLayer (a single hypothesis). No production, test, or configuration files were modified.
+
+### c41e106
+
+| Field | Value |
+|---|---|
+| Full SHA | `c41e106d894b3d070f371f46e2ff351da69f7c35` |
+| Commit message | "docs: finalize movement 22 no-blocker closure" |
+| Files changed | `docs/MOVEMENT_22_CLOSURE.md` only (446 insertions, 194 deletions) |
+| Classification | AUDIT_DOCUMENTATION_ONLY |
+
+**Why legitimate:** This commit replaced the premature M22 closure document with the comprehensive 31-section audit document reflecting the final Phase 22.0/22.1 source-gated audit. No production, test, or configuration files were modified. History was not rewritten — the premature commit was preserved and reconciled through a follow-up documentation commit.
+
+---
+
+## MOVEMENT 22 VERDICT
+
+**NO_RA22_BLOCKER_CONFIRMED**
+
+**Implementation required:** NO
+
+**Rationale:** Movement 22 was an AUDIT / RE-DERIVATION movement. Phase 22.1 performed a comprehensive post-M21 canonical authority re-derivation covering 29 audit sections: source gate, pipeline re-derivation, authority matrix, known-candidate revalidation (8 areas), authorization-execution continuity, confirmation-execution continuity, provider adversarial audit, tool adversarial audit, agent authority audit, execution-verification continuity, verification-completion continuity, retirement-execution continuity, product contract, memory authority, compatibility reachability, novel adversarial search, blocker acceptance, severity, regression baseline, and security review. No independently demonstrated runtime-reachable canonical authority defect met the Movement blocker criteria. The correct result was to make no architectural change.
+
+---
+
+## FINAL POST-M21 STATE MACHINE
+
+| Stage | Authority Owner | Fail-Closed Behavior |
+|---|---|---|
+| Request Ingestion | ProductBridge | Unknown action → error |
+| Intent Understanding | IUE | Unknown intent → error |
+| Planning | CPE | Invalid plan → error |
+| Mission Create | MissionEngine | Invalid plan → reject; mission.status=CREATED |
+| Mission Start | MissionEngine | Invalid state → error; mission.status=RUNNING |
+| Resource Binding | CanonicalResourceBindingAuthority | No eligible binding → BLOCKED |
+| Provider Selection | CanonicalProviderAuthority | No healthy provider → UNAVAILABLE |
+| Authorization | ToolAuthorizationGate | DENY / REQUEST_PERMISSION / WAIT_TOOL |
+| Action Gate | ActionGate | DENY / REQUIRE_CONFIRMATION / WAIT_RESOURCE |
+| Confirmation | CanonicalConfirmationService | INVALID / EXPIRED / SCOPE_MISMATCH → reject |
+| Execution | MissionRuntime → ExecutorPort | Executor error → FAILED |
+| Verification | VerificationGate | M21: expected_output=None → VERIFIED_FAILURE |
+| Completion | MissionCompletionGate | Missing evidence → BLOCKED |
+| Lifecycle Sync | MissionEngine | Invalid decision → reject |
+| Product Response | CognitiveProductPresenter + CognitiveResponseAssembler | Epistemic mismatch → ValueError; Constitution → BLOCKED |
+| Memory | CanonicalMemoryService | Independent authority; no runtime influence |
 
 ---
 
 ## FINAL AUTHORITY MATRIX
 
-| Component | File | Authority | Can Execute? | Can Authorize? | Can Bind? | Can Complete? | Runtime Reachable? | Path |
-|---|---|---|---|---|---|---|---|---|
-| MissionEngine | `mission_engine.py` | Lifecycle transitions, completion evidence validation | No | No | No | Yes (sole) | Yes | Canonical |
-| MissionRuntime | `mission_runtime.py` | Action execution orchestration, verification, completion gate invocation | Yes | No | No | No (delegates) | Yes | Canonical |
-| ActionGate | `action_gate.py` | Pre-execution validation | No | Yes (pre-execution) | No | No | Yes | Canonical |
-| VerificationGate | `verification.py:112-147` | Post-execution verification | No | Yes (result verification) | No | No | Yes | Canonical |
-| MissionCompletionGate | `verification.py:150-251` | Mission completion decision (sole, `_COMPLETION_AUTHORITY_TOKEN`) | No | Yes (completion) | No | Yes (sole) | Yes | Canonical |
-| ToolAuthorizationGate | `authorization.py` | Tool pre-execution authorization | No | Yes (tool auth) | No | No | Yes | Canonical |
-| CanonicalResourceBindingAuthority | `binding.py` | Binding selection + revalidation | No | No | Yes (sole) | No | Yes | Canonical |
-| CanonicalConfirmationService | `confirmation_service.py` | Confirmation validation, binding revalidation | No | Yes (confirmation) | Yes (binding) | No | Yes | Canonical |
-| ProviderManager | `manager.py` | Provider routing, fallback | Yes | No | No | No | Yes | Compatibility |
-| ToolAccessExecutorAdapter | `adapters.py` | Tool execution bridge | Yes | Yes (authorization) | No | No | Yes (tests only) | Compatibility |
-| RegistryResourceManager | `service.py` | Resource storage, status, health | No | No | No | No | Yes | Canonical |
-| CanonicalAgentRegistry | `factory.py` | Agent lifecycle, duplicate rejection | No | No | No | No | Yes | Canonical |
-| ProductBridge | `product_bridge.py` | Application orchestrator | No | No | No | No | Yes | Canonical |
-| CognitiveResponseAssembler | `response.py` | Response status/epistemic authority | No | No | No | No | Yes | Canonical |
-| CognitiveProductPresenter | `product_response.py` | Product projection, semantic validation | No | No | No | No | Yes | Canonical |
-
----
-
-## M11-M21 PRESERVATION
-
-| Movement | Invariant | Status | Evidence |
-|---|---|---|---|
-| M11 | Canonical runtime / Mission authority | PRESERVED ✅ | `MissionEngine.complete()` requires `MissionCompletionDecision` with valid `_authority_token` (`verification.py:120-136`) |
-| M12 | Product-response truth | PRESERVED ✅ | `CognitiveProductPresenter.present()` validates epistemic consistency, provider evidence, mission completion (`product_response.py:88-114`) |
-| M13 | Exact executable binding identity | PRESERVED ✅ | `CanonicalResourceBindingAuthority.revalidate()` rechecks registration, RRM eligibility, health (`binding.py:117-145`) |
-| M14 | Same-Mission confirmation/resume | PRESERVED ✅ | `CanonicalConfirmationService.submit()` validates mission match, state, scope, token, binding identity (`confirmation_service.py:138-260`) |
-| M15 | Governed Agent construction/lifecycle | PRESERVED ✅ | `CanonicalAgentFactory` guards lifecycle transitions, requires Mission binding (`factory.py`) |
-| M16 | Discovery is evidence, not authority | PRESERVED ✅ | `RuntimeResourceProjection` writes to RRM only (`projection.py`) |
-| M17 | Governed promotion/registration | PRESERVED ✅ | `CanonicalPromotionRegistrationBoundary` creates `governed_registration_id` (`registration_boundary.py`) |
-| M18 | Governed activation/trusted evidence | PRESERVED ✅ | `_is_governed_resource()` requires `governed_registration_id` (`service.py:304-325`) |
-| M19 | Governed retirement | PRESERVED ✅ | `CanonicalResourceRetirementAuthority` owns retirement; `unregister_*()` rejects governed resources (`retirement.py`, `service.py:76-81`) |
-| M20 | Repaired authorization/tool authority | PRESERVED ✅ | `ToolAuthorizationGate.evaluate_tool()` checks status, permissions, constitution, constraints (`authorization.py:39-79`) |
-| M21 | Explicit verification contract | PRESERVED ✅ | `InMemoryActionVerificationAdapter.verify()` returns `VERIFIED_FAILURE` when `expected_output=None` (`verification.py:82-95`) |
-
----
-
-## AUTHORITY SUBSTITUTION RESULTS
-
-| Substitution | Normally FALSE? | Runtime-Reachable Substitution Found? |
+| Component | Classification | Canonical Decision Owned |
 |---|---|---|
-| discovered == authorized? | Yes | No — discovery writes to RRM; authorization requires ToolAuthorizationGate |
-| registered == active? | Yes | No — registration is separate from eligibility |
-| active == eligible? | Yes | No — `is_eligible` checks status + is_template + governed_registration_id |
-| eligible == bound? | Yes | No — binding requires CanonicalResourceBindingAuthority.resolve() |
-| bound == authorized? | Yes | No — binding requires ToolAuthorizationGate |
-| authorized == confirmed? | Yes | No — confirmation requires user approval |
-| executed == successful? | Yes | No — execution ≠ verification (M21) |
-| result exists == verified? | Yes | No — M21: expected_output=None → VERIFIED_FAILURE |
-| verified == completed? | Yes | No — completion requires MissionCompletionGate.decide() |
-| completed == product success? | Yes | No — CognitiveProductPresenter validates semantics |
-| provider selected == provider authorized? | Yes | No — selection ≠ authorization |
-| tool present == tool authorized? | Yes | No — ToolAuthorizationGate checks status, permissions |
-| agent declares capability == agent authorized? | Yes | No — agent declarations are claims only |
-| memory says fact == runtime authority? | Yes | No — memory is independent authority |
-
-**VERDICT:** No authority substitution found.
+| MissionEngine | CANONICAL_AUTHORITY | Lifecycle transitions, completion evidence validation |
+| MissionRuntime | CANONICAL_AUTHORITY | Action execution orchestration, verification, completion gate invocation |
+| MissionCompletionGate | CANONICAL_AUTHORITY | Mission completion decision (sole, _COMPLETION_AUTHORITY_TOKEN) |
+| VerificationGate | CANONICAL_AUTHORITY | Post-execution verification |
+| ActionGate | CANONICAL_AUTHORITY | Pre-execution validation |
+| ToolAuthorizationGate | CANONICAL_AUTHORITY | Tool pre-execution authorization |
+| CanonicalResourceBindingAuthority | CANONICAL_AUTHORITY | Binding selection + revalidation |
+| CanonicalProviderAuthority | CANONICAL_AUTHORITY | Provider selection + health |
+| CanonicalResourceActivationAuthority | CANONICAL_AUTHORITY | Activation prerequisite evaluation |
+| CanonicalActivationEvidenceAuthority | CANONICAL_AUTHORITY | Activation evidence derivation |
+| CanonicalResourceRetirementAuthority | CANONICAL_AUTHORITY | Governed resource retirement |
+| ResourcePromotionDecisionAuthority | CANONICAL_AUTHORITY | Promotion approval |
+| CanonicalConstitutionEngine | CANONICAL_AUTHORITY | Constitutional governance |
+| CanonicalConfirmationService | CONFIRMATION_ONLY | Confirmation validation |
+| RegistryResourceManager | REGISTRY_ONLY | Resource storage, status, health |
+| CanonicalCapabilityRegistry | REGISTRY_ONLY | Invocation binding catalog |
+| CognitiveResponseAssembler | APPLICATION_BOUNDARY | Response assembly |
+| CognitiveProductPresenter | EVIDENCE_ONLY | Product projection |
+| ProviderManager | TRANSPORT_ONLY | Provider routing (compatibility) |
+| ToolAccessExecutorAdapter | COMPATIBILITY_ONLY | Tool execution bridge (test-only) |
 
 ---
 
-## RETIREMENT RESULTS
+## DUPLICATE AUTHORITY RESULTS
 
-### Governed Resource Retirement (M19)
+**NO DUPLICATE CANONICAL AUTHORITY FOUND.**
 
-- `CanonicalResourceRetirementAuthority` owns retirement request/decision/application
-- `_remove_resource()` bypasses `unregister_*()` — direct dict deletion under lock
-- `unregister_provider/account/environment/capability/agent` all reject governed resources (return `False`)
-- `unregister_project` has NO governed guard — but is never called in production code (dead path)
+| State Field | Writer | Duplicate? |
+|---|---|---|
+| mission.status | MissionEngine._transition() | No |
+| instance.status | MissionRuntime | No |
+| verification_result | MissionRuntime (from VerificationGate) | No |
+| completion_authority | MissionRuntime | No |
+| MissionCompletionDecision | MissionCompletionGate.decide() | No |
+| ProviderSelectionDecision | CanonicalProviderAuthority.select() | No |
+| ResourceBindingDecision | CanonicalResourceBindingAuthority.resolve() | No |
+| ToolAuthorizationDecisionState | ToolAuthorizationGate.evaluate_tool() | No |
 
-### Retirement Probes
+---
 
-| Probe | Result |
+## M11–M21 PRESERVATION
+
+| Movement | Invariant Preserved | Evidence |
+|---|---|---|
+| M11 — Runtime Authority | MissionEngine.complete() requires MissionCompletionDecision with valid _authority_token | verification.py:120-136 |
+| M12 — Product Response Authority | CognitiveProductPresenter.present() validates epistemic consistency, provider evidence, mission completion | product_response.py:88-114 |
+| M13 — Exact Binding Identity | CanonicalResourceBindingAuthority.revalidate() rechecks registration, RRM eligibility, health using `is` identity | binding.py:117-145 |
+| M14 — Confirmation Authority | CanonicalConfirmationService.submit() validates mission match, state, scope, token, binding identity | confirmation_service.py:138-260 |
+| M15 — GovernedAgent | CanonicalAgentFactory guards lifecycle transitions; GovernedAgent is passive with authority="NONE" | factory.py |
+| M16 — Discovery | RuntimeResourceProjection writes to RRM only | projection.py |
+| M17 — Registration | CanonicalPromotionRegistrationBoundary creates governed_registration_id | registration_boundary.py |
+| M18 — Activation | _is_governed_resource() requires governed_registration_id | service.py:304-325 |
+| M19 — Retirement | CanonicalResourceRetirementAuthority sole removal path; unregister_*() rejects governed resources | retirement.py, service.py:76-81 |
+| M20 — Tool Authority | ToolAuthorizationGate.evaluate_tool() checks status, permissions, constitution, constraints | authorization.py:39-79 |
+| M21 — Verification Repair | InMemoryActionVerificationAdapter.verify() returns VERIFIED_FAILURE when expected_output=None | verification.py:82-95 |
+
+---
+
+## CONFIRMED BLOCKERS
+
+**NONE.**
+
+No RA-22-XX identifier was assigned.
+
+No candidate finding satisfied all required blocker conditions:
+- Explicit canonical invariant violated
+- Current HEAD demonstrably violates it
+- Runtime-reachable path
+- Independent reproduction
+- Not merely compatibility/test/simulation
+- Existing downstream authority does not fail closed
+- Not merely architectural preference
+- Not already contained by a closed Movement
+
+---
+
+## NON-BLOCKING HARDENING FINDINGS
+
+### CS-22-01: Confirmation Snapshot/Live-State Freshness
+
+| Field | Value |
 |---|---|
-| Retire → same-ID replacement | Governed overwrite guard prevents replacement |
-| Retire → stale activation evidence | Activation evidence is bound to governed_registration_id |
-| Retire → stale binding | Binding revalidation catches disappeared registration |
-| Retire → confirmation resume | `_binding_identity_valid` + `recheck_authorization` catch stale binding |
-| Retire → execution attempt | ActionGate RRM revalidation catches ineligible resource |
+| Severity | MEDIUM |
+| Classification | HARDENING_ONLY |
+| Component | `intent_kernel/application/confirmation_service.py:326-348` |
+| Factual risk | `recheck_authorization()` reconstructs ToolCandidate/ToolResource from serialized snapshot, not live registry state |
+| Why not a blocker | ActionGate provides live RRM revalidation at dispatch; execution failure is final safety net |
+| Recommended future handling | Add live tool status/health recheck in `recheck_authorization()` |
 
-**VERDICT:** M19 retirement authority intact.
+### CS-22-02: ToolAccessExecutorAdapter Prefix Simulation Bypass
 
----
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | COMPATIBILITY_ONLY / TEST_ONLY |
+| Component | `intent_kernel/tools/adapters.py:177-179` |
+| Factual risk | `core.*`/`retrieval.*`/`analysis.*`/`synthesis.*`/`validation.*` return SIMULATED_SUCCESS without authorization |
+| Why not a blocker | NOT imported by any production code; canonical executor is InMemoryActionExecutor |
+| Recommended future handling | No action required |
 
-## TOOL AUTHORIZATION RESULTS
+### CS-22-03: ToolHealthStatus.UNKNOWN Permissive Behavior
 
-### M20 Re-Audit: ToolAccessExecutorAdapter Bypass
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | HARDENING_ONLY |
+| Component | `intent_kernel/tools/authorization.py:43-44` |
+| Factual risk | New tools with UNKNOWN health pass ToolAuthorizationGate |
+| Why not a blocker | Design choice: UNKNOWN = "not yet checked"; routing may still reject |
+| Recommended future handling | Consider health check requirement for UNKNOWN status tools |
 
-**File:** `intent_kernel/tools/adapters.py:177-179`
+### PM-22-01: ProviderManager Direct Compatibility Routing
 
-**FACT:** When `capability_router.route_capability()` returns zero candidates AND capability starts with `core.*`, `retrieval.*`, `analysis.*`, `synthesis.*`, or `validation.*`, the adapter returns `{"status": "SIMULATED_SUCCESS"}` WITHOUT authorization.
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | COMPATIBILITY_ONLY |
+| Component | `intent_kernel/providers/manager.py:94-126` |
+| Factual risk | `route(mode, selection=None)` returns default provider without RRM revalidation |
+| Why not a blocker | Canonical path always uses RRM selection; compatibility path documented with trace |
+| Recommended future handling | No action required |
 
-**RUNTIME REACHABILITY:** The `ToolAccessExecutorAdapter` is:
-- NOT imported by any production code (composition.py, product_bridge.py, kernel.py)
-- Only re-exported via `intent_kernel/tools/__init__.py` and `intent_kernel/__init__.py`
-- Only consumed in `tests/test_tools.py`
-- The canonical executor is `InMemoryActionExecutor` (default in `MissionRuntime.__init__`)
+### CS-22-04: ToolStatus.UNSUPPORTED Not Explicitly Denied
 
-**CLASSIFICATION:** COMPATIBILITY_ONLY / TEST_ONLY — not runtime reachable in canonical execution.
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | HARDENING_ONLY |
+| Component | `intent_kernel/tools/authorization.py:40` |
+| Factual risk | Authorization gate deny list does not include UNSUPPORTED status |
+| Why not a blocker | Routing already rejects UNSUPPORTED tools (router.py:59); gap only matters for synthetic construction |
+| Recommended future handling | Add UNSUPPORTED to authorization gate deny list |
 
-### Canonical Tool Authorization Path
+### CS-22-05: Same tool_id Replacement Allowed
 
-```
-CapabilityRouter.route_capability() → sorted ToolCandidates
-  → ToolAuthorizationGate.evaluate_tool() — status, permissions, constitution, constraints
-  → ALLOW only when candidate.authorization_status == GRANTED
-```
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | HARDENING_ONLY |
+| Component | `intent_kernel/tools/registry.py:62` |
+| Factual risk | InMemoryToolRegistry allows silent replacement of tool objects with same tool_id |
+| Why not a blocker | Replacement tool's properties are evaluated by routing/authorization; unlike agent registry, no duplicate rejection |
+| Recommended future handling | Add duplicate rejection in InMemoryToolRegistry |
 
-**VERDICT:** No tool execution bypass in canonical path.
+### CS-22-06: Synthetic ToolResource Permissive Defaults
+
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | TEST_ONLY |
+| Component | `intent_kernel/tools/adapters.py:188-192` |
+| Factual risk | ToolAccessExecutorAdapter constructs synthetic ToolResource with status=AVAILABLE |
+| Why not a blocker | Adapter is TEST_ONLY; not imported by production code |
+| Recommended future handling | No action required |
+
+### CS-22-07: Confirmation Lookup by mission_id
+
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | HARDENING_ONLY |
+| Component | `intent_kernel/runtime/mission_runtime.py:379-382` |
+| Factual risk | submit_confirmation() iterates all instances matching mission_id, not runtime_id |
+| Why not a blocker | Runtime IDs are UUIDs — unlikely collision; confirmation also validates scope/token |
+| Recommended future handling | Use runtime_id-based lookup |
+
+### CS-22-08: update_resource_status DoS Potential
+
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | HARDENING_ONLY |
+| Component | `intent_kernel/rrm/service.py:384-443` |
+| Factual risk | Allows any caller to mutate non-governed resource status (DoS via status demotion) |
+| Why not a blocker | Governed resources are protected; requires RRM write access |
+| Recommended future handling | Add authorization check for status mutations |
+
+### CS-22-09: Project Unregister Guard
+
+| Field | Value |
+|---|---|
+| Severity | LOW |
+| Classification | HARDENING_ONLY / dead path |
+| Component | `intent_kernel/rrm/service.py:259-264` |
+| Factual risk | unregister_project() has no governed resource check |
+| Why not a blocker | Never called in production code; dead path |
+| Recommended future handling | Add governed guard or remove dead code |
 
 ---
 
 ## PROVIDER RESULTS
 
-### Canonical Path
+Canonical path uses CanonicalResourceBindingAuthority → CanonicalProviderAuthority → ManagedProvider with RRM revalidation. ManagedProvider.execute() re-resolves provider by string ID at dispatch — a TOCTOU gap mitigated by bind_selected() identity validation and fallback RRM eligibility. Compatibility path (ProviderManager.route with selection=None) bypasses RRM but is documented with compatibility trace. Zero-provider state fails closed. Provider removal between selection and execution caught by fallback or CAPABILITY_UNAVAILABLE.
 
-```
-RRM registers ProviderResource (eligible, health-checked)
-  → CanonicalResourceBindingAuthority.resolve() — RRM-eligible + registry-available
-  → ManagedProvider(provider_id=decision.selected_binding)
-  → ToolAuthorizationGate.evaluate_tool()
-  → ActionGate.evaluate()
-  → ManagedProvider.execute() — live lookup, RRM fallback check
-```
+## TOOL RESULTS
 
-### Compatibility Path
+ToolAuthorizationGate is sole canonical tool authorization. Routing rejects UNAVAILABLE/UNSUPPORTED tools. Authorization denies UNAUTHORIZED/REVOKED/DISABLED/UNAVAILABLE. ToolAccessExecutorAdapter prefix bypass is TEST_ONLY. Same tool_id replacement allowed (unlike agent registry). Synthetic ToolResource in adapter has permissive defaults but is TEST_ONLY.
 
-```
-ProviderManager.register() → set_default() if first
-  → route(mode, selection=None) → ManagedProvider(_default)
-  → ManagedProvider.execute() — live lookup, no RRM revalidation
-```
+## AGENT RESULTS
 
-### Adversarial Tests
-
-| Test | Result | Contained By |
-|---|---|---|
-| route without canonical selection | Returns compatibility default | N/A (compatibility) |
-| set_default to unhealthy | Only affects compatibility default | Canonical path unaffected |
-| set_default to RRM-ineligible | Only affects compatibility default | Canonical path unaffected |
-| provider replaced after selection | Live lookup executes replacement | ActionGate revalidation (canonical) |
-| provider account revoked | ActionGate catches | Canonical path |
-| provider health changes after confirmation | recheck_authorization + ActionGate | Canonical path |
-| provider removed/retired during Mission | RRM eligibility check | Canonical path |
-| fallback invoked without authority | `ManagedProvider.execute()` checks `_selection_authority.is_eligible()` | Selection authority |
-
-**VERDICT:** No canonical authority bypass.
-
----
+All seven GovernedAgent prohibitions confirmed: cannot execute, select provider, select resource, authorize tool, complete Mission, mutate lifecycle, write activation evidence. Agent dispatch uses string identity via agent_orchestrator.execute(). CanonicalAgentRegistry prevents duplicate registrations.
 
 ## CONFIRMATION RESULTS
 
-### Revalidation Coverage
+Confirmation snapshot freshness is imperfect (CS-22-01). _binding_identity_valid() compares string tool_ids only. recheck_authorization() uses stale snapshot. Downstream live gates (ActionGate, execution failure) fail closed. Invariant: CONFIRMATION OF AN OLD ACTION MUST NOT AUTHORIZE A DIFFERENT OR NO LONGER-VALID ACTION — maintained through downstream containment.
 
-| Value | Revalidation Method | Live? |
-|---|---|---|
-| Tool status | `recheck_authorization()` → `ToolAuthorizationGate` | Snapshot (stale) |
-| Tool health | `recheck_authorization()` → `ToolAuthorizationGate` | Snapshot (stale) |
-| Tool registration | `_binding_identity_valid()` → runtime instance node check | Live |
-| Capability RRM eligibility | `_binding_identity_valid()` → node action_contract.provenance | Snapshot |
-| Provider health | ActionGate → execution failure | Live (at dispatch) |
-| Provider selection | Confirmation bound to specific runtime_id | Live |
-| Binding identity | `_binding_identity_valid()` → bound_tool_id vs contract_tool_id | Live |
-| Mission scope | `submit()` → session_id, project_id, confirmation_token | Live |
-| Permission state | `recheck_authorization()` → `ToolAuthorizationGate` | Snapshot |
+## VERIFICATION RESULTS
 
-### Snapshot vs Live Analysis
+M21 repair intact. VerificationGate.evaluate_node() receives (node, action, result) from immediate execution. No caching, no cross-node sharing, no replay. Verification contract bound to exact execution attempt via in-process linear data flow.
 
-- **SNAPSHOT REVALIDATED:** Tool status, tool health, permissions, capability eligibility (from confirmation.provenance.authorization)
-- **LIVE REVALIDATED:** Binding identity, mission state, session/project scope, provider health (via ActionGate at dispatch)
-- **NOT REVALIDATED:** None — all values have at least one revalidation gate
+## COMPLETION RESULTS
 
-### Invariant
+MissionCompletionGate remains sole canonical completion authority. Requires all nodes SUCCEEDED, all nodes VERIFIED_SUCCESS, completion evidence tagged with exact node_id, and _authority_token is _COMPLETION_AUTHORITY_TOKEN. Cross-attempt contamination impossible. Authority token prevents forgery.
 
-`CONFIRMATION OF AN OLD ACTION MUST NOT AUTHORIZE A DIFFERENT OR NO LONGER-VALID ACTION`
+## RETIREMENT RESULTS
 
-**VERDICT:** Maintained. Snapshot staleness is contained by ActionGate live revalidation + execution failure.
+M19 retirement authority intact. CanonicalResourceRetirementAuthority sole removal path. Generic unregister_*() rejects governed resources. After retirement, resource physically deleted from RRM. Execution fails closed. Old authority does not transfer to same-ID replacement.
+
+## PRODUCT CONTRACT RESULTS
+
+CognitiveProductPresenter.present() enforces epistemic consistency, confidence consistency, provider evidence completeness, and mission verification evidence. Cannot claim COMPLETED in MISSION mode without verified evidence. Constitution can override to BLOCKED. Status derived deterministically from CanonicalResultKind.
+
+## MEMORY AUTHORITY RESULTS
+
+Memory (AME/CanonicalMemoryService) has no methods for registration, activation, binding, authorization, verification, or completion. All runtime authorities query RRM/registry directly. MemoryAuthorityContract declares role as read_through_only. No post-M21 memory leakage detected.
+
+## COMPATIBILITY CONTAINMENT RESULTS
+
+All compatibility components properly contained. BCC registers non-governed resources via standard RRM API. Legacy adapters delegate to canonical lifecycle. Tool adapter is simulation-only. SymbioticLayer is standalone observation module not wired into canonical path. None can forge verification, completion, or product truth.
+
+## PRODUCTIVE EXTERNAL EXECUTION STATUS
+
+**PRODUCTIVE_EXTERNAL_EXECUTION: DISABLED**
+
+No Movement 22 finding demonstrated an unauthorized productive external execution path. Canonical gates preventing unauthorized productive execution: ActionGate (pre-execution), ToolAuthorizationGate (tool auth), CanonicalResourceBindingAuthority (binding), VerificationGate (post-execution), MissionCompletionGate (completion), CognitiveProductPresenter (product truth).
 
 ---
 
-## VERIFICATION / COMPLETION RESULTS
+## REGRESSION / TEST BASELINE
 
-### M21 Verification Revalidation
-
-```
-InMemoryActionVerificationAdapter.verify(action, expected_output)
-  → if expected_output is None:
-      return VerificationResult(
-          status=VerificationStatus.VERIFIED_FAILURE,
-          reason="Execution produced no expected_output for verification",
-          evidence={"action_id": action.action_id, "expected_output": None}
-      )
-```
-
-**M21 INVARIANT:** `EXECUTION RESULT EXISTS != EXECUTION VERIFIED`
-
-**VERDICT:** M21 repair intact.
-
-### Completion Authority
-
-All paths to Mission Completion:
-
-| Path | Requires MissionCompletionGate? | Evidence |
-|---|---|---|
-| `MissionRuntime.run_mission()` → `completion_gate.decide()` | Yes | `verification.py:167-251` |
-| `MissionEngine.complete()` → validates `MissionCompletionDecision` | Yes | `mission_engine.py:121-160` |
-| `MissionEngine.synchronize_runtime_state("COMPLETED")` → calls `complete()` | Yes | `mission_engine.py:179-181` |
-
-### Attempted Bypasses
-
-| Attempt | Result |
+| Category | Count |
 |---|---|
-| Executor returns completion-like object | Ignored — only MissionCompletionGate authority matters |
-| Provider says "completed" | Ignored — provider output is evidence, not authority |
-| Tool returns `{"status":"COMPLETED"}` | Ignored — treated as result, not completion |
-| Agent returns completed metadata | Ignored — agent output is evidence |
-| Compatibility path writes completion_authority | `setdefault` only — doesn't override canonical |
-| Node manually marked verified | N/A — only VerificationGate assigns verification_result |
-| verification_required=False | M21: auto-assigns VERIFIED_SUCCESS, but completion still requires all nodes SUCCEEDED + MissionCompletionGate |
-
-**VERDICT:** No bypass of MissionCompletionGate authority.
+| PASS | 1232 |
+| ASSERTION FAILURE | 1 (test_programs_detected — pre-existing Windows `which` issue) |
+| ENVIRONMENT FAILURES | 292 (pre-existing Windows pytest temp PermissionError) |
+| CODE REGRESSIONS | 0 |
 
 ---
 
-## PRODUCT RESPONSE RESULTS
+## STATIC VALIDATION
 
-### Writers of Externally Presented Status
-
-1. `CognitiveResponseAssembler.from_result()` — maps `CanonicalResultKind` → `ResponseStatus`
-2. `CognitiveProductPresenter.present()` — validates epistemic consistency, provider evidence, mission completion
-3. `CognitiveResponseAssembler.assemble()` — constitution evaluation of response output
-
-### Contradiction Tests
-
-| Scenario | Result |
+| Check | Result |
 |---|---|
-| Mission FAILED but product says SUCCESS | `CognitiveProductPresenter.present()` raises ValueError: "Mission completion requires verified evidence" |
-| Mission WAITING_CONFIRMATION but product says COMPLETED | Impossible — CanonicalResultKind mapping prevents this |
-| Verification failure but response says verified | Impossible — verification_evidence is required for COMPLETED status |
-| Provider failure but product reports success | Impossible — provider evidence must match invocation |
-
-**VERDICT:** No product truth contradiction possible.
+| compileall | PASS |
+| git diff --check | PASS |
 
 ---
 
-## MEMORY / PROJECT RESULTS
-
-### Memory Authority
-
-- `CanonicalMemoryService` is independent authority for memory writes
-- `MissionEngine` stores missions via `MissionStore` (separate from memory)
-- FAILED/DENIED/UNVERIFIED outputs are not persisted as successful facts by canonical path
-- Memory ingestion policy is independent of runtime authority
-
-**VERDICT:** Memory ≠ runtime authority. No state leakage found.
-
-### Project/Scope Authority
-
-- `ProjectResource` is descriptive metadata in RRM
-- Project identity is used for: memory scoping, confirmation scope validation, agent assignment
-- Cross-project leakage test: `CanonicalConfirmationService.submit()` validates `project_id` match (`confirmation_service.py:202-208`)
-- `unregister_project` has no governed guard but is never called in production
-
-**VERDICT:** No cross-project authority leakage.
-
----
-
-## COMPATIBILITY REACHABILITY
-
-| Component | Runtime Reachable? | Can Execute? | Can Mutate Canonical State? | Can Bypass Authority? | Classification |
-|---|---|---|---|---|---|
-| RRMToCORAdapter | Yes | No (bridge only) | No | No | COMPATIBILITY_ONLY |
-| BootstrapCognitiveCortex | Yes | No (assessment only) | No | No | COMPATIBILITY_ONLY |
-| ModuleRouter | Yes | No (intent routing) | No | No | COMPATIBILITY_ONLY |
-| PipelineDAG | Yes | No (processing modes) | No | No | COMPATIBILITY_ONLY |
-| RuntimeResourceProjection | Yes | No (writes to RRM) | No | No | COMPATIBILITY_ONLY |
-| ToolAccessExecutorAdapter | Tests only | Yes (simulated) | No | No (prefix bypass) | TEST_ONLY |
-| ProviderManager direct path | Yes | Yes (compatibility) | No | No (trace emitted) | COMPATIBILITY_ONLY |
-
-**VERDICT:** No compatibility path can bypass canonical authority or produce productive external execution.
-
----
-
-## ADVERSARIAL PROBES
-
-| # | Probe | Expected | Observed | Side Effect? | Gate |
-|---|---|---|---|---|---|
-| A | Same logical ID, different executor object | Identity detected | `_is_governed_resource` + `governed_registration_id` check | No | RRM |
-| B | Stale binding replay | Revalidation fails | `CanonicalResourceBindingAuthority.revalidate()` catches | No | Binding authority |
-| C | Stale confirmation replay | Confirmation state check fails | `submit()` checks `WAITING_CONFIRMATION` state | No | ConfirmationService |
-| D | Retired resource replay | Retirement guard catches | `_remove_resource` removes from dicts; unregister rejects governed | No | Retirement + RRM |
-| E | Forged verification-like output | Completion gate rejects | MissionCompletionGate requires `_COMPLETION_AUTHORITY_TOKEN` | No | CompletionGate |
-| F | Forged completion-like output | MissionEngine rejects | `complete()` validates authority, mission_id, evidence_complete | No | MissionEngine |
-| G | Provider default substitution | Only affects compatibility | Canonical path uses RRM selection | No | CanonicalResourceBindingAuthority |
-| H | Tool status substitution | Authorization fails | ToolAuthorizationGate checks ToolStatus | No | ToolAuthorizationGate |
-| I | Agent capability claim | Claims ≠ authority | Agent declarations are claims only | No | CanonicalAgentFactory |
-| J | Cross-project Mission resume | Scope mismatch | ConfirmationService validates project_id | No | ConfirmationService |
-| K | Compatibility execution path | Simulated only | ToolAccessExecutorAdapter returns SIMULATED_SUCCESS | No | InMemoryActionExecutor |
-| L | Stale provider health | Execution fails | ManagedProvider.execute() raises or falls back | No | Executor |
-| M | Stale tool health | Authorization recheck | recheck_authorization + ActionGate | No | ToolAuthorizationGate + ActionGate |
-| N | Stale permission | Authorization recheck | recheck_authorization + ToolAuthorizationGate | No | ToolAuthorizationGate |
-| O | Resource disappears before dispatch | Binding revalidation fails | CanonicalResourceBindingAuthority.revalidate() catches | No | Binding authority |
-
-**VERDICT:** No adversarial probe demonstrates authority bypass with productive external execution.
-
----
-
-## RA-22-01 VERDICT
-
-**RA-22-01 = NOT_CONFIRMED**
-
-### Investigated Hypothesis
-
-Subprocess execution in the SymbioticLayer subsystem constitutes a canonical authority defect because it bypasses the Constitution/authorization pipeline.
-
-### Investigation Scope
-
-Complete subprocess usage audit across the entire codebase, production reachability analysis, command-origin analysis, side-effect classification, user/model/agent control analysis, authority-chain analysis, and productive-execution testing.
-
-### Process-Execution Inventory
-
-| # | File | Line | Function | Command | shell | capture_output | timeout | User-controllable? |
-|---|---|---|---|---|---|---|---|---|
-| 1 | `symbiotic/__init__.py` | 201 | `_scan_system()` | `sysctl -n machdep.cpu.brand_string` (macOS) / `lscpu` (Linux) | False | True | 5 | No |
-| 2 | `symbiotic/__init__.py` | 219 | `_scan_python_envs()` | `conda env list --json` | False | True | 10 | No |
-| 3 | `symbiotic/__init__.py` | 253 | `_scan_docker()` | `docker ps --format {{json .}}` | False | True | 5 | No |
-| 4 | `symbiotic/__init__.py` | 275 | `_scan_services()` | `systemctl list-units --type=service --json` | False | True | 5 | No |
-| 5 | `symbiotic/__init__.py` | 304 | `_scan_disks()` | `lsblk --json` | False | True | 5 | No |
-| 6 | `symbiotic/__init__.py` | 317 | `_scan_printers()` | `lpstat -p -d` (Linux) / `system_profiler SPPrintersDataType` (macOS) | False | True | 5 | No |
-| 7 | `symbiotic/__init__.py` | 344 | `_scan_network()` | `ip addr show` / `ifconfig` | False | True | 5 | No |
-| 8 | `symbiotic/__init__.py` | 367 | `_scan_processes()` | `ps aux` | False | True | 5 | No |
-
-### Security Properties
-
-- **shell=False** on all 8 production sites
-- **capture_output=True** on all 8 sites
-- **timeout** enforced on all 8 sites (5-10 seconds)
-- **Commands are static strings** — not constructed from user input
-- **No shell injection vector** — no shell=True, no string interpolation into commands
-- **No network execution from subprocess** — all commands are local system queries
-- **Output is captured as text** — returned as string, not executed
-
-### Production Reachability
-
-**NOT REACHED** in the current canonical execution path:
-- `get_full_snapshot()` is not called by any canonical composition root, mission runtime, or product bridge path
-- `CompositionRoot` does NOT instantiate `SymbioticLayer`
-- `ProductBridge` does NOT call `get_full_snapshot()` or `get_symbiotic_live()`
-- `Kernel` does NOT reference the symbiotic module
-
-**The SymbioticLayer is a standalone observation module that is not wired into the canonical production execution path.**
-
-### Command-Origin Analysis
-
-All 8 subprocess commands are hardcoded strings, not constructed from user/model/agent/tool/provider output. The only variable is platform check (`sys.platform`).
-
-### Side-Effect Classification
-
-| Property | Value |
-|---|---|
-| Mutation of system state | NO — all commands are read-only queries |
-| Mutation of canonical runtime state | NO |
-| Mutation of mission state | NO |
-| Mutation of memory state | NO |
-| Network side effects | NO |
-| Filesystem side effects | NO |
-| Process side effects | NO |
-
-**OBSERVATION ≠ PRODUCTIVE EXECUTION**
-
-### User/Model/Agent Control Analysis
-
-| Control vector | Present? |
-|---|---|
-| User can influence command | NO |
-| Model can influence command | NO |
-| Agent can influence command | NO |
-| Tool can influence command | NO |
-| Provider can influence command | NO |
-
-### RA-22-01 Reasons Not Confirmed
-
-1. All identified subprocess calls are observation/discovery only
-2. Commands are static and hardcoded
-3. `shell=False`
-4. No user/model/agent-controlled command construction exists
-5. No productive external execution was demonstrated
-6. No resource mutation or mission authority mutation was demonstrated
-7. The production call graph does not currently reach the identified `get_full_snapshot()` → `get_symbiotic_live()` → `SymbioticLayer.scan()` path
-8. No bypass of the canonical execution authority was independently reproduced
-
-```
-OBSERVATION != PRODUCTIVE EXECUTION
-SUBPROCESS PRESENCE != AUTHORITY BYPASS
-```
-
----
-
-## DEFERRED HARDENING CANDIDATES
-
-**These are NOT confirmed Movement 22 blockers. None satisfies all six Movement blocker criteria.**
-
-### CS-22-01: Confirmation Snapshot Trust Gap
-
-**TITLE:** `recheck_authorization()` reconstructs ToolCandidate/ToolResource from stale serialized snapshot
-
-**SOURCE:** `intent_kernel/application/confirmation_service.py:326-348`
-
-**SEVERITY:** MEDIUM
-
-**CLASSIFICATION:** HARDENING_ONLY
-
-**PRODUCTIVE EXECUTION IMPACT:** No — ActionGate provides live RRM revalidation at dispatch; execution failure is final safety net.
-
-### CS-22-02: ToolAccessExecutorAdapter Prefix Bypass
-
-**TITLE:** `core.*`/`retrieval.*`/`analysis.*`/`synthesis.*`/`validation.*` capabilities return SIMULATED_SUCCESS without authorization
-
-**SOURCE:** `intent_kernel/tools/adapters.py:177-179`
-
-**SEVERITY:** LOW
-
-**CLASSIFICATION:** COMPATIBILITY_ONLY / TEST_ONLY
-
-**PRODUCTIVE EXECUTION IMPACT:** No — not imported by any production code; canonical executor is `InMemoryActionExecutor`.
-
-### CS-22-03: ToolHealthStatus.UNKNOWN Permissive Default
-
-**TITLE:** New tools with UNKNOWN health pass ToolAuthorizationGate
-
-**SOURCE:** `intent_kernel/tools/authorization.py:43-44`
-
-**SEVERITY:** LOW
-
-**CLASSIFICATION:** HARDENING_ONLY
-
-**PRODUCTIVE EXECUTION IMPACT:** No — design choice; UNKNOWN = "not yet checked".
-
-### PM-22-01: ProviderManager Direct Path
-
-**TITLE:** `ProviderManager.route(mode, selection=None)` returns default provider without RRM revalidation
-
-**SOURCE:** `intent_kernel/providers/manager.py:94-126`
-
-**SEVERITY:** LOW
-
-**CLASSIFICATION:** COMPATIBILITY_ONLY
-
-**PRODUCTIVE EXECUTION IMPACT:** No — canonical path always uses RRM selection; compatibility path documented with trace.
-
-### Project Unregister Guard
-
-**TITLE:** `unregister_project()` deletes projects without governed resource check
-
-**SOURCE:** `intent_kernel/rrm/service.py:259-264`
-
-**SEVERITY:** LOW
-
-**CLASSIFICATION:** HARDENING_ONLY / dead runtime path
-
-**PRODUCTIVE EXECUTION IMPACT:** No — never called in production code.
-
-**No candidate is RA-22-XX unless a runtime-reachable authority violation was independently demonstrated.**
-
----
-
-## VALIDATION BASELINE
-
-### Test Results
-
-```
-Full suite: 1232 passed, 292 errors (environmental), 1 failed (pre-existing)
-Code failures: 0
-Pre-existing environmental errors: 292
-Pre-existing test failures: 1 (test_programs_detected — Windows `which`)
-```
-
-### Static Validation
-
-```
-compileall: PASS (no errors)
-git diff --check: PASS (tracked diff empty)
-```
-
----
-
-## KNOWN ENVIRONMENTAL LIMITATIONS
-
-- 292 pre-existing Windows `PermissionError` environmental failures (pytest-asyncio `tmp_path`)
-- 1 pre-existing test failure: `test_programs_detected` (Windows `which` command)
-- 1 pre-existing test failure: `test_frontend_is_presentation_only_and_escapes_visible_content` (missing file)
-- These are NOT attributable to Movement 22
-
----
-
-## MOVEMENT 22 IMPLEMENTATION REQUIRED
-
-**NO**
-
-No Movement 22 production implementation is required. The canonical runtime architecture is sound. All authority chains are intact. All Movements M11-M21 are preserved.
+## KNOWN RISKS
+
+1. **Confirmation snapshot freshness** (CS-22-01): ActionGate provides live revalidation. Execution failure is final safety net.
+2. **Provider TOCTOU** (CS-22-04-related): bind_selected validation + fallback RRM eligibility contained.
+3. **UNKNOWN health permissive** (CS-22-03): Design choice; routing may reject.
+4. **Same tool_id replacement** (CS-22-05): Replacement tool's properties evaluated by routing/authorization.
+5. **Cross-instance confirmation** (CS-22-07): Runtime IDs are UUIDs — unlikely collision.
 
 ---
 
 ## MOVEMENT 23 READINESS
 
-The canonical runtime is ready for the next independent architectural investigation.
+**MOVEMENT 22: AUDITED, NO BLOCKER CONFIRMED, NO IMPLEMENTATION REQUIRED, CLOSED**
 
-**PRODUCTIVE_EXTERNAL_EXECUTION: DISABLED**
+**MOVEMENT 23: NOT DEFINED, NOT STARTED**
 
-No Movement 22 finding demonstrated an unauthorized productive external execution path. Do not enable it.
-
----
-
-## REMOTE RECONCILIATION NOTE
-
-Commit `7f219e2` (premature M22 closure) was published to remote before the final source-gated Movement 22 audit completed. This commit contained ONLY `docs/MOVEMENT_22_CLOSURE.md` — no production, test, or configuration files were modified.
-
-Local history was reset to `7eb0533` to perform the comprehensive Phase 22.0/22.1 audit. After the audit completed with verdict `NO_MOVEMENT_22_BLOCKER_FOUND`, the premature closure document was fast-forwarded from remote and replaced through this follow-up documentation commit without rewriting history.
-
-The premature document focused narrowly on subprocess execution in SymbioticLayer (a single hypothesis). This final document reflects the complete 31-section comprehensive authority re-derivation.
+Do NOT automatically make any CS-22 finding Movement 23. Movement 23 must begin with a separate explicit authorization and should be driven by a demonstrated need, not numbering continuity.
 
 ---
 
-## FINAL VERDICT
+## FILE CREATED
 
-**MOVEMENT_22_VERIFIED_NO_AUTHORITY_DEFECT**
+`docs/MOVEMENT_22_CLOSURE.md` — formal no-op closure documenting Movement 22 as an audit/redervation movement whose correct result was no architectural change.
 
-**RA-22-01_NOT_CONFIRMED**
+## FILES MODIFIED
 
-**MOVEMENT_22_IMPLEMENTATION_REQUIRED=NO**
+None. Only the closure documentation was created/updated.
 
-No runtime-reachable canonical authority defect meeting Movement blocker criteria was independently demonstrated in the audited post-M21 runtime. The canonical runtime architecture is sound. All authority chains are intact. All Movements M11-M21 are preserved.
+---
+
+## COMMIT
+
+| Field | Value |
+|---|---|
+| SHA | (pending — new commit after this document is written) |
+| Message | "docs: close movement 22 post-m21 authority audit" |
+
+---
+
+## BUNDLE
+
+| Field | Value |
+|---|---|
+| Filename | `intentos-m22-closure.bundle` |
+| Size | (pending) |
+| SHA-256 | (pending) |
+| Contained HEAD | (pending — new closure commit) |
+| Required base | `c41e106d894b3d070f371f46e2ff351da69f7c35` |
+| git bundle verify | (pending) |
+| Base64 round-trip | (pending) |
+| Reconstructed SHA-256 | (pending) |
+| Reconstructed bundle verify | (pending) |
+
+---
+
+## REMOTE STATE AT HANDOFF
+
+| Field | Value |
+|---|---|
+| Remote HEAD | `c41e106d894b3d070f371f46e2ff351da69f7c35` |
+| Local HEAD | (pending — after new closure commit) |
+| Push status | NOT PUSHED — awaiting explicit instruction |
+
+---
+
+## WORKING TREE
+
+Clean (only untracked bundles + nested copy).
+
+---
+
+## NEXT STEP
+
+Await authorization for Movement 23 or next independent architectural investigation.
+
+---
+
+## FINAL STOP STATEMENT
+
+Movement 22 is CLOSED. No implementation was required. The canonical runtime architecture is sound. All authority chains are intact. All Movements M11-M21 are preserved. No RA-22-XX blocker was confirmed. Hardening candidates are recorded for future consideration. Do NOT begin Movement 23 without explicit authorization.
 
 **STOP.**

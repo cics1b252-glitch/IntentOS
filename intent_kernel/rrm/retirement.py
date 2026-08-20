@@ -248,6 +248,9 @@ class CanonicalResourceRetirementAuthority:
                 reason="removal_failed",
             )
 
+        # H1.3: Record tombstone to prevent re-registration of retired identity
+        self._rrm._record_tombstone(decision.resource_id)
+
         self._consumed.add(decision_id)
         return ResourceRetirementResult(
             success=True,

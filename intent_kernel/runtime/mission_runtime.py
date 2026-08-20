@@ -432,13 +432,32 @@ class MissionRuntime:
         if chk and instance:
             instance.completed_nodes = chk.completed_nodes.copy()
             instance.pending_nodes = [n for n in instance.nodes.keys() if n not in instance.completed_nodes]
+            # H1.4: Restore completion_evidence from checkpoint
+            instance.completion_evidence = chk.completion_evidence.copy()
             instance.status = MissionRuntimeState.READY
 
-            # Mark completed nodes as SUCCEEDED so they are NOT re-executed
+            # H1.4: Validate evidence before restoring verification state
             for nid in instance.completed_nodes:
                 if nid in instance.nodes:
                     instance.nodes[nid].state = RuntimeNodeState.SUCCEEDED
-                    instance.nodes[nid].verification_result = VerificationStatus.VERIFIED_SUCCESS
+                    # H1.4: Reset verification_result — rebuild from checkpoint evidence only
+                    instance.nodes[nid].verification_result = None
+
+                    # Check checkpoint has verification evidence for this node
+                    chk_evidence = chk.verification_state.get(nid, {})
+                    claimed_status = chk_evidence.get("verification_result", "")
+
+                    if (
+                        claimed_status == VerificationStatus.VERIFIED_SUCCESS.value
+                        and self._validate_resume_evidence(
+                            nid, claimed_status, chk.completion_evidence
+                        )
+                    ):
+                        # Evidence valid — restore verified state
+                        instance.nodes[nid].verification_result = VerificationStatus.VERIFIED_SUCCESS
+                    else:
+                        # H1.4: Evidence missing or invalid — do not trust verified claim
+                        instance.nodes[nid].verification_result = VerificationStatus.INCONCLUSIVE
 
         if instance and instance.status in (MissionRuntimeState.PAUSED, MissionRuntimeState.READY):
             instance.status = MissionRuntimeState.RUNNING
@@ -447,6 +466,15 @@ class MissionRuntime:
 
     async def save_checkpoint(self, instance: MissionRuntimeInstance) -> MissionCheckpoint:
         """Create and persist a checkpoint for the instance."""
+        # H1.4: Persist per-node verification state and evidence
+        verification_state: Dict[str, Any] = {}
+        for nid, node in instance.nodes.items():
+            if node.verification_result is not None:
+                verification_state[nid] = {
+                    "verification_result": node.verification_result.value,
+                    "evidence_id": self._find_evidence_id(instance, nid),
+                }
+
         chk = MissionCheckpoint(
             runtime_id=instance.runtime_id,
             mission_id=instance.mission_id,
@@ -455,10 +483,53 @@ class MissionRuntime:
             pending_nodes=instance.pending_nodes.copy(),
             failed_nodes=instance.failed_nodes.copy(),
             correlation_id=instance.correlation_id,
+            verification_state=verification_state,
+            completion_evidence=instance.completion_evidence.copy(),
         )
         await self.checkpoint_repo.save_checkpoint(chk)
         instance.checkpoint_id = chk.checkpoint_id
         return chk
+
+    # --- H1.4 Resume Verification Evidence ---
+
+    def _find_evidence_id(self, instance: MissionRuntimeInstance, node_id: str) -> str:
+        """Find the evidence_id for a node's verification evidence."""
+        for ev in instance.completion_evidence:
+            details = ev.get("details", {})
+            if details.get("node_id") == node_id:
+                return ev.get("evidence_id", "")
+        return ""
+
+    def _validate_resume_evidence(
+        self,
+        node_id: str,
+        claimed_status: str,
+        evidence_list: List[Dict[str, Any]],
+    ) -> bool:
+        """Validate that verification evidence is consistent for a node on resume.
+
+        Returns True only if:
+        - An evidence entry exists for this node
+        - The evidence source is VerificationGate
+        - The evidence claims verified=True
+        - The evidence verification_status matches the claimed status
+        """
+        for ev in evidence_list:
+            details = ev.get("details", {})
+            if details.get("node_id") != node_id:
+                continue
+            # Evidence must originate from VerificationGate
+            if ev.get("source") != "VerificationGate":
+                return False
+            # Evidence must claim verified
+            if not ev.get("verified", False):
+                return False
+            # Evidence verification_status must match claimed status
+            ev_status = details.get("verification_status", "")
+            if ev_status != claimed_status:
+                return False
+            return True
+        return False
 
     def _get_ready_nodes(self, instance: MissionRuntimeInstance) -> List[RuntimeNode]:
         """Find pending nodes whose dependencies are ALL satisfied."""

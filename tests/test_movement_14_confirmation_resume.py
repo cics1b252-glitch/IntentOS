@@ -45,6 +45,16 @@ MISSION_MESSAGE = "Crie e envie um e-mail."
 MISSION_PERMISSIONS = ["email.send"]
 
 
+class _ConstitutionAllow:
+    """Mock constitution that always allows — for testing non-constitution gate steps."""
+    async def evaluate(self, action_type, payload, context=None):
+        class _V:
+            allowed = True
+            decision = type("D", (), {"value": "ALLOW"})()
+            metadata = {}
+        return _V()
+
+
 @pytest.fixture
 def bridge(tmp_path, monkeypatch):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
@@ -56,7 +66,7 @@ def bridge(tmp_path, monkeypatch):
 @pytest.fixture
 def runtime_stack():
     engine = MissionEngine(InMemoryMissionStoreAdapter())
-    runtime = MissionRuntime(mission_engine=engine)
+    runtime = MissionRuntime(mission_engine=engine, constitution=_ConstitutionAllow())
     service = CanonicalConfirmationService(
         engine, runtime, confirmation_ttl_seconds=300
     )
@@ -354,7 +364,7 @@ class _IneligibleAgentRRM:
 @pytest.mark.asyncio
 async def test_J_rrm_unavailable_on_resume_fails_closed():
     engine = MissionEngine(InMemoryMissionStoreAdapter())
-    runtime = MissionRuntime(mission_engine=engine, rrm_service=_IneligibleAgentRRM())
+    runtime = MissionRuntime(mission_engine=engine, rrm_service=_IneligibleAgentRRM(), constitution=_ConstitutionAllow())
     service = CanonicalConfirmationService(engine, runtime, confirmation_ttl_seconds=300)
     mission, instance, conf = await _pending_runtime((engine, runtime, service))
     service.bind_pending(

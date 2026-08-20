@@ -265,6 +265,20 @@ class CanonicalConfirmationService:
                 mission_status=mission.status.value,
             )
 
+        # Submit-time authorization recheck (H1.2): revalidate the bound
+        # tool authorization before transitioning to CONFIRMED.  A historical
+        # authorization or user confirmation must never override a current DENY.
+        decision, _snapshot = await self.recheck_authorization(conf)
+        if decision is not None and decision is not ToolAuthorizationDecisionState.ALLOW:
+            return ConfirmationOutcome(
+                ConfirmationState.STALE,
+                False,
+                f"authorization_revoked:{decision.value}",
+                mission_id=str(mission.id),
+                confirmation_id=conf.confirmation_id,
+                mission_status=mission.status.value,
+            )
+
         if not submission.approved:
             conf.state = ConfirmationState.REJECTED
             await self._engine.reject(MissionId(submission.mission_id))

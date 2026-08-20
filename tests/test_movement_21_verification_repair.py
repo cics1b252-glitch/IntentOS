@@ -30,6 +30,16 @@ from intent_kernel.runtime import (
 # ---------------------------------------------------------------------------
 # Tests 1–17: expected_output=None → VERIFIED_FAILURE for all result types
 # ---------------------------------------------------------------------------
+class _ConstitutionAllow:
+    """Mock constitution that always allows — for testing non-constitution gate steps."""
+    async def evaluate(self, action_type, payload, context=None):
+        class _V:
+            allowed = True
+            decision = type("D", (), {"value": "ALLOW"})()
+            metadata = {}
+        return _V()
+
+
 class TestVerificationWithoutExpectedOutput(IsolatedAsyncioTestCase):
     """Without an explicit verification contract, all results must fail verification."""
 
@@ -152,7 +162,7 @@ class TestVerificationMissionIntegration(IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.executor = InMemoryActionExecutor()
-        self.runtime = MissionRuntime(executor=self.executor)
+        self.runtime = MissionRuntime(executor=self.executor, constitution=_ConstitutionAllow())
 
     async def test_20_no_expected_output_cannot_become_verified_success(self):
         """20. A node requiring verification with expected_output=None cannot
@@ -229,7 +239,7 @@ class TestVerificationRequiredFalse(IsolatedAsyncioTestCase):
     """verification_required=False must continue to bypass verification."""
 
     def setUp(self):
-        self.runtime = MissionRuntime(executor=InMemoryActionExecutor())
+        self.runtime = MissionRuntime(executor=InMemoryActionExecutor(), constitution=_ConstitutionAllow())
 
     async def test_22_verification_required_false_preserved(self):
         """22. verification_required=False behavior remains unchanged."""

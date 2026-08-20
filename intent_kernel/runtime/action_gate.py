@@ -45,16 +45,20 @@ class ActionGate:
     ) -> ActionGateDecision:
         """Evaluate an action against the strict precedence hierarchy."""
 
-        # 1. Constitution / Safety Check
-        if self._constitution and hasattr(self._constitution, "evaluate_action"):
+        # 1. Constitution / Safety Check — fail-closed: missing/malformed/unexpected = DENY
+        # H1.1-closure: no constitution → DENY (never skip constitutional enforcement)
+        if self._constitution is None:
+            return ActionGateDecision.DENY
+        if hasattr(self._constitution, "evaluate_action"):
             res = self._constitution.evaluate_action(contract.to_dict())
-            if getattr(res, "verdict", "ALLOW") == "DENY":
+            verdict = getattr(res, "verdict", None)
+            if verdict != "ALLOW":
                 return ActionGateDecision.DENY
-        elif self._constitution and hasattr(self._constitution, "evaluate"):
+        elif hasattr(self._constitution, "evaluate"):
             res = await self._constitution.evaluate(
                 "action.execute", contract.to_dict(), {}
             )
-            if not getattr(res, "allowed", True):
+            if not getattr(res, "allowed", False):
                 return ActionGateDecision.DENY
 
         # 2. Explicit Deny Policy Check
@@ -85,16 +89,16 @@ class ActionGate:
 
         # 5. Resource Eligibility Revalidation (via RRM)
         if self._rrm:
-            # Check agent eligibility
+            # Check agent eligibility — fail-closed: missing eligibility = not eligible
             if hasattr(self._rrm, "get_agent"):
                 agent_res = self._rrm.get_agent(node.agent_id)
-                if agent_res and not getattr(agent_res, "is_eligible", True):
+                if agent_res and not getattr(agent_res, "is_eligible", False):
                     return ActionGateDecision.WAIT_RESOURCE
 
-            # Check environment eligibility
+            # Check environment eligibility — fail-closed: missing status = not active
             if hasattr(self._rrm, "get_environment"):
                 env_res = self._rrm.get_environment(node.environment_id)
-                if env_res and getattr(env_res, "status", "ACTIVE") != "ACTIVE":
+                if env_res and getattr(env_res, "status", "INACTIVE") != "ACTIVE":
                     return ActionGateDecision.WAIT_RESOURCE
 
         # 6. Idempotency Check

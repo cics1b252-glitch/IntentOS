@@ -43,6 +43,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         self._agents: Dict[str, AgentResource] = {}
         self._projects: Dict[str, ProjectResource] = {}
         self._governed_ids: Set[str] = set()
+        self._tombstones: Set[str] = set()  # H1.3: retired resource IDs
 
         if populate_defaults:
             self.populate_default_catalog()
@@ -51,6 +52,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_provider(self, provider: ProviderResource) -> ProviderResource:
         with self._lock:
+            if self._is_tombstoned(provider.provider_id):
+                return self._providers.get(provider.provider_id)  # H1.3: reject retired identity
             existing = self._providers.get(provider.provider_id)
             if existing is not None and self._is_governed_resource(provider.provider_id):
                 return existing
@@ -84,6 +87,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_account(self, account: AccountResource) -> AccountResource:
         with self._lock:
+            if self._is_tombstoned(account.account_id):
+                return self._accounts.get(account.account_id)  # H1.3: reject retired identity
             existing = self._accounts.get(account.account_id)
             if existing is not None and self._is_governed_resource(account.account_id):
                 return existing
@@ -124,6 +129,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_environment(self, environment: ExecutionEnvironmentResource) -> ExecutionEnvironmentResource:
         with self._lock:
+            if self._is_tombstoned(environment.environment_id):
+                return self._environments.get(environment.environment_id)  # H1.3: reject retired identity
             existing = self._environments.get(environment.environment_id)
             if existing is not None and self._is_governed_resource(environment.environment_id):
                 return existing
@@ -157,6 +164,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_capability(self, capability: CapabilityResource) -> CapabilityResource:
         with self._lock:
+            if self._is_tombstoned(capability.capability_id):
+                return self._capabilities.get(capability.capability_id)  # H1.3: reject retired identity
             existing = self._capabilities.get(capability.capability_id)
             if existing is not None and self._is_governed_resource(capability.capability_id):
                 return existing
@@ -196,6 +205,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_agent(self, agent: AgentResource) -> AgentResource:
         with self._lock:
+            if self._is_tombstoned(agent.agent_id):
+                return self._agents.get(agent.agent_id)  # H1.3: reject retired identity
             existing = self._agents.get(agent.agent_id)
             if existing is not None and self._is_governed_resource(agent.agent_id):
                 return existing
@@ -327,6 +338,17 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         if existing is not None:
             return bool(getattr(existing, "governed_registration_id", ""))
         return False
+
+    # --- H1.3 Retired Resource Tombstones ---
+
+    def _record_tombstone(self, resource_id: str) -> None:
+        """Record a retired resource ID to prevent re-registration."""
+        with self._lock:
+            self._tombstones.add(resource_id)
+
+    def _is_tombstoned(self, resource_id: str) -> bool:
+        """Check if a resource ID has been retired and tombstoned."""
+        return resource_id in self._tombstones
 
     def _is_compatibility_source(self, resource_origin: ResourceOrigin) -> bool:
         """Check if a resource origin represents a compatibility/bootstrap source."""

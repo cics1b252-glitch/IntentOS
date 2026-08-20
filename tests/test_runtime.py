@@ -42,6 +42,16 @@ from intent_kernel.runtime import (
 )
 
 
+class _ConstitutionAllow:
+    """Mock constitution that always allows — for testing non-constitution gate steps."""
+    async def evaluate(self, action_type, payload, context=None):
+        class _V:
+            allowed = True
+            decision = type("D", (), {"value": "ALLOW"})()
+            metadata = {}
+        return _V()
+
+
 class TestMissionRuntime(IsolatedAsyncioTestCase):
 
     def setUp(self):
@@ -55,6 +65,7 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
             executor=self.executor,
             checkpoint_repo=self.checkpoint_repo,
             rrm_service=self.rrm,
+            constitution=_ConstitutionAllow(),
         )
 
     def tearDown(self):
@@ -182,7 +193,7 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
 
         # Simulate process restart by reading latest checkpoint into a new runtime instance
         new_repo = InMemoryCheckpointRepository(persistence_engine=self.persistence)
-        new_runtime = MissionRuntime(executor=self.executor, checkpoint_repo=new_repo)
+        new_runtime = MissionRuntime(executor=self.executor, checkpoint_repo=new_repo, constitution=_ConstitutionAllow())
 
         # Re-register instance in new runtime
         new_runtime._instances[inst.runtime_id] = inst
@@ -274,7 +285,7 @@ class TestMissionRuntime(IsolatedAsyncioTestCase):
         await self.runtime.run_mission(inst.runtime_id)
 
         # Step 2: Simulate restart with fresh runtime using saved checkpoints
-        fresh_runtime = MissionRuntime(executor=self.executor, checkpoint_repo=self.checkpoint_repo)
+        fresh_runtime = MissionRuntime(executor=self.executor, checkpoint_repo=self.checkpoint_repo, constitution=_ConstitutionAllow())
         fresh_runtime._instances[inst.runtime_id] = inst
 
         # Resume from checkpoint

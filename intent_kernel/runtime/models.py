@@ -193,6 +193,7 @@ class MissionCheckpoint:
     failed_nodes: List[str] = field(default_factory=list)
     results_reference: Dict[str, Any] = field(default_factory=dict)
     verification_state: Dict[str, Any] = field(default_factory=dict)
+    completion_evidence: List[Dict[str, Any]] = field(default_factory=list)  # H1.4
     retry_state: Dict[str, Any] = field(default_factory=dict)
     correlation_id: str = ""
 

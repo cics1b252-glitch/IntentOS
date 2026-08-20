@@ -85,6 +85,7 @@ class InMemoryCheckpointRepository(MissionCheckpointRepositoryPort):
             failed_nodes=data.get("failed_nodes", []),
             results_reference=data.get("results_reference", {}),
             verification_state=data.get("verification_state", {}),
+            completion_evidence=data.get("completion_evidence", []),  # H1.4
             retry_state=data.get("retry_state", {}),
             correlation_id=data.get("correlation_id", ""),
         )
@@ -113,6 +114,7 @@ class InMemoryCheckpointRepository(MissionCheckpointRepositoryPort):
                         failed_nodes=data.get("failed_nodes", []),
                         results_reference=data.get("results_reference", {}),
                         verification_state=data.get("verification_state", {}),
+                        completion_evidence=data.get("completion_evidence", []),  # H1.4
                         retry_state=data.get("retry_state", {}),
                         correlation_id=data.get("correlation_id", ""),
                     ))

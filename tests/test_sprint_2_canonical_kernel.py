@@ -24,6 +24,16 @@ from intent_kernel.runtime import ActionContract, MissionRuntime, RuntimeNode
 from intent_os_desktop import create_app
 
 
+class _ConstitutionAllow:
+    """Mock constitution that always allows — for testing non-constitution gate steps."""
+    async def evaluate(self, action_type, payload, context=None):
+        class _V:
+            allowed = True
+            decision = type("D", (), {"value": "ALLOW"})()
+            metadata = {}
+        return _V()
+
+
 @pytest.mark.asyncio
 async def test_mission_engine_persists_basic_lifecycle():
     components = KernelBuilder().build()
@@ -44,7 +54,7 @@ async def test_mission_engine_persists_basic_lifecycle():
     resumed_by_new_engine = await MissionEngine(
         components.mission_store
     ).resume(created.id)
-    runtime = MissionRuntime(mission_engine=engine)
+    runtime = MissionRuntime(mission_engine=engine, constitution=_ConstitutionAllow())
     instance = runtime.create_instance(
         str(created.id),
         "verified-lifecycle",

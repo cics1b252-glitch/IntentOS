@@ -1423,32 +1423,7 @@ Estratégia completa registrada no histórico para execução."""
     async def _resume_confirmed(
         self, outcome: ConfirmationOutcome, meta: dict[str, Any]
     ) -> CanonicalTurnResult:
-        """Resume the SAME Mission with revalidation, never inheriting a new binding."""
-        conf = self.components.confirmation_service.get_confirmation(
-            outcome.confirmation_id
-        )
-        if conf is not None:
-            decision, snapshot = await self.components.confirmation_service.recheck_authorization(
-                conf
-            )
-            if decision is not None and decision is not ToolAuthorizationDecisionState.ALLOW:
-                self.components.confirmation_service.invalidate(
-                    outcome.confirmation_id,
-                    f"authorization_recheck:{decision.value}",
-                )
-                return CanonicalTurnResult.mission(
-                    "A autorização do vínculo confirmado foi revogada ou invalidada "
-                    "desde o planejamento; nenhuma execução ocorreu.",
-                    kind=CanonicalResultKind.AUTHORIZATION_REQUIRED,
-                    mission_id=outcome.mission_id,
-                    authorization_requirements=("user.authorization",),
-                    next_actions=("Reautorizar a ferramenta",),
-                    metadata={
-                        **meta,
-                        "authorization_gate": decision.value,
-                        "confirmation_revalidation": "fail_closed",
-                    },
-                )
+        """Resume the SAME Mission — authorization recheck already performed by submit()."""
         instance = await self.components.mission_runtime.run_mission(
             outcome.runtime_id
         )

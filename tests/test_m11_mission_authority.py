@@ -28,6 +28,16 @@ from intent_kernel.types import Domain, EpistemicStatus, IntentOutput, Mode
 from product_bridge import ProductBridge
 
 
+class _ConstitutionAllow:
+    """Mock constitution that always allows — for testing non-constitution gate steps."""
+    async def evaluate(self, action_type, payload, context=None):
+        class _V:
+            allowed = True
+            decision = type("D", (), {"value": "ALLOW"})()
+            metadata = {}
+        return _V()
+
+
 async def _running_mission(engine, objective: str = "controlled test"):
     mission = await engine.create(objective)
     return await engine.start(mission.id)
@@ -79,7 +89,7 @@ async def test_textual_done_cannot_complete_mission_without_gate_decision():
 async def test_executor_success_with_failed_verification_never_completes():
     engine = KernelBuilder().build().mission_engine
     mission = await _running_mission(engine)
-    runtime = MissionRuntime(mission_engine=engine)
+    runtime = MissionRuntime(mission_engine=engine, constitution=_ConstitutionAllow())
     instance = runtime.create_instance(
         str(mission.id), "verification-failure",
         [_echo_node("wrong", "actual", expected="expected")],
@@ -98,7 +108,7 @@ async def test_executor_success_with_failed_verification_never_completes():
 async def test_missing_verification_evidence_fails_closed():
     engine = KernelBuilder().build().mission_engine
     mission = await _running_mission(engine)
-    runtime = MissionRuntime(mission_engine=engine)
+    runtime = MissionRuntime(mission_engine=engine, constitution=_ConstitutionAllow())
     node = _echo_node("claimed", "done")
     node.state = RuntimeNodeState.SUCCEEDED
     node.attempt_count = 1
@@ -121,7 +131,7 @@ async def test_missing_verification_evidence_fails_closed():
 async def test_verified_runtime_completion_updates_canonical_lifecycle():
     engine = KernelBuilder().build().mission_engine
     mission = await _running_mission(engine)
-    runtime = MissionRuntime(mission_engine=engine)
+    runtime = MissionRuntime(mission_engine=engine, constitution=_ConstitutionAllow())
     instance = runtime.create_instance(
         str(mission.id), "verified-completion", [_echo_node("verified", "done")]
     )
@@ -143,7 +153,7 @@ async def test_verified_runtime_completion_updates_canonical_lifecycle():
 async def test_confirmation_wait_and_resume_remain_canonical_and_synthetic():
     engine = KernelBuilder().build().mission_engine
     mission = await _running_mission(engine)
-    runtime = MissionRuntime(mission_engine=engine)
+    runtime = MissionRuntime(mission_engine=engine, constitution=_ConstitutionAllow())
     node = RuntimeNode(
         node_id="synthetic-confirmed",
         capability="test.echo",
@@ -179,7 +189,7 @@ async def test_confirmation_wait_and_resume_remain_canonical_and_synthetic():
 async def test_partial_dag_cannot_complete_mission():
     engine = KernelBuilder().build().mission_engine
     mission = await _running_mission(engine)
-    runtime = MissionRuntime(mission_engine=engine)
+    runtime = MissionRuntime(mission_engine=engine, constitution=_ConstitutionAllow())
     blocked_by_missing_dependency = _echo_node(
         "partial", "never", dependencies=["missing-required-step"]
     )
@@ -200,7 +210,7 @@ async def test_partial_dag_cannot_complete_mission():
 async def test_one_failed_required_step_prevents_completion():
     engine = KernelBuilder().build().mission_engine
     mission = await _running_mission(engine)
-    runtime = MissionRuntime(mission_engine=engine)
+    runtime = MissionRuntime(mission_engine=engine, constitution=_ConstitutionAllow())
     nodes = [
         _echo_node("first", "ok"),
         _echo_node("required-failure", "observed", expected="required", dependencies=["first"]),

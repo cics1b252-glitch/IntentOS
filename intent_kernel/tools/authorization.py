@@ -50,18 +50,22 @@ class ToolAuthorizationGate:
         if candidate.authorization_status in (PermissionDecisionState.DENIED, PermissionDecisionState.REVOKED, PermissionDecisionState.BLOCKED_BY_POLICY):
             return ToolAuthorizationDecisionState.DENY
 
-        # 3. Constitution Check
-        if self._constitution and hasattr(self._constitution, "evaluate_action"):
+        # 3. Constitution Check — fail-closed: missing/malformed/unexpected = DENY
+        # H1.1-closure: no constitution → DENY (never skip constitutional enforcement)
+        if self._constitution is None:
+            return ToolAuthorizationDecisionState.DENY
+        if hasattr(self._constitution, "evaluate_action"):
             res = self._constitution.evaluate_action({"capability": candidate.capability, "tool_id": tool.tool_id})
-            if getattr(res, "verdict", "ALLOW") == "DENY":
+            verdict = getattr(res, "verdict", None)
+            if verdict != "ALLOW":
                 return ToolAuthorizationDecisionState.DENY
-        elif self._constitution and hasattr(self._constitution, "evaluate"):
+        elif hasattr(self._constitution, "evaluate"):
             res = await self._constitution.evaluate(
                 "tool.authorize",
                 {"capability": candidate.capability, "tool_id": tool.tool_id},
                 {"project_id": project_id},
             )
-            if not getattr(res, "allowed", True):
+            if not getattr(res, "allowed", False):
                 return ToolAuthorizationDecisionState.DENY
 
         # 4. Mission Constraints Check

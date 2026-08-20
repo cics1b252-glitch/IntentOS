@@ -35,6 +35,14 @@ from intent_kernel import (
 )
 
 
+class _ConstAllow:
+    """Mock constitution that always allows — for testing non-constitution gate steps."""
+    def evaluate_action(self, action: dict) -> object:
+        class Verdict:
+            verdict = "ALLOW"
+        return Verdict()
+
+
 class TestToolAccessLayer(unittest.TestCase):
 
     def setUp(self) -> None:
@@ -47,7 +55,7 @@ class TestToolAccessLayer(unittest.TestCase):
             permission_manager=self.perm_mgr,
             health_adapter=self.health_adapter,
         )
-        self.gate = ToolAuthorizationGate()
+        self.gate = ToolAuthorizationGate(constitution=_ConstAllow())
 
     def test_A_register_tool(self) -> None:
         tool = ToolResource(

@@ -1,15 +1,15 @@
-"""Canonical typed conversation policy for finance field-collection.
+"""Canonical typed conversation policies for field-collection.
 
-Movement 23.2 — migrates the authority for finance multi-turn field-filling
-from ProductBridge's inline ad-hoc logic into the canonical conversation layer.
+Movement 23.2 — finance field-collection authority.
+Movement 23.4 — application field-collection authority.
 
-This module owns:
-- The ordered field schema for finance conversations (amount → recurrence → goal → risk_profile → time_horizon → liquidity)
+Each policy owns:
+- The ordered field schema for its domain
 - Next-field selection given already-collected fields
-- Domain detection for finance intents
+- Domain detection for its intents
 - Completion detection (all required fields present)
 
-It does NOT own:
+Neither policy owns:
 - Field-value matching (CDM.match_pending_response already handles that)
 - Session persistence (ProductBridge.persist_turn handles that)
 - Response rendering or text authoring
@@ -192,6 +192,163 @@ def classify_finance_turn(
     field_name, question = nf
     missing = [f for f in _ALL_FIELDS if f not in known_context]
     return FinanceFieldFillingResult(
+        next_field=field_name,
+        pending_question=question,
+        is_waiting=True,
+        missing_fields=tuple(missing),
+        known_context=dict(known_context),
+        is_complete=False,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  APPLICATION FIELD-COLLECTION POLICY  (Movement 23.4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ─── Application field schema ────────────────────────────────────────────────
+
+_APPLICATION_FIELD_QUESTIONS: dict[str, str] = {
+    "platform": (
+        "Qual é a plataforma principal do aplicativo "
+        "(ex: Android, iOS, Web)?"
+    ),
+    "purpose": (
+        "Qual é a finalidade principal do aplicativo "
+        "(ex: controle de estoque, vendas)?"
+    ),
+    "connectivity": (
+        "O aplicativo precisa funcionar offline ou apenas online?"
+    ),
+    "pricing": (
+        "Qual será o modelo de distribuição "
+        "(ex: versão gratuita, paga)?"
+    ),
+}
+
+# Flat ordered field list. Application has no conditional paths.
+_APPLICATION_FIELDS: tuple[str, ...] = (
+    "platform",
+    "purpose",
+    "connectivity",
+    "pricing",
+)
+
+
+# ─── Application domain detection ───────────────────────────────────────────
+
+_APPLICATION_FIELD_NAMES: frozenset[str] = frozenset({
+    "platform", "purpose", "connectivity", "pricing",
+})
+
+_SPREADSHEET_CUES: tuple[str, ...] = ("planilha", "spreadsheet", "excel")
+
+
+def is_spreadsheet_domain(message_lower: str) -> bool:
+    """Return True if the message is a spreadsheet request (not an app)."""
+    return any(term in message_lower for term in _SPREADSHEET_CUES)
+
+
+def detect_application_domain(
+    *,
+    message_lower: str,
+    known_context: dict[str, Any] | None = None,
+    pending_dialogue: dict[str, Any] | None = None,
+) -> bool:
+    """Return True if the current turn belongs to the application domain.
+
+    This replaces the inline ``is_app`` check in ProductBridge.
+    Spreadsheet requests are explicitly excluded.
+    """
+    if is_spreadsheet_domain(message_lower):
+        return False
+    kc = known_context or {}
+    has_cue = (
+        "aplicativo" in message_lower
+        or bool(re.search(r"\bapp\b", message_lower))
+    )
+    has_field = "app_type" in kc or "platform" in kc
+    pending_target = ""
+    if isinstance(pending_dialogue, dict):
+        pending_target = str(pending_dialogue.get("target_field", ""))
+    has_pending = pending_target in _APPLICATION_FIELD_NAMES
+    return has_cue or has_field or has_pending
+
+
+# ─── Application next-field selection ────────────────────────────────────────
+
+def _format_app_question(field_name: str, _known_context: dict[str, Any]) -> str:
+    """Return the canonical question for an application field."""
+    return _APPLICATION_FIELD_QUESTIONS.get(field_name, "")
+
+
+def next_application_field(
+    known_context: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Return ``(field_name, question_text)`` for the next missing field.
+
+    Returns ``None`` when all required fields are present (conversation complete).
+    """
+    for fname in _APPLICATION_FIELDS:
+        if fname not in known_context:
+            return (fname, _format_app_question(fname, known_context))
+    return None
+
+
+def is_application_complete(known_context: dict[str, Any]) -> bool:
+    """Return True when all required application fields are collected."""
+    return next_application_field(known_context) is None
+
+
+# ─── Application result type ────────────────────────────────────────────────
+
+@dataclass(frozen=True, slots=True)
+class ApplicationFieldFillingResult:
+    """Canonical result of one application field-collection turn.
+
+    ProductBridge reads this and translates it into the legacy response shape.
+    """
+
+    next_field: str | None
+    pending_question: str | None
+    is_waiting: bool
+    missing_fields: tuple[str, ...]
+    known_context: dict[str, Any]
+    is_complete: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "next_field": self.next_field,
+            "pending_question": self.pending_question,
+            "is_waiting": self.is_waiting,
+            "missing_fields": list(self.missing_fields),
+            "known_context": dict(self.known_context),
+            "is_complete": self.is_complete,
+        }
+
+
+def classify_application_turn(
+    known_context: dict[str, Any],
+) -> ApplicationFieldFillingResult:
+    """Classify the current application field-collection state.
+
+    This is the canonical decision point that replaces the inline
+    ``if is_app:`` block in ProductBridge.
+    """
+    nf = next_application_field(known_context)
+    if nf is None:
+        return ApplicationFieldFillingResult(
+            next_field=None,
+            pending_question=None,
+            is_waiting=False,
+            missing_fields=(),
+            known_context=dict(known_context),
+            is_complete=True,
+        )
+
+    field_name, question = nf
+    missing = [f for f in _APPLICATION_FIELDS if f not in known_context]
+    return ApplicationFieldFillingResult(
         next_field=field_name,
         pending_question=question,
         is_waiting=True,

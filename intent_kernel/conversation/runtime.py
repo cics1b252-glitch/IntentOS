@@ -22,10 +22,16 @@ from intent_kernel.cdm import (
 )
 from intent_kernel.cognition import CognitiveExecutionDecision
 from intent_kernel.conversation.policy import (
+    ApplicationFieldFillingResult,
     FinanceFieldFillingResult,
+    classify_application_turn,
     classify_finance_turn,
+    detect_application_domain,
     detect_finance_domain,
+    is_application_complete,
     is_finance_complete,
+    is_spreadsheet_domain,
+    next_application_field,
     next_finance_field,
 )
 from intent_kernel.iue import IntentUnderstandingEngine, StructuredIntent
@@ -275,6 +281,45 @@ class CognitiveConversationService:
     def finance_is_complete(known_context: dict[str, Any]) -> bool:
         """Return True when all required finance fields are collected."""
         return is_finance_complete(known_context)
+
+    # ── Application field-collection delegation (Movement 23.4) ──────────
+
+    @staticmethod
+    def resolve_application_pending(
+        known_context: dict[str, Any],
+    ) -> ApplicationFieldFillingResult:
+        """Delegate application field-collection to the canonical typed policy."""
+        return classify_application_turn(known_context)
+
+    @staticmethod
+    def application_domain_detected(
+        message_lower: str,
+        known_context: dict[str, Any] | None = None,
+        pending_dialogue: dict[str, Any] | None = None,
+    ) -> bool:
+        """Canonical application domain detection replacing inline ``is_app``."""
+        return detect_application_domain(
+            message_lower=message_lower,
+            known_context=known_context,
+            pending_dialogue=pending_dialogue,
+        )
+
+    @staticmethod
+    def is_spreadsheet(message_lower: str) -> bool:
+        """Canonical spreadsheet detection replacing inline ``is_spreadsheet``."""
+        return is_spreadsheet_domain(message_lower)
+
+    @staticmethod
+    def application_next_field(
+        known_context: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        """Return the next missing application field and its question, or None."""
+        return next_application_field(known_context)
+
+    @staticmethod
+    def application_is_complete(known_context: dict[str, Any]) -> bool:
+        """Return True when all required application fields are collected."""
+        return is_application_complete(known_context)
 
     @staticmethod
     def _relation(

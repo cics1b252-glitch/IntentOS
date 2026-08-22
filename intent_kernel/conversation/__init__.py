@@ -18,10 +18,16 @@ from intent_kernel.conversation.runtime import (
     ConversationTurnRelation,
 )
 from intent_kernel.conversation.policy import (
+    ApplicationFieldFillingResult,
     FinanceFieldFillingResult,
+    classify_application_turn,
     classify_finance_turn,
+    detect_application_domain,
     detect_finance_domain,
+    is_application_complete,
     is_finance_complete,
+    is_spreadsheet_domain,
+    next_application_field,
     next_finance_field,
 )
 

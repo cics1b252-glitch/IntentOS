@@ -607,7 +607,7 @@ class ProductBridge:
 
         # Initial app intent may establish several fields; a continuation has
         # already been constrained to one typed field above.
-        is_spreadsheet = any(term in lower for term in ("planilha", "spreadsheet", "excel"))
+        is_spreadsheet = self.conversation_service.is_spreadsheet(lower)
         if pending_dialogue is None:
             if ("aplicativo" in lower or re.search(r"\bapp\b", lower)) and not is_spreadsheet:
                 known_kc["app_type"] = "aplicativo"
@@ -633,11 +633,11 @@ class ProductBridge:
             known_context=known_kc,
             pending_dialogue=pending_dialogue,
         )
-        is_app = (
-            not is_spreadsheet
-            and ("aplicativo" in lower or bool(re.search(r"\bapp\b", lower))
-                 or "app_type" in known_kc or "platform" in known_kc)
-        )
+        is_app = self.conversation_service.application_domain_detected(
+            message_lower=lower,
+            known_context=known_kc,
+            pending_dialogue=pending_dialogue,
+        ) and not is_spreadsheet
 
         if is_spreadsheet:
             return self._complete_local_request(
@@ -807,21 +807,15 @@ Estratégia completa registrada no histórico para execução."""
                 )
 
         if is_app:
-            missing = []
-            if "platform" not in known_kc: missing.append("platform")
-            if "purpose" not in known_kc: missing.append("purpose")
-            if "connectivity" not in known_kc: missing.append("connectivity")
-            if "pricing" not in known_kc: missing.append("pricing")
+            # Canonical delegation: field-collection authority moved to
+            # CognitiveConversationService.resolve_application_pending (M23.4).
+            app_result = self.conversation_service.resolve_application_pending(known_kc)
+            next_field = app_result.next_field
+            pending_q = app_result.pending_question
+            missing = list(app_result.missing_fields)
+            is_waiting = app_result.is_waiting
 
-            if missing:
-                next_field = missing[0]
-                questions = {
-                    "platform": "Qual é a plataforma principal do aplicativo (ex: Android, iOS, Web)?",
-                    "purpose": "Qual é a finalidade principal do aplicativo (ex: controle de estoque, vendas)?",
-                    "connectivity": "O aplicativo precisa funcionar offline ou apenas online?",
-                    "pricing": "Qual será o modelo de distribuição (ex: versão gratuita, paga)?",
-                }
-                pending_q = questions[next_field]
+            if is_waiting:
                 now = utc_iso()
                 full_history = [*history,
                     {"role": "user", "content": message, "timestamp": now},

@@ -17,6 +17,13 @@ from intent_kernel.conversation.runtime import (
     ConversationAuthorityDecision,
     ConversationTurnRelation,
 )
+from intent_kernel.conversation.policy import (
+    FinanceFieldFillingResult,
+    classify_finance_turn,
+    detect_finance_domain,
+    is_finance_complete,
+    next_finance_field,
+)
 
 
 @dataclass

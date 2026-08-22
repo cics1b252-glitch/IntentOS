@@ -21,6 +21,13 @@ from intent_kernel.cdm import (
     PendingDialogueMatchStatus,
 )
 from intent_kernel.cognition import CognitiveExecutionDecision
+from intent_kernel.conversation.policy import (
+    FinanceFieldFillingResult,
+    classify_finance_turn,
+    detect_finance_domain,
+    is_finance_complete,
+    next_finance_field,
+)
 from intent_kernel.iue import IntentUnderstandingEngine, StructuredIntent
 
 
@@ -228,6 +235,46 @@ class CognitiveConversationService:
             "pending_dialogue_preserved": True,
         }
         return proposed
+
+    # ── Finance field-collection delegation (Movement 23.2) ──────────────
+
+    @staticmethod
+    def resolve_finance_pending(
+        known_context: dict[str, Any],
+    ) -> FinanceFieldFillingResult:
+        """Delegate finance field-collection to the canonical typed policy.
+
+        This replaces the inline ``is_fin and lower != "investir"`` block
+        in ProductBridge.  The CDM's ``match_pending_response`` still handles
+        typed value extraction; this method only determines which field to
+        ask next and whether the conversation is complete.
+        """
+        return classify_finance_turn(known_context)
+
+    @staticmethod
+    def finance_domain_detected(
+        message_lower: str,
+        known_context: dict[str, Any] | None = None,
+        pending_dialogue: dict[str, Any] | None = None,
+    ) -> bool:
+        """Canonical finance domain detection replacing inline ``is_fin``."""
+        return detect_finance_domain(
+            message_lower=message_lower,
+            known_context=known_context,
+            pending_dialogue=pending_dialogue,
+        )
+
+    @staticmethod
+    def finance_next_field(
+        known_context: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        """Return the next missing finance field and its question, or None."""
+        return next_finance_field(known_context)
+
+    @staticmethod
+    def finance_is_complete(known_context: dict[str, Any]) -> bool:
+        """Return True when all required finance fields are collected."""
+        return is_finance_complete(known_context)
 
     @staticmethod
     def _relation(

@@ -627,14 +627,11 @@ class ProductBridge:
             if "gratuita" in lower or "grátis" in lower or "gratuito" in lower:
                 known_kc["pricing"] = "gratuita"
 
-        # Determine domain
-        is_fin = (
-            "invest" in lower or "amount" in known_kc or "recurrence" in known_kc
-            or isinstance(pending_dialogue, dict)
-            and pending_dialogue.get("target_field") in {
-                "amount", "recurrence", "investment_frequency", "goal",
-                "risk_profile", "time_horizon", "liquidity",
-            }
+        # Determine domain — canonical delegation (Movement 23.2)
+        is_fin = self.conversation_service.finance_domain_detected(
+            message_lower=lower,
+            known_context=known_kc,
+            pending_dialogue=pending_dialogue,
         )
         is_app = (
             not is_spreadsheet
@@ -659,43 +656,14 @@ class ProductBridge:
             )
 
         if is_fin and lower != "investir":
+            # Canonical delegation: field-collection authority moved to
+            # CognitiveConversationService.resolve_finance_pending (M23.2).
+            fin_result = self.conversation_service.resolve_finance_pending(known_kc)
             amount_str = known_kc.get("amount_str", "")
-            if "amount" not in known_kc:
-                pending_q = "Para começarmos a análise de investimentos, qual é o valor total disponível?"
-                next_field = "amount"
-                missing = ["amount", "recurrence", "goal", "risk_profile", "time_horizon", "liquidity"]
-                is_waiting = True
-            elif "recurrence" not in known_kc:
-                pending_q = f"Entendi que o valor é **{amount_str}**. Esse valor é para um investimento único ou para um aporte mensal?"
-                next_field = "recurrence"
-                missing = ["recurrence", "goal", "risk_profile", "time_horizon", "liquidity"]
-                is_waiting = True
-            elif known_kc.get("recurrence") == "único":
-                is_waiting = False
-                missing = []
-            elif "goal" not in known_kc:
-                pending_q = f"Qual é o seu objetivo principal para este investimento de **{amount_str}** (ex: aposentadoria, reserva de emergência, compra de imóvel)?"
-                next_field = "goal"
-                missing = ["goal", "risk_profile", "time_horizon", "liquidity"]
-                is_waiting = True
-            elif "risk_profile" not in known_kc:
-                pending_q = f"Qual é o seu perfil de risco para este investimento (conservador, moderado ou arrojado)?"
-                next_field = "risk_profile"
-                missing = ["risk_profile", "time_horizon", "liquidity"]
-                is_waiting = True
-            elif "time_horizon" not in known_kc:
-                pending_q = f"Por quanto tempo você pretende manter este investimento aplicado?"
-                next_field = "time_horizon"
-                missing = ["time_horizon", "liquidity"]
-                is_waiting = True
-            elif "liquidity" not in known_kc:
-                pending_q = f"Você precisa de liquidez imediata para resgates ou pode manter aplicado pelo prazo?"
-                next_field = "liquidity"
-                missing = ["liquidity"]
-                is_waiting = True
-            else:
-                is_waiting = False
-                missing = []
+            next_field = fin_result.next_field
+            pending_q = fin_result.pending_question
+            missing = list(fin_result.missing_fields)
+            is_waiting = fin_result.is_waiting
 
             if is_waiting:
                 now = utc_iso()

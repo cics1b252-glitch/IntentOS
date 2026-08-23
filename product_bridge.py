@@ -719,9 +719,10 @@ class ProductBridge:
                         "conversation_state": conv_state,
                         "compatibility_dialogue_id": mission_id,
                         "compatibility_lifecycle": {
-                            "classification": "COMPATIBILITY_ONLY",
+                            "classification": "CANONICAL_CONVERSATION_LAYER",
                             "canonical_mission": False,
-                            "completion_authority": None,
+                            "completion_authority": "CognitiveConversationService",
+                            "canonical_policy": "FinanceConversationPolicy",
                         },
                         "inspector": conv_state,
                         "domain": "finance",
@@ -737,7 +738,7 @@ class ProductBridge:
                     component="ProductBridgeFieldFilling",
                     reason="legacy_typed_field_filling_or_local_product_flow",
                     entry_point="ProductBridge.finance_field_filling",
-                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                    canonical_alternative_missing=None,
                 )
             else:
                 # All required finance fields present! Render complete summary.
@@ -788,9 +789,10 @@ Estratégia completa registrada no histórico para execução."""
                     metadata={
                         "compatibility_dialogue_id": mission_id,
                         "compatibility_lifecycle": {
-                            "classification": "COMPATIBILITY_ONLY",
+                            "classification": "CANONICAL_CONVERSATION_LAYER",
                             "canonical_mission": False,
-                            "completion_authority": None,
+                            "completion_authority": "CognitiveConversationService",
+                            "canonical_policy": "FinanceConversationPolicy",
                         },
                         "domain": "finance",
                         "conversation_state": conv_state,
@@ -803,7 +805,7 @@ Estratégia completa registrada no histórico para execução."""
                     component="ProductBridgeFieldFilling",
                     reason="legacy_typed_field_filling_or_local_product_flow",
                     entry_point="ProductBridge.finance_field_filling",
-                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                    canonical_alternative_missing=None,
                 )
 
         if is_app:
@@ -860,9 +862,10 @@ Estratégia completa registrada no histórico para execução."""
                         "conversation_state": conv_state,
                         "compatibility_dialogue_id": mission_id,
                         "compatibility_lifecycle": {
-                            "classification": "COMPATIBILITY_ONLY",
+                            "classification": "CANONICAL_CONVERSATION_LAYER",
                             "canonical_mission": False,
-                            "completion_authority": None,
+                            "completion_authority": "CognitiveConversationService",
+                            "canonical_policy": "ApplicationConversationPolicy",
                         },
                         "inspector": conv_state,
                         "domain": "coding",
@@ -874,7 +877,7 @@ Estratégia completa registrada no histórico para execução."""
                     component="ProductBridgeFieldFilling",
                     reason="legacy_typed_field_filling_or_local_product_flow",
                     entry_point="ProductBridge.application_field_filling",
-                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                    canonical_alternative_missing=None,
                 )
             else:
                 # All app fields present! Render complete app spec.
@@ -920,9 +923,10 @@ Estratégia completa registrada no histórico para execução."""
                     metadata={
                         "compatibility_dialogue_id": mission_id,
                         "compatibility_lifecycle": {
-                            "classification": "COMPATIBILITY_ONLY",
+                            "classification": "CANONICAL_CONVERSATION_LAYER",
                             "canonical_mission": False,
-                            "completion_authority": None,
+                            "completion_authority": "CognitiveConversationService",
+                            "canonical_policy": "ApplicationConversationPolicy",
                         },
                         "domain": "coding",
                         "conversation_state": conv_state,
@@ -935,7 +939,7 @@ Estratégia completa registrada no histórico para execução."""
                     component="ProductBridgeFieldFilling",
                     reason="legacy_typed_field_filling_or_local_product_flow",
                     entry_point="ProductBridge.application_field_filling",
-                    canonical_alternative_missing="canonical_typed_conversation_policy",
+                    canonical_alternative_missing=None,
                 )
 
         # 5. Default Fallback through Kernel Engine

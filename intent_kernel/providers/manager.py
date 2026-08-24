@@ -108,10 +108,12 @@ class ProviderManager:
             fallback = getattr(selection, "fallback_provider_id", None)
             if fallback is None and isinstance(selection, dict):
                 fallback = selection.get("fallback_provider_id")
+            primary = self._providers.get(str(provider_id))
             return ManagedProvider(
                 self,
                 provider_id=str(provider_id),
                 fallback_provider_id=str(fallback) if fallback else None,
+                bound_provider=primary,
             )
         # Direct Kernel callers retain the characterized compatibility default.
         self._last_compatibility_trace = compatibility_trace(
@@ -169,11 +171,13 @@ class ManagedProvider:
         provider_id: str | None = None,
         fallback_provider_id: str | None = None,
         allow_manager_fallback: bool = True,
+        bound_provider: Provider | None = None,
     ):
         self._manager = manager
         self._provider_id = provider_id
         self._fallback_provider_id = fallback_provider_id
         self._allow_manager_fallback = allow_manager_fallback
+        self._bound_provider = bound_provider
 
     @property
     def name(self) -> str:
@@ -184,7 +188,11 @@ class ManagedProvider:
         return self._manager.get(self._provider_id).capabilities
 
     async def execute(self, request: ProviderRequest) -> ProviderResponse:
-        primary = self._manager.get(self._provider_id)
+        primary = (
+            self._bound_provider
+            if self._bound_provider is not None
+            else self._manager.get(self._provider_id)
+        )
         self._manager._last_attempted = primary.name
         self._manager.observe("provider_request_started", provider=primary.name,
                               model=getattr(primary, "model", "unknown"))

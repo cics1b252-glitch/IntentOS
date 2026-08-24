@@ -1022,5 +1022,289 @@ class TestContractEvidenceBinding(IsolatedAsyncioTestCase):
         self.assertEqual(resumed.nodes["cb8"].verification_result, VerificationStatus.INCONCLUSIVE)
 
 
+# ===========================================================================
+# 10. CONTRACT VALIDITY (M25-03 through M25-08)
+# ===========================================================================
+
+class TestContractValidity(IsolatedAsyncioTestCase):
+    """M25.4: Invalid structural contracts must produce VERIFIED_FAILURE.
+
+    Contract validation must succeed BEFORE result validation may produce
+    VERIFIED_SUCCESS. No malformed contract may become VERIFIED_SUCCESS.
+    """
+
+    def _make_verifier(self):
+        return DeterministicStructuralVerifier()
+
+    def _make_action(self, schema):
+        return ActionContract(
+            capability="test.contract_validity",
+            verification_type="STRUCTURAL",
+            verification_schema=schema,
+        )
+
+    # --- 1-4: NUMERIC CONTRACT VALIDITY (NaN bounds) ---
+
+    async def test_minimum_nan_rejected(self):
+        """1. minimum=NaN → VERIFIED_FAILURE (contract invalid)"""
+        v = self._make_verifier()
+        schema = {"type": "number", "minimum": float("nan")}
+        status = await v.verify(self._make_action(schema), 5.0)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_maximum_nan_rejected(self):
+        """2. maximum=NaN → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number", "maximum": float("nan")}
+        status = await v.verify(self._make_action(schema), 5.0)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_minimum_inf_rejected(self):
+        """3. minimum=Infinity → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number", "minimum": float("inf")}
+        status = await v.verify(self._make_action(schema), 5.0)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_maximum_inf_rejected(self):
+        """4. maximum=Infinity → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number", "maximum": float("inf")}
+        status = await v.verify(self._make_action(schema), 5.0)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_minimum_neg_inf_rejected(self):
+        """5. minimum=-Infinity → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number", "minimum": float("-inf")}
+        status = await v.verify(self._make_action(schema), 5.0)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_maximum_neg_inf_rejected(self):
+        """6. maximum=-Infinity → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number", "maximum": float("-inf")}
+        status = await v.verify(self._make_action(schema), 5.0)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    # --- 7-10: MIN/MAX COHERENCE ---
+
+    async def test_minimum_true_rejected(self):
+        """7. minimum=True (bool subclass of int) → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number", "minimum": True}
+        status = await v.verify(self._make_action(schema), 5.0)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_maximum_false_rejected(self):
+        """8. maximum=False (bool subclass of int) → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number", "maximum": False}
+        status = await v.verify(self._make_action(schema), 5.0)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_minimum_greater_than_maximum_rejected(self):
+        """9. minimum=10, maximum=5 → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number", "minimum": 10, "maximum": 5}
+        status = await v.verify(self._make_action(schema), 7)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_minimum_equals_maximum_accepted(self):
+        """10. minimum=5, maximum=5 → valid contract, result passes"""
+        v = self._make_verifier()
+        schema = {"type": "number", "minimum": 5, "maximum": 5}
+        status = await v.verify(self._make_action(schema), 5)
+        self.assertEqual(status, VerificationStatus.VERIFIED_SUCCESS)
+
+    # --- 11-13: NUMERIC RESULT VALIDITY ---
+
+    async def test_number_nan_result_rejected(self):
+        """11. type=number + NaN result → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number"}
+        status = await v.verify(self._make_action(schema), float("nan"))
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_number_inf_result_rejected(self):
+        """12. type=number + Infinity result → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number"}
+        status = await v.verify(self._make_action(schema), float("inf"))
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_number_neg_inf_result_rejected(self):
+        """13. type=number + -Infinity result → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "number"}
+        status = await v.verify(self._make_action(schema), float("-inf"))
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    # --- 14-17: REQUIRED FIELD NAMES ---
+
+    async def test_required_integer_rejected(self):
+        """14. required=[1] → VERIFIED_FAILURE (contract invalid)"""
+        v = self._make_verifier()
+        schema = {"type": "object", "required": [1], "properties": {"1": {"type": "string"}}}
+        status = await v.verify(self._make_action(schema), {"1": "x"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_required_bool_rejected(self):
+        """15. required=[True] → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "object", "required": [True], "properties": {"True": {"type": "string"}}}
+        status = await v.verify(self._make_action(schema), {"True": "x"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_required_none_rejected(self):
+        """16. required=[None] → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "object", "required": [None], "properties": {"None": {"type": "string"}}}
+        status = await v.verify(self._make_action(schema), {"None": "x"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_required_mixed_types_rejected(self):
+        """17. required=["x", 1] → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "object", "required": ["x", 1], "properties": {"x": {"type": "string"}}}
+        status = await v.verify(self._make_action(schema), {"x": "v"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    # --- 18-20: PROPERTIES KEYS ---
+
+    async def test_properties_integer_key_rejected(self):
+        """18. properties with integer key → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "object", "properties": {1: {"type": "string"}}}
+        status = await v.verify(self._make_action(schema), {"1": "x"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_properties_bool_key_rejected(self):
+        """19. properties with bool key → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "object", "properties": {True: {"type": "string"}}}
+        status = await v.verify(self._make_action(schema), {"True": "x"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_properties_none_key_rejected(self):
+        """20. properties with None key → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "object", "properties": {None: {"type": "string"}}}
+        status = await v.verify(self._make_action(schema), {"None": "x"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    # --- 21-22: REQUIRED / PROPERTIES CONSISTENCY ---
+
+    async def test_required_without_properties_entry_rejected(self):
+        """21. required=["x"] + properties={} → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {"type": "object", "required": ["x"], "properties": {}}
+        status = await v.verify(self._make_action(schema), {"x": "v"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_required_with_properties_entry_accepted(self):
+        """22. required=["x"] + properties={"x": ...} → valid"""
+        v = self._make_verifier()
+        schema = {"type": "object", "required": ["x"], "properties": {"x": {"type": "string"}}}
+        status = await v.verify(self._make_action(schema), {"x": "hello"})
+        self.assertEqual(status, VerificationStatus.VERIFIED_SUCCESS)
+
+    # --- 23-26: RECURSIVE VALIDATION ---
+
+    async def test_nested_minimum_greater_than_maximum_rejected(self):
+        """23. nested minimum > maximum → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "minimum": 10, "maximum": 5},
+            },
+        }
+        status = await v.verify(self._make_action(schema), {"count": 7})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_nested_nan_bound_rejected(self):
+        """24. nested NaN bound → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {
+            "type": "object",
+            "properties": {
+                "score": {"type": "number", "minimum": float("nan")},
+            },
+        }
+        status = await v.verify(self._make_action(schema), {"score": 5.0})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_nested_non_string_required_rejected(self):
+        """25. nested non-string required → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {
+            "type": "object",
+            "properties": {
+                "inner": {"type": "object", "required": [42], "properties": {"42": {"type": "string"}}},
+            },
+        }
+        status = await v.verify(self._make_action(schema), {"inner": {"42": "x"}})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_nested_non_string_property_key_rejected(self):
+        """26. nested non-string property key → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        schema = {
+            "type": "object",
+            "properties": {
+                "inner": {"type": "object", "properties": {1: {"type": "string"}}},
+            },
+        }
+        status = await v.verify(self._make_action(schema), {"inner": {"1": "x"}})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    # --- 27-31: PRESERVATION ---
+
+    async def test_existing_valid_structural_object_passes(self):
+        """27. existing valid structural object still passes"""
+        v = self._make_verifier()
+        schema = {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}}
+        status = await v.verify(self._make_action(schema), {"id": 42})
+        self.assertEqual(status, VerificationStatus.VERIFIED_SUCCESS)
+
+    async def test_existing_valid_arrays_pass(self):
+        """28. existing valid arrays still pass"""
+        v = self._make_verifier()
+        schema = {"type": "array", "items": {"type": "integer"}}
+        status = await v.verify(self._make_action(schema), [1, 2, 3])
+        self.assertEqual(status, VerificationStatus.VERIFIED_SUCCESS)
+
+    async def test_const_type_safety_preserved(self):
+        """29. const type safety: True≠1, False≠0 preserved"""
+        v = self._make_verifier()
+        # const=1, result=True → failure
+        s1 = await v.verify(self._make_action({"const": 1}), True)
+        self.assertEqual(s1, VerificationStatus.VERIFIED_FAILURE)
+        # const=True, result=1 → failure
+        s2 = await v.verify(self._make_action({"const": True}), 1)
+        self.assertEqual(s2, VerificationStatus.VERIFIED_FAILURE)
+        # const=True, result=True → success
+        s3 = await v.verify(self._make_action({"const": True}), True)
+        self.assertEqual(s3, VerificationStatus.VERIFIED_SUCCESS)
+
+    async def test_contract_evidence_binding_preserved(self):
+        """30. contract hash binding unchanged"""
+        schema_a = {"type": "object", "required": ["id"]}
+        schema_b = {"type": "object", "required": ["name"]}
+        self.assertNotEqual(
+            DeterministicStructuralVerifier.contract_hash(schema_a),
+            DeterministicStructuralVerifier.contract_hash(schema_b),
+        )
+
+    async def test_legacy_exact_preserved(self):
+        """31. legacy EXACT mode unchanged"""
+        gate = VerificationGate()
+        node = _make_node("cv31", expected_output="echo")
+        status, evidence = await gate.evaluate_node(node, node.action_contract, "echo")
+        self.assertEqual(status, VerificationStatus.VERIFIED_SUCCESS)
+        self.assertTrue(evidence.verified)
+
+
 if __name__ == "__main__":
     unittest.main()

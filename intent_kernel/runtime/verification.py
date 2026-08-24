@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -146,27 +147,86 @@ class DeterministicStructuralVerifier(ActionVerificationPort):
     def _validate_schema_keywords(
         self, schema: Dict[str, Any], errors: List[str], path: str,
     ) -> None:
+        # M25-03/04/05/06/07/08: Comprehensive contract validity checks
         for key in schema:
             if key not in self._SUPPORTED_KEYWORDS:
                 errors.append(f"{path}: unsupported contract keyword '{key}'")
         schema_type = schema.get("type")
         if schema_type is not None and schema_type not in self._SUPPORTED_TYPES:
             errors.append(f"{path}: unsupported type '{schema_type}'")
-        if "required" in schema and not isinstance(schema["required"], list):
-            errors.append(f"{path}: 'required' must be a list")
-        if "properties" in schema and not isinstance(schema["properties"], dict):
-            errors.append(f"{path}: 'properties' must be an object")
+
+        # M25-04: required must be list[str]
+        if "required" in schema:
+            req = schema["required"]
+            if not isinstance(req, list):
+                errors.append(f"{path}: 'required' must be a list")
+            else:
+                for entry in req:
+                    if not isinstance(entry, str):
+                        errors.append(
+                            f"{path}: 'required' entries must be strings, "
+                            f"got {type(entry).__name__}: {entry!r}"
+                        )
+
+        # M25-05: properties must be dict with STRING keys
+        if "properties" in schema:
+            props = schema["properties"]
+            if not isinstance(props, dict):
+                errors.append(f"{path}: 'properties' must be an object")
+            else:
+                for k in props:
+                    if not isinstance(k, str):
+                        errors.append(
+                            f"{path}: 'properties' keys must be strings, "
+                            f"got {type(k).__name__}: {k!r}"
+                        )
+
         if "items" in schema and not isinstance(schema["items"], dict):
             errors.append(f"{path}: 'items' must be an object")
+
+        # M25-07/M25-08: numeric bounds must be finite real numbers (not bool, NaN, inf)
         for keyword in ("minimum", "maximum"):
-            if keyword in schema and not isinstance(schema[keyword], (int, float)):
-                errors.append(f"{path}: '{keyword}' must be a number")
+            if keyword in schema:
+                val = schema[keyword]
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    errors.append(f"{path}: '{keyword}' must be a finite number")
+                elif not math.isfinite(val):
+                    errors.append(f"{path}: '{keyword}' must be finite, got {val}")
+
+        # M25-03: minimum <= maximum coherence
+        if "minimum" in schema and "maximum" in schema:
+            min_val = schema["minimum"]
+            max_val = schema["maximum"]
+            if (
+                isinstance(min_val, (int, float)) and not isinstance(min_val, bool)
+                and isinstance(max_val, (int, float)) and not isinstance(max_val, bool)
+                and math.isfinite(min_val) and math.isfinite(max_val)
+                and min_val > max_val
+            ):
+                errors.append(
+                    f"{path}: minimum ({min_val}) must be <= maximum ({max_val})"
+                )
+
+        # M25-06: required fields must have corresponding properties
+        if "required" in schema and "properties" in schema:
+            req = schema["required"]
+            props = schema["properties"]
+            if isinstance(req, list) and isinstance(props, dict):
+                for entry in req:
+                    if isinstance(entry, str) and entry not in props:
+                        errors.append(
+                            f"{path}: required field '{entry}' has no corresponding property contract"
+                        )
+
         if "const" in schema:
             pass  # const can be any JSON value
+
+        # Recurse into nested property schemas
         props = schema.get("properties", {})
-        for pname, pschema in props.items():
-            if isinstance(pschema, dict):
-                self._validate_schema_keywords(pschema, errors, f"{path}.properties.{pname}")
+        if isinstance(props, dict):
+            for pname, pschema in props.items():
+                if isinstance(pschema, dict):
+                    self._validate_schema_keywords(pschema, errors, f"{path}.properties.{pname}")
 
     # --- JSON input resolution ---
 
@@ -203,6 +263,7 @@ class DeterministicStructuralVerifier(ActionVerificationPort):
             self._validate_array(value, schema, errors, path)
         elif schema_type in ("number", "integer") and isinstance(value, (int, float)):
             self._validate_numeric(value, schema, errors, path)
+            self._validate_result_numeric_finiteness(value, schema_type, errors, path)
 
     def _check_type(
         self, value: Any, expected: str, errors: List[str], path: str,
@@ -259,6 +320,14 @@ class DeterministicStructuralVerifier(ActionVerificationPort):
         if "maximum" in schema:
             if value > schema["maximum"]:
                 errors.append(f"{path}: above maximum: {value} > {schema['maximum']}")
+
+    def _validate_result_numeric_finiteness(
+        self, value: Any, schema_type: str, errors: List[str], path: str,
+    ) -> None:
+        """M25-08: Reject non-finite numeric values (NaN, Infinity) in results."""
+        if schema_type in ("number", "integer") and isinstance(value, float):
+            if not math.isfinite(value):
+                errors.append(f"{path}: numeric value must be finite, got {value}")
 
     @staticmethod
     def _python_type_name(value: Any) -> str:

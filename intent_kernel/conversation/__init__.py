@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from intent_kernel.conversation.content import CanonicalConversationContentService
 from intent_kernel.conversation.runtime import (
     CognitiveConversationService,
     ConversationAuthorityDecision,

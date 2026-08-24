@@ -159,14 +159,12 @@ class TestLegitimateCompatibilityPreserved:
 
     def test_provider_failure_remains_compatibility(self):
         """Kernel fallback compatibility_lifecycle retains COMPATIBILITY_ONLY."""
-        # The kernel fallback path at line ~1058 must retain COMPATIBILITY_ONLY
-        # (near entry_point ProductBridge.kernel_fallback)
-        # Also line ~1558 in kernel fallback and ~1643 in _complete_local_request
-        # Just verify there are still exactly 4 COMPATIBILITY_ONLY occurrences
+        # Session default + _complete_local_request paths retain COMPATIBILITY_ONLY.
+        # The kernel_fallback path is now canonical (M24.2) — no longer COMPATIBILITY_ONLY.
         count = _BRIDGE_SRC.count('"classification": "COMPATIBILITY_ONLY"')
-        assert count == 4, (
-            f"Expected 4 COMPATIBILITY_ONLY (session default + kernel fallback "
-            f"+ _complete_local_request), found {count}"
+        assert count == 3, (
+            f"Expected 3 COMPATIBILITY_ONLY (session default + "
+            f"_complete_local_request paths), found {count}"
         )
 
 
@@ -180,7 +178,7 @@ class TestStaticAudit:
         finance field-filling path."""
         # Extract the finance field-filling section
         finance_start = _BRIDGE_SRC.index("is_fin = self.conversation_service.finance_domain_detected")
-        finance_section_end = _BRIDGE_SRC.index("# 5. Default Fallback through Kernel Engine")
+        finance_section_end = _BRIDGE_SRC.index("# 5. Canonical Conversation Content Runtime")
         finance_section = _BRIDGE_SRC[finance_start:finance_section_end]
 
         assert "COMPATIBILITY_ONLY" not in finance_section, (
@@ -194,7 +192,7 @@ class TestStaticAudit:
         """No COMPATIBILITY_ONLY or stale canonical_alternative_missing in
         application field-filling path."""
         app_start = _BRIDGE_SRC.index("is_app = self.conversation_service.application_domain_detected")
-        app_section_end = _BRIDGE_SRC.index("# 5. Default Fallback through Kernel Engine")
+        app_section_end = _BRIDGE_SRC.index("# 5. Canonical Conversation Content Runtime")
         app_section = _BRIDGE_SRC[app_start:app_section_end]
 
         assert "COMPATIBILITY_ONLY" not in app_section, (

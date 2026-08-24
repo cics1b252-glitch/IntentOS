@@ -942,7 +942,7 @@ Estratégia completa registrada no histórico para execução."""
                     canonical_alternative_missing=None,
                 )
 
-        # 5. Default Fallback through Kernel Engine
+        # 5. Canonical Conversation Content Runtime (Movement 24.2)
         default_provider = self.components.provider_manager.default
         self.components.provider_manager.reset_execution_tracking()
         fallback = str(request.get("fallback_provider", ""))
@@ -961,12 +961,13 @@ Estratégia completa registrada no histórico para execução."""
         context["provider_selection_authority"] = "RRM"
 
         try:
-            result = await self.kernel.process(message, context)
+            canonical_result = await self.components.conversation_content_service.process(
+                message,
+                context,
+                provider_selection,
+                history=history,
+            )
         except Exception as exc:
-            # Provider attribution is execution evidence, not selection evidence.
-            # ManagedProvider records this value at the invocation boundary before
-            # calling the binding. A selected/default provider that was never
-            # attempted must remain diagnostics-only.
             attempted_provider = self.components.provider_manager.last_attempted
             await self._pause_failed_mission(context)
             response = self._provider_failure(
@@ -985,42 +986,29 @@ Estratégia completa registrada no histórico para execução."""
                     "trace": self.last_trace,
                 },
             )
-            return self._compatibility_response(
-                response,
-                component="Kernel/PipelineDAG",
-                reason="non_mission_conversation_used_legacy_kernel_pipeline",
-                entry_point="ProductBridge.kernel_fallback",
-                canonical_alternative_missing="canonical_conversation_content_runtime",
-            )
+            return response
 
         used_provider = self.components.provider_manager.last_used
         used_fallback = bool(
             used_provider
             and used_provider == provider_selection.fallback_provider_id
         )
-        response_provider = used_provider or "local"
-        if response_provider == "mock":
-            result.text = (
-                "Não tenho conhecimento local suficiente para responder com segurança "
-                "e nenhum Provider externo está conectado (UNKNOWN)."
-            )
-            response_provider = "local"
         now = utc_iso()
         full_history = [*history,
             {"role": "user", "content": message, "timestamp": now},
-            {"role": "assistant", "content": result.text, "timestamp": now,
-             "provider": response_provider},
+            {"role": "assistant", "content": canonical_result.text, "timestamp": now,
+             "provider": used_provider or "local"},
         ][-100:]
 
         conv_state = {
             "conversation_id": session_id,
             "project_id": project_id,
-            "current_intent": result.domain.value,
+            "current_intent": "general",
             "known_context": known_kc,
             "missing_context": [],
             "pending_question": "",
             "last_user_message": message,
-            "last_system_response": result.text,
+            "last_system_response": canonical_result.text,
             "active_mission_id": context.get("mission_id"),
             "updated_at": now,
         }
@@ -1030,52 +1018,31 @@ Estratégia completa registrada no histórico para execução."""
             "mission_id": context.get("mission_id"), "mission_status": "completed",
             "pending_dialogue": None, "conversation_state": conv_state,
             "intent": context.get("intent_model", {"text": message}),
-            "response": {"text": result.text, "provider": used_provider,
-                         "fallback_used": used_fallback, "domain": result.domain.value},
+            "response": {"text": canonical_result.text, "provider": used_provider,
+                         "fallback_used": used_fallback, "domain": "general"},
             "history": full_history, "updated_at": now,
         })
         self._flow_event("response_persisted", mission_id=context.get("mission_id"),
                          result="success",
                          duration_ms=round((time.perf_counter() - started) * 1000, 2))
-        metadata = {
+        enriched_metadata = {
+            **canonical_result.metadata,
             "fallback_used": used_fallback,
-            "provider_explanation": None if used_provider else (
-                "A capability Atlas respondeu localmente; o Gemini não foi necessário."
-            ),
             "provider_selection": provider_selection.to_dict(),
-            "domain": result.domain.value,
-            "intent": context.get("intent_model"),
             "structured_intent": structured_intent.to_dict(),
             "iqi": structured_intent.intent_quality_index,
             "conversation_state": conv_state,
             "inspector": conv_state,
             "trace": self.last_trace,
+            "classification": "CANONICAL_CONVERSATION_CONTENT",
+            "canonical_authority": "CanonicalConversationContentService",
+            "canonical_mission": False,
         }
-        if context.get("mission_id"):
-            metadata.update({
-                "compatibility_dialogue_id": str(context["mission_id"]),
-                "compatibility_lifecycle": {
-                    "classification": "COMPATIBILITY_ONLY",
-                    "canonical_mission": False,
-                    "completion_authority": None,
-                },
-            })
-        canonical_result = CanonicalTurnResult.provider(
-            result.text,
-            provider_id=used_provider,
-            invoked=bool(used_provider),
-            resource_ids=(
-                (f"provider:{used_provider}",) if used_provider else ("RRM",)
-            ),
-            metadata=metadata,
-        )
-        return self._compatibility_response(
+        canonical_result = replace(
             canonical_result,
-            component="Kernel/PipelineDAG",
-            reason="non_mission_conversation_used_legacy_kernel_pipeline",
-            entry_point="ProductBridge.kernel_fallback",
-            canonical_alternative_missing="canonical_conversation_content_runtime",
+            metadata=enriched_metadata,
         )
+        return canonical_result
 
     @staticmethod
     def _recognize_memory_fact(message: str, structured_intent: Any) -> str | None:

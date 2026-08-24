@@ -65,7 +65,7 @@ def test_bridge_uses_single_canonical_composition_and_no_network_listener():
     bridge = (ROOT / "product_bridge.py").read_text(encoding="utf-8")
     assert bridge.count("ApplicationFactory(") == 1
     assert "KernelBuilder()" in bridge
-    assert "self.kernel.process" in bridge
+    assert "conversation_content_service.process" in bridge
     assert "listen(" not in bridge and "localhost" not in bridge and "FastAPI" not in bridge
 
 

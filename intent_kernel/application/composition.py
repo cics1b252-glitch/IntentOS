@@ -37,6 +37,7 @@ from intent_kernel.constitution import (
 )
 from intent_kernel.cdm import CognitiveDialogueManager
 from intent_kernel.conversation import CognitiveConversationService
+from intent_kernel.conversation.content import CanonicalConversationContentService
 from intent_kernel.contracts import CapabilityExecutor, ConstitutionEngine
 from intent_kernel.cognition import (
     CapabilityFirstResolver,
@@ -117,6 +118,7 @@ class ApplicationComponents:
     iue: IntentUnderstandingEngine
     cdm: CognitiveDialogueManager
     conversation_service: CognitiveConversationService
+    conversation_content_service: CanonicalConversationContentService
     tool_authorization_gate: ToolAuthorizationGate
     mission_runtime: MissionRuntime
     confirmation_service: CanonicalConfirmationService
@@ -326,6 +328,10 @@ class KernelBuilder:
             cdm=cdm,
             capability_runtime=cognitive_capability_runtime,
         )
+        conversation_content_service = CanonicalConversationContentService(
+            constitution_engine=constitution_engine,
+            provider_manager=providers,
+        )
         capability_execution_service = CapabilityExecutionService(
             mission_engine=mission_engine,
             constitution=constitution_engine,
@@ -435,6 +441,7 @@ class KernelBuilder:
             iue=iue,
             cdm=cdm,
             conversation_service=conversation_service,
+            conversation_content_service=conversation_content_service,
             tool_authorization_gate=tool_authorization_gate,
             mission_runtime=mission_runtime,
             confirmation_service=confirmation_service,

@@ -6,6 +6,8 @@ gates to ensure ACTION_EXECUTED != ACTION_SUCCEEDED and AGENT_CLAIM != VERIFIED_
 
 from __future__ import annotations
 
+import hashlib
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -95,11 +97,225 @@ class InMemoryActionVerificationAdapter(ActionVerificationPort):
         return VerificationStatus.VERIFIED_FAILURE
 
 
+class DeterministicStructuralVerifier(ActionVerificationPort):
+    """Deterministic structural contract verifier — M25.2 STRUCTURAL CONTRACT SUBSET.
+
+    Validates action results against a bounded structural contract. Supports:
+    type, required, properties, minimum, maximum, const, items.
+
+    This is NOT full JSON Schema. It implements only the M25.2 bounded subset.
+    """
+
+    _SUPPORTED_KEYWORDS = frozenset({
+        "type", "required", "properties", "minimum", "maximum", "const", "items",
+    })
+
+    _SUPPORTED_TYPES = frozenset({
+        "string", "number", "integer", "boolean", "array", "object", "null",
+    })
+
+    @staticmethod
+    def contract_hash(schema: Dict[str, Any]) -> str:
+        """Deterministic SHA-256 identity for a structural contract."""
+        canonical = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    async def verify(
+        self,
+        action: ActionContract,
+        result: Any,
+    ) -> VerificationStatus:
+        schema = action.verification_schema
+        if schema is None or not isinstance(schema, dict):
+            return VerificationStatus.VERIFIED_FAILURE
+
+        errors: List[str] = []
+        self._validate_schema_keywords(schema, errors, path="$")
+        if errors:
+            return VerificationStatus.VERIFIED_FAILURE
+
+        resolved = self._resolve_json_input(result)
+        if resolved is _PARSE_FAILED:
+            return VerificationStatus.VERIFIED_FAILURE
+
+        self._validate_value(resolved, schema, errors, path="$")
+        return VerificationStatus.VERIFIED_SUCCESS if not errors else VerificationStatus.VERIFIED_FAILURE
+
+    # --- Schema keyword validation ---
+
+    def _validate_schema_keywords(
+        self, schema: Dict[str, Any], errors: List[str], path: str,
+    ) -> None:
+        for key in schema:
+            if key not in self._SUPPORTED_KEYWORDS:
+                errors.append(f"{path}: unsupported contract keyword '{key}'")
+        schema_type = schema.get("type")
+        if schema_type is not None and schema_type not in self._SUPPORTED_TYPES:
+            errors.append(f"{path}: unsupported type '{schema_type}'")
+        if "required" in schema and not isinstance(schema["required"], list):
+            errors.append(f"{path}: 'required' must be a list")
+        if "properties" in schema and not isinstance(schema["properties"], dict):
+            errors.append(f"{path}: 'properties' must be an object")
+        if "items" in schema and not isinstance(schema["items"], dict):
+            errors.append(f"{path}: 'items' must be an object")
+        for keyword in ("minimum", "maximum"):
+            if keyword in schema and not isinstance(schema[keyword], (int, float)):
+                errors.append(f"{path}: '{keyword}' must be a number")
+        if "const" in schema:
+            pass  # const can be any JSON value
+        props = schema.get("properties", {})
+        for pname, pschema in props.items():
+            if isinstance(pschema, dict):
+                self._validate_schema_keywords(pschema, errors, f"{path}.properties.{pname}")
+
+    # --- JSON input resolution ---
+
+    @staticmethod
+    def _resolve_json_input(result: Any) -> Any:
+        if result is None or isinstance(result, (dict, list, int, float, bool)):
+            return result
+        if isinstance(result, str):
+            stripped = result.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    return json.loads(result)
+                except (json.JSONDecodeError, ValueError):
+                    return _PARSE_FAILED
+            return result
+        return _PARSE_FAILED
+
+    # --- Value validation ---
+
+    def _validate_value(
+        self, value: Any, schema: Dict[str, Any], errors: List[str], path: str,
+    ) -> None:
+        schema_type = schema.get("type")
+        if schema_type is not None:
+            self._check_type(value, schema_type, errors, path)
+
+        if "const" in schema:
+            if not self._const_matches(value, schema["const"]):
+                errors.append(f"{path}: const mismatch: expected {schema['const']!r}, got {value!r}")
+
+        if schema_type == "object" and isinstance(value, dict):
+            self._validate_object(value, schema, errors, path)
+        elif schema_type == "array" and isinstance(value, list):
+            self._validate_array(value, schema, errors, path)
+        elif schema_type in ("number", "integer") and isinstance(value, (int, float)):
+            self._validate_numeric(value, schema, errors, path)
+
+    def _check_type(
+        self, value: Any, expected: str, errors: List[str], path: str,
+    ) -> None:
+        actual = self._python_type_name(value)
+        if expected == "integer":
+            if not isinstance(value, int) or isinstance(value, bool):
+                errors.append(f"{path}: type mismatch: expected integer, got {actual}")
+        elif expected == "number":
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                errors.append(f"{path}: type mismatch: expected number, got {actual}")
+        elif expected == "boolean":
+            if not isinstance(value, bool):
+                errors.append(f"{path}: type mismatch: expected boolean, got {actual}")
+        elif expected == "string":
+            if not isinstance(value, str):
+                errors.append(f"{path}: type mismatch: expected string, got {actual}")
+        elif expected == "array":
+            if not isinstance(value, list):
+                errors.append(f"{path}: type mismatch: expected array, got {actual}")
+        elif expected == "object":
+            if not isinstance(value, dict):
+                errors.append(f"{path}: type mismatch: expected object, got {actual}")
+        elif expected == "null":
+            if value is not None:
+                errors.append(f"{path}: type mismatch: expected null, got {actual}")
+
+    def _validate_object(
+        self, value: Dict[str, Any], schema: Dict[str, Any], errors: List[str], path: str,
+    ) -> None:
+        required = schema.get("required", [])
+        for field_name in required:
+            if field_name not in value:
+                errors.append(f"{path}: missing required field '{field_name}'")
+        properties = schema.get("properties", {})
+        for prop_name, prop_schema in properties.items():
+            if prop_name in value and isinstance(prop_schema, dict):
+                self._validate_value(value[prop_name], prop_schema, errors, f"{path}.{prop_name}")
+
+    def _validate_array(
+        self, value: List[Any], schema: Dict[str, Any], errors: List[str], path: str,
+    ) -> None:
+        items_schema = schema.get("items")
+        if items_schema is not None and isinstance(items_schema, dict):
+            for i, item in enumerate(value):
+                self._validate_value(item, items_schema, errors, f"{path}[{i}]")
+
+    def _validate_numeric(
+        self, value: Any, schema: Dict[str, Any], errors: List[str], path: str,
+    ) -> None:
+        if "minimum" in schema:
+            if value < schema["minimum"]:
+                errors.append(f"{path}: below minimum: {value} < {schema['minimum']}")
+        if "maximum" in schema:
+            if value > schema["maximum"]:
+                errors.append(f"{path}: above maximum: {value} > {schema['maximum']}")
+
+    @staticmethod
+    def _python_type_name(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int):
+            return "integer"
+        if isinstance(value, float):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        if isinstance(value, list):
+            return "array"
+        if isinstance(value, dict):
+            return "object"
+        return type(value).__name__
+
+    @staticmethod
+    def _const_matches(value: Any, const: Any) -> bool:
+        """Type-safe const comparison. Python bool/int equality is NOT used.
+
+        Same structural type + same deterministic value = match.
+        Different structural type = mismatch.
+
+        M25.2.1 semantics:
+        - True != 1, False != 0 (bool and integer are distinct structural types)
+        - 1 != 1.0 (integer and number are distinct structural types)
+        - "1" != 1 (string and integer are distinct structural types)
+        """
+        v_type = DeterministicStructuralVerifier._python_type_name(value)
+        c_type = DeterministicStructuralVerifier._python_type_name(const)
+        if v_type != c_type:
+            return False
+        # Same structural type — compare values directly
+        if v_type == "object":
+            return value == const and set(value.keys()) == set(const.keys())
+        if v_type == "array":
+            if len(value) != len(const):
+                return False
+            return all(
+                DeterministicStructuralVerifier._const_matches(vi, ci)
+                for vi, ci in zip(value, const)
+            )
+        return value == const
+
+
+_PARSE_FAILED = object()
+
+
 class VerificationGate:
     """Post-execution validation gate for individual action nodes."""
 
     def __init__(self, verifier: Optional[ActionVerificationPort] = None) -> None:
-        self.verifier = verifier or InMemoryActionVerificationAdapter()
+        self._exact_verifier = verifier or InMemoryActionVerificationAdapter()
+        self._structural_verifier = DeterministicStructuralVerifier()
 
     async def evaluate_node(
         self,
@@ -108,25 +324,44 @@ class VerificationGate:
         result: Any,
     ) -> Tuple[VerificationStatus, CompletionEvidence]:
         """Verify a node execution result and generate canonical CompletionEvidence."""
+        verification_type = getattr(action, "verification_type", None)
         if not action.verification_required:
             status = VerificationStatus.VERIFIED_SUCCESS
+            verifier_name = self._exact_verifier.__class__.__name__
         else:
-            status = await self.verifier.verify(action, result)
+            if verification_type == "STRUCTURAL":
+                if action.verification_schema is None:
+                    status = VerificationStatus.VERIFIED_FAILURE
+                    verifier_name = "VerificationGate"
+                else:
+                    status = await self._structural_verifier.verify(action, result)
+                    verifier_name = self._structural_verifier.__class__.__name__
+            elif verification_type == "EXACT" or verification_type is None:
+                status = await self._exact_verifier.verify(action, result)
+                verifier_name = self._exact_verifier.__class__.__name__
+            else:
+                status = VerificationStatus.VERIFIED_FAILURE
+                verifier_name = "VerificationGate"
 
         is_verified = status == VerificationStatus.VERIFIED_SUCCESS
+        contract_hash: str | None = None
+        if verification_type == "STRUCTURAL" and action.verification_schema is not None:
+            contract_hash = DeterministicStructuralVerifier.contract_hash(action.verification_schema)
 
         evidence = CompletionEvidence(
             claim=f"Node {node.node_id} executed capability {action.capability}",
             evidence_type="ACTION_VERIFICATION",
             source="VerificationGate",
             verified=is_verified,
-            verification_method=f"{self.verifier.__class__.__name__}.verify()",
+            verification_method=f"{verifier_name}.verify()",
             details={
                 "node_id": node.node_id,
                 "capability": action.capability,
                 "verification_status": status.value if hasattr(status, "value") else str(status),
+                "verification_type": verification_type or "EXACT",
                 "expected": action.expected_output,
                 "observed": result,
+                "contract_hash": contract_hash,
             },
         )
 

@@ -519,7 +519,7 @@ class _InconclusiveVerifier:
 @pytest.mark.asyncio
 async def test_P_missing_verification_never_completes(runtime_stack):
     engine, runtime, service = runtime_stack
-    runtime.verification_gate.verifier = _InconclusiveVerifier()
+    runtime.verification_gate._exact_verifier = _InconclusiveVerifier()
     mission, instance, conf = await _pending_runtime(runtime_stack)
     service.bind_pending(
         confirmation_id=conf.confirmation_id,

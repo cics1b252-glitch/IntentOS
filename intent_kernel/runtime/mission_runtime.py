@@ -42,6 +42,7 @@ from intent_kernel.runtime.models import (
     VerificationStatus,
 )
 from intent_kernel.runtime.verification import (
+    DeterministicStructuralVerifier,
     MissionCompletionGate,
     VerificationGate,
 )
@@ -450,7 +451,8 @@ class MissionRuntime:
                     if (
                         claimed_status == VerificationStatus.VERIFIED_SUCCESS.value
                         and self._validate_resume_evidence(
-                            nid, claimed_status, chk.completion_evidence
+                            nid, claimed_status, chk.completion_evidence,
+                            instance.nodes[nid].action_contract,
                         )
                     ):
                         # Evidence valid — restore verified state
@@ -505,6 +507,7 @@ class MissionRuntime:
         node_id: str,
         claimed_status: str,
         evidence_list: List[Dict[str, Any]],
+        current_action_contract: Any = None,
     ) -> bool:
         """Validate that verification evidence is consistent for a node on resume.
 
@@ -513,6 +516,7 @@ class MissionRuntime:
         - The evidence source is VerificationGate
         - The evidence claims verified=True
         - The evidence verification_status matches the claimed status
+        - For STRUCTURAL evidence: evidence contract_hash matches current contract
         """
         for ev in evidence_list:
             details = ev.get("details", {})
@@ -528,6 +532,20 @@ class MissionRuntime:
             ev_status = details.get("verification_status", "")
             if ev_status != claimed_status:
                 return False
+            # M25.2.1: For STRUCTURAL evidence, contract hash must match current contract
+            ev_type = details.get("verification_type", "EXACT")
+            if ev_type == "STRUCTURAL":
+                ev_hash = details.get("contract_hash")
+                if ev_hash is None:
+                    return False
+                if current_action_contract is None:
+                    return False
+                current_schema = getattr(current_action_contract, "verification_schema", None)
+                if current_schema is None:
+                    return False
+                current_hash = DeterministicStructuralVerifier.contract_hash(current_schema)
+                if ev_hash != current_hash:
+                    return False
             return True
         return False
 

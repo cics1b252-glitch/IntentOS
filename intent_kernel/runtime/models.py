@@ -117,6 +117,8 @@ class ActionContract:
     required_permissions: List[str] = field(default_factory=list)
     confirmation_required: bool = False
     verification_required: bool = True
+    verification_type: Optional[str] = None  # "EXACT" | "STRUCTURAL" | None (defaults EXACT)
+    verification_schema: Optional[Dict[str, Any]] = None  # structural contract for STRUCTURAL mode
     timeout: float = 30.0
     retry_policy: Dict[str, Any] = field(default_factory=lambda: {"max_attempts": 3, "backoff": "exponential"})
     idempotency_key: str = field(default_factory=lambda: f"idemp_{uuid4().hex[:8]}")

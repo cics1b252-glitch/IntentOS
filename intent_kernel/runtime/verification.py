@@ -28,6 +28,10 @@ from intent_kernel.runtime.models import (
     RuntimeNodeState,
     VerificationStatus,
 )
+from intent_kernel.runtime.semantic_verifier import (
+    DeterministicRuleVerifier,
+    rule_set_hash,
+)
 
 
 _COMPLETION_AUTHORITY_TOKEN = object()
@@ -385,6 +389,7 @@ class VerificationGate:
     def __init__(self, verifier: Optional[ActionVerificationPort] = None) -> None:
         self._exact_verifier = verifier or InMemoryActionVerificationAdapter()
         self._structural_verifier = DeterministicStructuralVerifier()
+        self._rule_verifier = DeterministicRuleVerifier()
 
     async def evaluate_node(
         self,
@@ -392,30 +397,74 @@ class VerificationGate:
         action: ActionContract,
         result: Any,
     ) -> Tuple[VerificationStatus, CompletionEvidence]:
-        """Verify a node execution result and generate canonical CompletionEvidence."""
+        """Verify a node execution result and generate canonical CompletionEvidence.
+
+        Composition model:
+        - EXACT/None + no semantic_rules → EXACT only
+        - STRUCTURAL + no semantic_rules → STRUCTURAL only
+        - EXACT/None + semantic_rules → semantic rules required
+        - STRUCTURAL + semantic_rules → STRUCTURAL AND semantic rules required
+
+        Failure dominates. Both required and both success → VERIFIED_SUCCESS.
+        """
         verification_type = getattr(action, "verification_type", None)
+        semantic_rules = getattr(action, "semantic_rules", None)
+        has_semantic = isinstance(semantic_rules, list) and len(semantic_rules) > 0
+
         if not action.verification_required:
             status = VerificationStatus.VERIFIED_SUCCESS
             verifier_name = self._exact_verifier.__class__.__name__
         else:
+            # --- Primary verification (EXACT or STRUCTURAL) ---
+            primary_status: VerificationStatus
             if verification_type == "STRUCTURAL":
                 if action.verification_schema is None:
-                    status = VerificationStatus.VERIFIED_FAILURE
+                    primary_status = VerificationStatus.VERIFIED_FAILURE
                     verifier_name = "VerificationGate"
                 else:
-                    status = await self._structural_verifier.verify(action, result)
+                    primary_status = await self._structural_verifier.verify(action, result)
                     verifier_name = self._structural_verifier.__class__.__name__
             elif verification_type == "EXACT" or verification_type is None:
-                status = await self._exact_verifier.verify(action, result)
-                verifier_name = self._exact_verifier.__class__.__name__
+                if has_semantic:
+                    # Semantic-only or semantic+EXACT: primary passes to semantic
+                    primary_status = VerificationStatus.VERIFIED_SUCCESS
+                    verifier_name = "DeterministicRuleVerifier"
+                else:
+                    primary_status = await self._exact_verifier.verify(action, result)
+                    verifier_name = self._exact_verifier.__class__.__name__
             else:
-                status = VerificationStatus.VERIFIED_FAILURE
+                primary_status = VerificationStatus.VERIFIED_FAILURE
                 verifier_name = "VerificationGate"
+
+            # --- Semantic verification (if rules present) ---
+            semantic_eval = None
+            if has_semantic and primary_status == VerificationStatus.VERIFIED_SUCCESS:
+                semantic_eval = self._rule_verifier.evaluate(semantic_rules, result)
+                if not semantic_eval.passed:
+                    status = VerificationStatus.VERIFIED_FAILURE
+                    verifier_name = "DeterministicRuleVerifier"
+                else:
+                    status = VerificationStatus.VERIFIED_SUCCESS
+            else:
+                status = primary_status
 
         is_verified = status == VerificationStatus.VERIFIED_SUCCESS
         contract_hash: str | None = None
         if verification_type == "STRUCTURAL" and action.verification_schema is not None:
             contract_hash = DeterministicStructuralVerifier.contract_hash(action.verification_schema)
+
+        # Semantic evidence fields
+        semantic_hash: str | None = None
+        semantic_rule_count: int = 0
+        semantic_outcomes: list = []
+        if has_semantic:
+            semantic_hash = rule_set_hash(semantic_rules)
+            semantic_rule_count = len(semantic_rules)
+            if semantic_eval is not None:
+                semantic_outcomes = [r.to_dict() for r in semantic_eval.rule_results]
+            elif not (not action.verification_required):
+                sem_result = self._rule_verifier.evaluate(semantic_rules, result)
+                semantic_outcomes = [r.to_dict() for r in sem_result.rule_results]
 
         evidence = CompletionEvidence(
             claim=f"Node {node.node_id} executed capability {action.capability}",
@@ -431,6 +480,9 @@ class VerificationGate:
                 "expected": action.expected_output,
                 "observed": result,
                 "contract_hash": contract_hash,
+                "rule_set_hash": semantic_hash,
+                "semantic_rule_count": semantic_rule_count,
+                "semantic_rule_outcomes": semantic_outcomes,
             },
         )
 

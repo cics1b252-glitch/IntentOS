@@ -517,6 +517,8 @@ class MissionRuntime:
         - The evidence claims verified=True
         - The evidence verification_status matches the claimed status
         - For STRUCTURAL evidence: evidence contract_hash matches current contract
+        - For SEMANTIC evidence: evidence rule_set_hash matches current rules
+        - For STRUCTURAL+SEMANTIC: both hashes must match
         """
         for ev in evidence_list:
             details = ev.get("details", {})
@@ -545,6 +547,22 @@ class MissionRuntime:
                     return False
                 current_hash = DeterministicStructuralVerifier.contract_hash(current_schema)
                 if ev_hash != current_hash:
+                    return False
+            # M26.2: For SEMANTIC evidence, rule_set_hash must match current rules
+            ev_semantic_hash = details.get("rule_set_hash")
+            if current_action_contract is not None:
+                current_rules = getattr(current_action_contract, "semantic_rules", None)
+                has_current_semantic = isinstance(current_rules, list) and len(current_rules) > 0
+                if has_current_semantic:
+                    # Current contract has semantic rules — evidence MUST have matching hash
+                    if ev_semantic_hash is None:
+                        return False
+                    from intent_kernel.runtime.semantic_verifier import rule_set_hash
+                    current_rhash = rule_set_hash(current_rules)
+                    if ev_semantic_hash != current_rhash:
+                        return False
+                elif ev_semantic_hash is not None:
+                    # Evidence has semantic hash but current contract doesn't — mismatch
                     return False
             return True
         return False

@@ -119,6 +119,7 @@ class ActionContract:
     verification_required: bool = True
     verification_type: Optional[str] = None  # "EXACT" | "STRUCTURAL" | None (defaults EXACT)
     verification_schema: Optional[Dict[str, Any]] = None  # structural contract for STRUCTURAL mode
+    semantic_rules: Optional[List[Dict[str, Any]]] = None  # M26.2: deterministic semantic rules
     timeout: float = 30.0
     retry_policy: Dict[str, Any] = field(default_factory=lambda: {"max_attempts": 3, "backoff": "exponential"})
     idempotency_key: str = field(default_factory=lambda: f"idemp_{uuid4().hex[:8]}")

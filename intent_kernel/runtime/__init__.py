@@ -37,6 +37,10 @@ from intent_kernel.runtime.verification import (
     MissionCompletionGate,
     VerificationGate,
 )
+from intent_kernel.runtime.semantic_verifier import (
+    DeterministicRuleVerifier,
+    rule_set_hash,
+)
 
 __all__ = [
     "MissionRuntimeState",
@@ -64,5 +68,7 @@ __all__ = [
     "MissionCompletionGate",
     "MissionCheckpointRepositoryPort",
     "InMemoryCheckpointRepository",
+    "DeterministicRuleVerifier",
+    "rule_set_hash",
     "MissionRuntime",
 ]

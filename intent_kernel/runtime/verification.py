@@ -37,6 +37,22 @@ from intent_kernel.runtime.semantic_verifier import (
 _COMPLETION_AUTHORITY_TOKEN = object()
 
 
+def exact_contract_hash(expected_output: Any) -> Optional[str]:
+    """Canonical SHA-256 identity for an EXACT verification contract.
+
+    Type-safe: True != 1, False != 0, 1 != 1.0.
+    Deterministic: same value → same hash, always.
+    Fail-closed: unsupported types → None (caller must reject).
+    """
+    try:
+        canonical = json.dumps(
+            expected_output, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class MissionCompletionDecision:
     """Evidence-bearing authorization for the lifecycle COMPLETED transition.
@@ -453,6 +469,12 @@ class VerificationGate:
         if verification_type == "STRUCTURAL" and action.verification_schema is not None:
             contract_hash = DeterministicStructuralVerifier.contract_hash(action.verification_schema)
 
+        # M27.2: EXACT contract identity
+        exact_hash: str | None = None
+        effective_type = verification_type or "EXACT"
+        if effective_type == "EXACT" and has_semantic is False:
+            exact_hash = exact_contract_hash(action.expected_output)
+
         # Semantic evidence fields
         semantic_hash: str | None = None
         semantic_rule_count: int = 0
@@ -480,6 +502,7 @@ class VerificationGate:
                 "expected": action.expected_output,
                 "observed": result,
                 "contract_hash": contract_hash,
+                "exact_contract_hash": exact_hash,
                 "rule_set_hash": semantic_hash,
                 "semantic_rule_count": semantic_rule_count,
                 "semantic_rule_outcomes": semantic_outcomes,

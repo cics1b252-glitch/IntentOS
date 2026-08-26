@@ -650,7 +650,7 @@ class TestResume(IsolatedAsyncioTestCase):
         pass
 
     async def test_legacy_exact_resume_preserved(self):
-        """60. legacy EXACT resume preserved"""
+        """60. legacy EXACT resume without exact_contract_hash → INCONCLUSIVE (M27.2 fail-closed)"""
         from intent_kernel.runtime import InMemoryCheckpointRepository, MissionCheckpoint
         repo = InMemoryCheckpointRepository()
         rt = _make_runtime(repo)
@@ -674,7 +674,8 @@ class TestResume(IsolatedAsyncioTestCase):
         )
         await repo.save_checkpoint(forged_chk)
         resumed = await rt.resume(inst.runtime_id)
-        self.assertEqual(resumed.nodes["r60"].verification_result, VerificationStatus.VERIFIED_SUCCESS)
+        # M27.2: Legacy EXACT evidence without exact_contract_hash → INCONCLUSIVE
+        self.assertEqual(resumed.nodes["r60"].verification_result, VerificationStatus.INCONCLUSIVE)
 
     async def test_m25_structural_only_resume_preserved(self):
         """61. M25 STRUCTURAL-only resume preserved"""

@@ -36,6 +36,7 @@ from intent_kernel.runtime.verification import (
     MissionCompletionDecision,
     MissionCompletionGate,
     VerificationGate,
+    exact_contract_hash,
 )
 from intent_kernel.runtime.semantic_verifier import (
     DeterministicRuleVerifier,

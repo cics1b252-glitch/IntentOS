@@ -45,6 +45,7 @@ from intent_kernel.runtime.verification import (
     DeterministicStructuralVerifier,
     MissionCompletionGate,
     VerificationGate,
+    exact_contract_hash,
 )
 from intent_kernel.time_utils import utc_iso
 
@@ -516,6 +517,7 @@ class MissionRuntime:
         - The evidence source is VerificationGate
         - The evidence claims verified=True
         - The evidence verification_status matches the claimed status
+        - For EXACT evidence: evidence exact_contract_hash matches current expected_output
         - For STRUCTURAL evidence: evidence contract_hash matches current contract
         - For SEMANTIC evidence: evidence rule_set_hash matches current rules
         - For STRUCTURAL+SEMANTIC: both hashes must match
@@ -548,6 +550,18 @@ class MissionRuntime:
                 current_hash = DeterministicStructuralVerifier.contract_hash(current_schema)
                 if ev_hash != current_hash:
                     return False
+            # M27.2: For EXACT evidence (no semantic rules), exact_contract_hash must match
+            if ev_type == "EXACT" and current_action_contract is not None:
+                current_rules = getattr(current_action_contract, "semantic_rules", None)
+                has_current_semantic = isinstance(current_rules, list) and len(current_rules) > 0
+                if not has_current_semantic:
+                    ev_exact_hash = details.get("exact_contract_hash")
+                    current_expected = getattr(current_action_contract, "expected_output", None)
+                    current_exact_hash = exact_contract_hash(current_expected)
+                    if ev_exact_hash is None:
+                        return False
+                    if ev_exact_hash != current_exact_hash:
+                        return False
             # M26.2: For SEMANTIC evidence, rule_set_hash must match current rules
             ev_semantic_hash = details.get("rule_set_hash")
             if current_action_contract is not None:

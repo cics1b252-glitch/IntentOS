@@ -812,5 +812,124 @@ class TestPreservation(IsolatedAsyncioTestCase):
         self.assertTrue(hasattr(VerificationGate, "evaluate_node"))
 
 
+# ===========================================================================
+# M26.4 — BOUNDED COMPLEXITY FOR sum_equals (74-81)
+# ===========================================================================
+
+class TestSumEqualsBounds(IsolatedAsyncioTestCase):
+    """M26.4: sum_equals field count must be bounded by MAX_SUM_FIELDS."""
+
+    def _make_verifier(self):
+        return DeterministicRuleVerifier()
+
+    def _make_sum_rule(self, field_names, target="total"):
+        return {"op": "sum_equals", "fields": list(field_names), "target": target}
+
+    async def test_100_fields_valid(self):
+        """74. sum_equals with exactly 100 fields → contract valid"""
+        v = self._make_verifier()
+        fields = [f"f{i}" for i in range(100)]
+        result = v.validate_rules([self._make_sum_rule(fields)])
+        self.assertTrue(result.valid)
+
+    async def test_100_fields_evaluation_success(self):
+        """75. sum_equals with 100 fields evaluating correctly → VERIFIED_SUCCESS"""
+        gate = VerificationGate()
+        fields = [f"f{i}" for i in range(100)]
+        values = {f"f{i}": 1 for i in range(100)}
+        values["total"] = 100
+        rules = [self._make_sum_rule(fields)]
+        node = _make_node("bounds75", semantic_rules=rules)
+        status, _ = await gate.evaluate_node(node, node.action_contract, values)
+        self.assertEqual(status, VerificationStatus.VERIFIED_SUCCESS)
+
+    async def test_101_fields_invalid_contract(self):
+        """76. sum_equals with 101 fields → contract invalid → VERIFIED_FAILURE"""
+        v = self._make_verifier()
+        fields = [f"f{i}" for i in range(101)]
+        result = v.validate_rules([self._make_sum_rule(fields)])
+        self.assertFalse(result.valid)
+        self.assertTrue(any("sum_fields_limit_exceeded" in e for e in result.errors))
+
+    async def test_101_fields_evaluate_returns_failure(self):
+        """77. sum_equals with 101 fields → evaluate returns VERIFIED_FAILURE"""
+        gate = VerificationGate()
+        fields = [f"f{i}" for i in range(101)]
+        rules = [self._make_sum_rule(fields)]
+        node = _make_node("bounds77", semantic_rules=rules)
+        status, _ = await gate.evaluate_node(node, node.action_contract, {})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+    async def test_large_field_list_rejected(self):
+        """78. sum_equals with 500 fields → contract invalid before arithmetic"""
+        v = self._make_verifier()
+        fields = [f"f{i}" for i in range(500)]
+        result = v.validate_rules([self._make_sum_rule(fields)])
+        self.assertFalse(result.valid)
+
+    async def test_boundary_not_truncation(self):
+        """79. boundary validation is contract-level, not truncation"""
+        v = self._make_verifier()
+        # 101 fields — all must be validated, not truncated to first 100
+        fields = [f"f{i}" for i in range(101)]
+        result = v.validate_rules([self._make_sum_rule(fields)])
+        self.assertFalse(result.valid)
+        self.assertTrue(any("sum_fields_limit_exceeded" in e for e in result.errors))
+
+    async def test_decimal_precision_preserved(self):
+        """80. 0.1 + 0.2 = 0.3 canonical Decimal semantics preserved"""
+        gate = VerificationGate()
+        rules = [self._make_sum_rule(["a", "b"])]
+        node = _make_node("bounds80", semantic_rules=rules)
+        status, _ = await gate.evaluate_node(
+            node, node.action_contract, {"a": 0.1, "b": 0.2, "total": 0.3}
+        )
+        self.assertEqual(status, VerificationStatus.VERIFIED_SUCCESS)
+
+    async def test_bool_nan_infinity_rejection_preserved(self):
+        """81. bool/NaN/Infinity rejection preserved for sum_equals"""
+        v = self._make_verifier()
+        rules = [self._make_sum_rule(["a"])]
+        gate = VerificationGate()
+
+        # Bool rejected
+        node = _make_node("b81a", semantic_rules=rules)
+        status, _ = await gate.evaluate_node(node, node.action_contract, {"a": True, "total": 1})
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+        # NaN rejected
+        node = _make_node("b81b", semantic_rules=rules)
+        status, _ = await gate.evaluate_node(
+            node, node.action_contract, {"a": float("nan"), "total": 0}
+        )
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+        # Infinity rejected
+        node = _make_node("b81c", semantic_rules=rules)
+        status, _ = await gate.evaluate_node(
+            node, node.action_contract, {"a": float("inf"), "total": float("inf")}
+        )
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+
+
+class TestConditionalRequiredNonePresence(IsolatedAsyncioTestCase):
+    """M26.4: conditional_required with None presence semantics (coverage only)."""
+
+    async def test_condition_true_required_field_exists_with_none(self):
+        """82. conditional_required: condition true + required field exists with None → success"""
+        v = DeterministicRuleVerifier()
+        rules = [{"op": "conditional_required", "if_field": "type", "equals": "a", "then_required": ["x"]}]
+        # x exists (value is None) — presence-based check passes
+        result = v.evaluate(rules, {"type": "a", "x": None})
+        self.assertTrue(result.passed)
+
+    async def test_condition_true_required_field_absent(self):
+        """83. conditional_required: condition true + required field absent → failure"""
+        v = DeterministicRuleVerifier()
+        rules = [{"op": "conditional_required", "if_field": "type", "equals": "a", "then_required": ["x"]}]
+        result = v.evaluate(rules, {"type": "a"})
+        self.assertFalse(result.passed)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 MAX_RULES = 100
 MAX_COLLECTION_ITEMS = 1000
+MAX_SUM_FIELDS = 100
 
 _ALLOWED_OPS = frozenset({
     "equals_field",
@@ -210,6 +211,11 @@ class DeterministicRuleVerifier:
                 if not isinstance(fields, list) or len(fields) == 0:
                     errors.append(f"{path}: 'fields' must be a non-empty list")
                 else:
+                    if len(fields) > MAX_SUM_FIELDS:
+                        errors.append(
+                            f"{path}: sum_fields_limit_exceeded: {len(fields)} fields "
+                            f"exceeds limit of {MAX_SUM_FIELDS}"
+                        )
                     for fi, fname in enumerate(fields):
                         if not isinstance(fname, str) or not fname:
                             errors.append(f"{path}: fields[{fi}] must be a non-empty string")

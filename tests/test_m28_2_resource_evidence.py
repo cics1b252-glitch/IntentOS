@@ -101,6 +101,7 @@ def _make_provider(
     is_configured: bool = True,
     has_active_account: bool = True,
     is_template: bool = False,
+    generation: int = 1,
 ) -> ProviderResource:
     return ProviderResource(
         provider_id=provider_id,
@@ -109,6 +110,7 @@ def _make_provider(
         is_configured=is_configured,
         has_active_account=has_active_account,
         is_template=is_template,
+        generation=generation,
     )
 
 

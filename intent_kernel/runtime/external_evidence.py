@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 MAX_EXTERNAL_EVIDENCE_REQUIREMENTS = 32
 
-_APPROVED_EXPECTED_STATE_KEYS = frozenset({"status", "is_eligible"})
+_APPROVED_EXPECTED_STATE_KEYS = frozenset(
+    {"status", "is_eligible", "governed_registration_id", "resource_generation"}
+)
 
 _VALID_EVIDENCE_TYPES = frozenset({"PROVIDER_RESOURCE_STATE"})
 
@@ -36,6 +38,11 @@ class ExternalObservationResult:
     The observer MUST NOT return VerificationStatus.
     The observer MUST NOT return verified=True.
     The observer reports FACTS. VerificationGate decides truth.
+
+    M30.2 canonical freshness identity: governed_registration_id and
+    resource_generation (None / LEGACY_UNVERSIONED when the resource is not a
+    versioned canonical resource) are MECHANISM-ONLY facts reported by the
+    observer; the VerificationGate decides truth and fail-closed semantics.
     """
 
     evidence_type: str
@@ -46,6 +53,8 @@ class ExternalObservationResult:
     observed_at: str
     matched: bool
     reason_code: str
+    governed_registration_id: str = ""
+    resource_generation: Optional[int] = None
 
 
 def external_evidence_contract_hash(
@@ -147,33 +156,48 @@ class RRMEvidenceAdapter:
         """Observe the current canonical state of a provider resource.
 
         Returns observation facts. Never returns VerificationStatus.
+
+        M30.2 freshness identity: every observation of a valid canonical
+        resource reports governed_registration_id + resource_generation. A
+        resource that is missing, tombstoned, or not a versioned canonical
+        resource (legacy / unversioned / malformed generation) FAILS CLOSED.
         """
         from intent_kernel.time_utils import utc_iso
-        from intent_kernel.rrm.models import ResourceStatus
+        from intent_kernel.rrm.generation import is_valid_generation
 
-        if requirement.evidence_type != "PROVIDER_RESOURCE_STATE":
+        def _result(observed_state, matched, reason, grid="", gen=None):
             return ExternalObservationResult(
                 evidence_type=requirement.evidence_type,
                 resource_id=requirement.resource_id,
                 observer_id=self.OBSERVER_ID,
                 observer_version=self.OBSERVER_VERSION,
-                observed_state={},
+                observed_state=observed_state,
                 observed_at=utc_iso(),
-                matched=False,
-                reason_code="unsupported_evidence_type",
+                matched=matched,
+                reason_code=reason,
+                governed_registration_id=grid,
+                resource_generation=gen,
             )
+
+        if requirement.evidence_type != "PROVIDER_RESOURCE_STATE":
+            return _result({}, False, "unsupported_evidence_type")
 
         resource = self._rrm.get_provider(requirement.resource_id)
         if resource is None:
-            return ExternalObservationResult(
-                evidence_type=requirement.evidence_type,
-                resource_id=requirement.resource_id,
-                observer_id=self.OBSERVER_ID,
-                observer_version=self.OBSERVER_VERSION,
-                observed_state={},
-                observed_at=utc_iso(),
-                matched=False,
-                reason_code="resource_not_found",
+            tombstones = getattr(self._rrm, "_tombstones", None)
+            if tombstones is not None and requirement.resource_id in tombstones:
+                return _result({}, False, "resource_tombstoned")
+            return _result({}, False, "resource_not_found")
+
+        grid = getattr(resource, "governed_registration_id", "") or ""
+        generation = getattr(resource, "generation", None)
+
+        # M30.2 fail-closed: a resource must be a versioned canonical resource.
+        if generation is None:
+            return _result({}, False, "malformed_generation", grid=grid, gen=None)
+        if not is_valid_generation(generation):
+            return _result(
+                {}, False, "legacy_unversioned_generation", grid=grid, gen=generation,
             )
 
         observed: Dict[str, Any] = {}
@@ -182,17 +206,12 @@ class RRMEvidenceAdapter:
                 observed["status"] = resource.status.value if hasattr(resource.status, "value") else str(resource.status)
             elif key == "is_eligible":
                 observed["is_eligible"] = resource.is_eligible
+            elif key == "governed_registration_id":
+                observed["governed_registration_id"] = grid
+            elif key == "resource_generation":
+                observed["resource_generation"] = generation
 
         matched = observed == requirement.expected_state
         reason = "" if matched else "state_mismatch"
 
-        return ExternalObservationResult(
-            evidence_type=requirement.evidence_type,
-            resource_id=requirement.resource_id,
-            observer_id=self.OBSERVER_ID,
-            observer_version=self.OBSERVER_VERSION,
-            observed_state=observed,
-            observed_at=utc_iso(),
-            matched=matched,
-            reason_code=reason,
-        )
+        return _result(observed, matched, reason, grid=grid, gen=generation)

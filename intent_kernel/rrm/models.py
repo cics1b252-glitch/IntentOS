@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
+from intent_kernel.rrm.generation import LEGACY_UNVERSIONED, normalize_for_restore
 from intent_kernel.time_utils import utc_iso
 
 
@@ -102,6 +103,7 @@ class ProviderResource:
     has_active_account: bool = True
     endpoint_url: Optional[str] = None
     governed_registration_id: str = ""
+    generation: int = LEGACY_UNVERSIONED
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -132,6 +134,7 @@ class ProviderResource:
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
         d.setdefault("governed_registration_id", "")
+        d["generation"] = normalize_for_restore(d.get("generation", LEGACY_UNVERSIONED))
         return cls(**d)
 
 
@@ -154,6 +157,7 @@ class AccountResource:
     is_configured: bool = True
     allowed_policies: List[str] = field(default_factory=list)
     governed_registration_id: str = ""
+    generation: int = LEGACY_UNVERSIONED
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -184,6 +188,7 @@ class AccountResource:
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
         d.setdefault("governed_registration_id", "")
+        d["generation"] = normalize_for_restore(d.get("generation", LEGACY_UNVERSIONED))
         return cls(**d)
 
 
@@ -205,6 +210,7 @@ class ExecutionEnvironmentResource:
     cost_class: str = "free"  # "free", "low", "medium", "high"
     resource_limits: Dict[str, Any] = field(default_factory=dict)
     governed_registration_id: str = ""
+    generation: int = LEGACY_UNVERSIONED
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -238,6 +244,7 @@ class ExecutionEnvironmentResource:
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
         d.setdefault("governed_registration_id", "")
+        d["generation"] = normalize_for_restore(d.get("generation", LEGACY_UNVERSIONED))
         return cls(**d)
 
 
@@ -260,6 +267,7 @@ class CapabilityResource:
     is_template: bool = False
     is_executable: bool = True
     governed_registration_id: str = ""
+    generation: int = LEGACY_UNVERSIONED
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -290,6 +298,7 @@ class CapabilityResource:
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
         d.setdefault("governed_registration_id", "")
+        d["generation"] = normalize_for_restore(d.get("generation", LEGACY_UNVERSIONED))
         return cls(**d)
 
 
@@ -313,6 +322,7 @@ class AgentResource:
     latency_tier: float = 0.2  # Normalized latency in seconds
     supported_domains: List[str] = field(default_factory=list)
     governed_registration_id: str = ""
+    generation: int = LEGACY_UNVERSIONED
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -351,6 +361,7 @@ class AgentResource:
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
         d.setdefault("governed_registration_id", "")
+        d["generation"] = normalize_for_restore(d.get("generation", LEGACY_UNVERSIONED))
         return cls(**d)
 
 
@@ -374,6 +385,7 @@ class ProjectResource:
     budget_limit: float = 1000.0
     consumed_budget: float = 0.0
     governed_registration_id: str = ""
+    generation: int = LEGACY_UNVERSIONED
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_iso)
     updated_at: str = field(default_factory=utc_iso)
@@ -402,6 +414,7 @@ class ProjectResource:
         if "availability_source" in d and isinstance(d["availability_source"], str):
             d["availability_source"] = AvailabilitySource(d["availability_source"])
         d.setdefault("governed_registration_id", "")
+        d["generation"] = normalize_for_restore(d.get("generation", LEGACY_UNVERSIONED))
         return cls(**d)
 
 

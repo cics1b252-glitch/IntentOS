@@ -57,6 +57,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing = self._providers.get(provider.provider_id)
             if existing is not None and self._is_governed_resource(provider.provider_id):
                 return existing
+            self._establish_generation_on_registration(provider, existing)
             provider.updated_at = utc_iso()
             self._providers[provider.provider_id] = provider
             return provider
@@ -92,6 +93,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing = self._accounts.get(account.account_id)
             if existing is not None and self._is_governed_resource(account.account_id):
                 return existing
+            self._establish_generation_on_registration(account, existing)
             account.updated_at = utc_iso()
             self._accounts[account.account_id] = account
             return account
@@ -134,6 +136,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing = self._environments.get(environment.environment_id)
             if existing is not None and self._is_governed_resource(environment.environment_id):
                 return existing
+            self._establish_generation_on_registration(environment, existing)
             environment.updated_at = utc_iso()
             self._environments[environment.environment_id] = environment
             return environment
@@ -169,6 +172,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing = self._capabilities.get(capability.capability_id)
             if existing is not None and self._is_governed_resource(capability.capability_id):
                 return existing
+            self._establish_generation_on_registration(capability, existing)
             capability.updated_at = utc_iso()
             self._capabilities[capability.capability_id] = capability
             if capability.name and capability.name != capability.capability_id:
@@ -210,6 +214,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing = self._agents.get(agent.agent_id)
             if existing is not None and self._is_governed_resource(agent.agent_id):
                 return existing
+            self._establish_generation_on_registration(agent, existing)
             agent.updated_at = utc_iso()
             self._agents[agent.agent_id] = agent
             return agent
@@ -250,6 +255,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_project(self, project: ProjectResource) -> ProjectResource:
         with self._lock:
+            existing = self._projects.get(project.project_id)
+            self._establish_generation_on_registration(project, existing)
             project.updated_at = utc_iso()
             self._projects[project.project_id] = project
             return project
@@ -275,6 +282,46 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             return False
 
     # --- Governed Resource Provenance ---
+
+    def _establish_generation_on_registration(self, incoming: Any, existing: Any) -> None:
+        """Single canonical generation authority on registration.
+
+        M30.2 — registration NEVER trusts caller-provided generation for a
+        newly-introduced canonical resource:
+          - new to RRM (existing is None): generation = GENERATION_INITIAL (1).
+          - re-registration / repeated projection of an existing incarnation:
+            preserve the stored generation so legitimate updates and repeated
+            projections never reset or decrease lineage.
+        """
+        from intent_kernel.rrm.generation import (
+            GENERATION_INITIAL,
+            is_valid_generation,
+        )
+
+        if existing is None:
+            incoming.generation = GENERATION_INITIAL
+        elif is_valid_generation(getattr(existing, "generation", 0)):
+            incoming.generation = existing.generation
+        else:
+            incoming.generation = GENERATION_INITIAL
+
+    def _advance_generation(self, resource: Any) -> None:
+        """Single canonical mutation authority: advance generation by exactly one.
+
+        M30.2 — material mutation advances generation exactly once. A legacy
+        resource's first material mutation establishes canonical generation 1.
+        Called ONLY by RegistryResourceManager mutation methods, under the RRM
+        lock, atomically with the state mutation it accompanies.
+        """
+        from intent_kernel.rrm.generation import (
+            GENERATION_INITIAL,
+            is_valid_generation,
+        )
+
+        gen = getattr(resource, "generation", 0)
+        resource.generation = (
+            (gen + 1) if is_valid_generation(gen) else GENERATION_INITIAL
+        )
 
     def mark_governed(self, resource_id: str, registration_id: str = "") -> None:
         """Compatibility-only marker — does NOT create canonical governed identity.
@@ -423,43 +470,61 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             if resource_type == ResourceType.PROVIDER:
                 res = self._providers.get(resource_id)
                 if res:
+                    before = res.status
                     res.status = status
-                    res.updated_at = now
+                    if res.status != before:
+                        self._advance_generation(res)
+                        res.updated_at = now
                     return True
 
             elif resource_type == ResourceType.ACCOUNT:
                 res = self._accounts.get(resource_id)
                 if res:
+                    before = res.status
                     res.status = status
-                    res.updated_at = now
+                    if res.status != before:
+                        self._advance_generation(res)
+                        res.updated_at = now
                     return True
 
             elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
                 res = self._environments.get(resource_id)
                 if res:
+                    before = res.status
                     res.status = status
-                    res.updated_at = now
+                    if res.status != before:
+                        self._advance_generation(res)
+                        res.updated_at = now
                     return True
 
             elif resource_type == ResourceType.CAPABILITY:
                 res = self.get_capability(resource_id)
                 if res:
+                    before = res.status
                     res.status = status
-                    res.updated_at = now
+                    if res.status != before:
+                        self._advance_generation(res)
+                        res.updated_at = now
                     return True
 
             elif resource_type == ResourceType.AGENT:
                 res = self._agents.get(resource_id)
                 if res:
+                    before = res.status
                     res.status = status
-                    res.updated_at = now
+                    if res.status != before:
+                        self._advance_generation(res)
+                        res.updated_at = now
                     return True
 
             elif resource_type == ResourceType.PROJECT:
                 res = self._projects.get(resource_id)
                 if res:
+                    before = res.status
                     res.status = status
-                    res.updated_at = now
+                    if res.status != before:
+                        self._advance_generation(res)
+                        res.updated_at = now
                     return True
 
             return False

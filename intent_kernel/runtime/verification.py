@@ -592,6 +592,8 @@ class VerificationGate:
                         "observed_at": obs.observed_at,
                         "matched": obs.matched,
                         "reason_code": obs.reason_code,
+                        "governed_registration_id": obs.governed_registration_id,
+                        "resource_generation": obs.resource_generation,
                     }
                     for obs in external_observations
                 ],

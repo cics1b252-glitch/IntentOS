@@ -25,6 +25,10 @@ from intent_kernel.runtime.executor_port import (
     ActionExecutorPort,
     InMemoryActionExecutor,
 )
+from intent_kernel.runtime.external_evidence import (
+    ExternalEvidenceRequirement,
+    ExternalObservationResult,
+)
 from intent_kernel.runtime.models import (
     ActionContract,
     ActionGateDecision,
@@ -106,6 +110,195 @@ class MissionRuntime:
     def get_instance(self, runtime_id: str) -> Optional[MissionRuntimeInstance]:
         """Retrieve an active or stored runtime instance."""
         return self._instances.get(runtime_id)
+
+    def _collect_completion_freshness_facts(
+        self,
+        instance: MissionRuntimeInstance,
+    ) -> List[Dict[str, Any]]:
+        """Collect and re-observe external evidence requirements for completion.
+
+        Immediately before mission completion, re-observe every external evidence
+        requirement whose verified evidence contributes to mission completion.
+        Returns a list of mechanism-only freshness facts for each requirement.
+
+        Each fact contains:
+        - node_id: str
+        - requirement: ExternalEvidenceRequirement
+        - stored_governed_registration_id: str (from evidence at verification time)
+        - stored_resource_generation: int
+        - fresh_observation: ExternalObservationResult (from re-observation now)
+        - resource_id_match: bool
+        - registration_id_match: bool
+        - generation_match: bool
+        - fresh_matched: bool
+        - passed: bool (all four conditions met)
+        - reason: str (failure reason if not passed, empty if passed)
+        """
+        facts: List[Dict[str, Any]] = []
+
+        adapter = getattr(self.verification_gate, "_external_adapter", None)
+
+        # Check if any completed node has external evidence requirements
+        has_external_requirements = False
+        for node_id in instance.completed_nodes:
+            node = instance.nodes.get(node_id)
+            if not node or not node.action_contract:
+                continue
+            external_evidence = getattr(node.action_contract, "external_evidence", None)
+            if isinstance(external_evidence, list) and len(external_evidence) > 0:
+                has_external_requirements = True
+                break
+
+        # If there are external requirements but no adapter, fail closed with observer_unavailable
+        if has_external_requirements and adapter is None:
+            for node_id in instance.completed_nodes:
+                node = instance.nodes.get(node_id)
+                if not node or not node.action_contract:
+                    continue
+                external_evidence = getattr(node.action_contract, "external_evidence", None)
+                if not isinstance(external_evidence, list) or len(external_evidence) == 0:
+                    continue
+                for requirement in external_evidence:
+                    if not isinstance(requirement, ExternalEvidenceRequirement):
+                        continue
+                    facts.append({
+                        "node_id": node_id,
+                        "requirement": requirement,
+                        "stored_governed_registration_id": "",
+                        "stored_resource_generation": -1,
+                        "fresh_observation": None,
+                        "resource_id_match": False,
+                        "registration_id_match": False,
+                        "generation_match": False,
+                        "fresh_matched": False,
+                        "passed": False,
+                        "reason": "observer_unavailable",
+                    })
+            return facts
+
+        if adapter is None:
+            return facts
+
+        for node_id in instance.completed_nodes:
+            node = instance.nodes.get(node_id)
+            if not node or not node.action_contract:
+                continue
+
+            external_evidence = getattr(node.action_contract, "external_evidence", None)
+            if not isinstance(external_evidence, list) or len(external_evidence) == 0:
+                continue
+
+            # Find the stored verification evidence for this node
+            stored_evidence_entry = None
+            for ev in instance.completion_evidence:
+                details = ev.get("details", {})
+                if (
+                    ev.get("source") == "VerificationGate"
+                    and ev.get("verified") is True
+                    and details.get("node_id") == node_id
+                ):
+                    stored_evidence_entry = ev
+                    break
+
+            if not stored_evidence_entry:
+                continue
+
+            stored_observations = stored_evidence_entry.get("details", {}).get("external_observations", [])
+
+            for req_idx, requirement in enumerate(external_evidence):
+                if not isinstance(requirement, ExternalEvidenceRequirement):
+                    continue
+
+                # Find matching stored observation (by resource_id)
+                stored_obs = None
+                for obs in stored_observations:
+                    if obs.get("resource_id") == requirement.resource_id:
+                        stored_obs = obs
+                        break
+
+                if not stored_obs:
+                    # No stored observation for this requirement - fail closed
+                    facts.append({
+                        "node_id": node_id,
+                        "requirement": requirement,
+                        "stored_governed_registration_id": "",
+                        "stored_resource_generation": -1,
+                        "fresh_observation": None,
+                        "resource_id_match": False,
+                        "registration_id_match": False,
+                        "generation_match": False,
+                        "fresh_matched": False,
+                        "passed": False,
+                        "reason": "stored_observation_missing",
+                    })
+                    continue
+
+                stored_grid = stored_obs.get("governed_registration_id", "")
+                stored_gen = stored_obs.get("resource_generation", -1)
+
+                # Re-observe fresh
+                try:
+                    fresh_obs = adapter.observe(requirement)
+                except Exception:
+                    facts.append({
+                        "node_id": node_id,
+                        "requirement": requirement,
+                        "stored_governed_registration_id": stored_grid,
+                        "stored_resource_generation": stored_gen,
+                        "fresh_observation": None,
+                        "resource_id_match": True,
+                        "registration_id_match": False,
+                        "generation_match": False,
+                        "fresh_matched": False,
+                        "passed": False,
+                        "reason": "observer_exception",
+                    })
+                    continue
+
+                # Compare identities - but prioritize observer's failure reason
+                fresh_matched = fresh_obs.matched
+
+                # Initialize comparison variables
+                resource_id_match = True
+                registration_id_match = True
+                generation_match = True
+
+                # If fresh observation itself failed, use observer's reason
+                if not fresh_matched:
+                    reason = fresh_obs.reason_code or "state_mismatch"
+                    passed = False
+                else:
+                    # Fresh observation succeeded, now compare identities
+                    resource_id_match = (fresh_obs.resource_id == requirement.resource_id)
+                    registration_id_match = (fresh_obs.governed_registration_id == stored_grid)
+                    generation_match = (fresh_obs.resource_generation == stored_gen)
+
+                    passed = resource_id_match and registration_id_match and generation_match
+
+                    reason = ""
+                    if not passed:
+                        if not resource_id_match:
+                            reason = "resource_id_mismatch"
+                        elif not registration_id_match:
+                            reason = "governed_registration_id_mismatch"
+                        elif not generation_match:
+                            reason = "resource_generation_mismatch"
+
+                facts.append({
+                    "node_id": node_id,
+                    "requirement": requirement,
+                    "stored_governed_registration_id": stored_grid,
+                    "stored_resource_generation": stored_gen,
+                    "fresh_observation": fresh_obs,
+                    "resource_id_match": resource_id_match,
+                    "registration_id_match": registration_id_match,
+                    "generation_match": generation_match,
+                    "fresh_matched": fresh_matched,
+                    "passed": passed,
+                    "reason": reason,
+                })
+
+        return facts
 
     async def run_mission(
         self,
@@ -288,11 +481,15 @@ class MissionRuntime:
             return instance
 
         if len(instance.completed_nodes) == len(instance.nodes):
+            # M30.3: Collect freshness facts immediately before completion decision
+            freshness_facts = self._collect_completion_freshness_facts(instance)
+
             completion_decision = await self.completion_gate.decide(
                 instance=instance,
                 final_output=final_output_candidate,
                 output_contract=output_contract,
                 constraints=mission_constraints,
+                freshness_facts=freshness_facts,
             )
 
             instance.completion_evidence.extend(

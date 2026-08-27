@@ -74,6 +74,7 @@ class MissionCompletionDecision:
         repr=False,
         compare=False,
     )
+    freshness_facts: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     @property
     def evidence_complete(self) -> bool:
@@ -615,6 +616,7 @@ class MissionCompletionGate:
         final_output: Optional[str] = None,
         output_contract: Optional[OutputContract] = None,
         constraints: Optional[List[MissionConstraint]] = None,
+        freshness_facts: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[bool, List[CompletionEvidence], List[str]]:
         """Evaluate if a mission is allowed to transition to COMPLETED."""
         decision = await self.decide(
@@ -622,6 +624,7 @@ class MissionCompletionGate:
             final_output=final_output,
             output_contract=output_contract,
             constraints=constraints,
+            freshness_facts=freshness_facts,
         )
         return (
             decision.allowed,
@@ -638,12 +641,31 @@ class MissionCompletionGate:
         final_output: Optional[str] = None,
         output_contract: Optional[OutputContract] = None,
         constraints: Optional[List[MissionConstraint]] = None,
+        freshness_facts: Optional[List[Dict[str, Any]]] = None,
     ) -> MissionCompletionDecision:
-        """Produce the only decision eligible to complete a canonical Mission."""
+        """Produce the only decision eligible to complete a canonical Mission.
+
+        M30.3: freshness_facts are mechanism-only freshness revalidation results
+        collected immediately before completion by MissionRuntime using the
+        canonical RRMEvidenceAdapter. The gate consumes these facts but does
+        not perform observation itself.
+        """
         evidence_list: List[CompletionEvidence] = []
         violations: List[str] = []
         execution_evidence: List[dict[str, Any]] = []
         verification_evidence: List[dict[str, Any]] = []
+
+        # M30.3: Evaluate freshness facts if provided (mechanism-only consumption)
+        if freshness_facts is not None:
+            if len(freshness_facts) > 0:
+                for fact in freshness_facts:
+                    if not fact.get("passed", False):
+                        reason = fact.get("reason", "freshness_check_failed")
+                        node_id = fact.get("node_id", "unknown")
+                        violations.append(
+                            f"Freshness validation failed for node '{node_id}': {reason}"
+                        )
+            # If freshness_facts is empty list, no external evidence was required - allowed
 
         if not instance.nodes:
             violations.append("Mission has no executable nodes or execution evidence.")
@@ -705,6 +727,7 @@ class MissionCompletionGate:
                 "mission_id": instance.mission_id,
                 "violations_count": len(violations),
                 "violations": violations,
+                "freshness_facts": freshness_facts if freshness_facts is not None else [],
             },
         )
         evidence_list.append(mission_evidence)
@@ -718,4 +741,5 @@ class MissionCompletionGate:
             completion_evidence=serialized_completion,
             violations=tuple(violations),
             _authority_token=_COMPLETION_AUTHORITY_TOKEN,
+            freshness_facts=tuple(freshness_facts) if freshness_facts is not None else (),
         )

@@ -443,13 +443,18 @@ class TestVerificationGateComposition(unittest.TestCase):
         )
         self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
 
-    def test_d6_no_adapter_no_crash(self):
+    def test_d6_no_adapter_fails_closed(self):
+        # M29.2: required external evidence with NO observer is VERIFIED_FAILURE,
+        # never a silent skip to success. (Corrected from M28.2 VERIFIED_SUCCESS.)
         node = _make_echo_node(external_evidence=[_make_requirement()])
         gate = VerificationGate()  # No external adapter
         status, evidence = asyncio.get_event_loop().run_until_complete(
             gate.evaluate_node(node, node.action_contract, "A")
         )
-        self.assertEqual(status, VerificationStatus.VERIFIED_SUCCESS)
+        self.assertEqual(status, VerificationStatus.VERIFIED_FAILURE)
+        self.assertTrue(evidence.details["external_evidence_required"])
+        self.assertFalse(evidence.details["external_observer_available"])
+        self.assertEqual(evidence.details["external_failure_reason"], "observer_missing")
 
     def test_d7_invalid_requirement_contract_failure(self):
         req = ExternalEvidenceRequirement(

@@ -60,11 +60,14 @@ class MissionRuntime:
         rrm_service: Optional[Any] = None,
         constitution: Optional[Any] = None,
         mission_engine: Optional[Any] = None,
+        external_evidence_adapter: Optional[Any] = None,
     ) -> None:
         self.executor = executor or InMemoryActionExecutor()
         self.checkpoint_repo = checkpoint_repo or InMemoryCheckpointRepository()
         self.action_gate = ActionGate(rrm_service=rrm_service, constitution=constitution)
-        self.verification_gate = VerificationGate()
+        self.verification_gate = VerificationGate(
+            external_adapter=external_evidence_adapter
+        )
         self.completion_gate = MissionCompletionGate()
         self.mission_engine = mission_engine
 

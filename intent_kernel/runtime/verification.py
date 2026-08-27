@@ -470,29 +470,66 @@ class VerificationGate:
             else:
                 status = primary_status
 
-        # --- M28.2: External evidence verification (ALL_REQUIRED) ---
+        # --- M28.2/M29.2: External evidence verification (ALL_REQUIRED, fail-closed) ---
         external_evidence_hash: str | None = None
         external_observations: list = []
+        external_observer_available: bool = False
+        external_failure_reason: str | None = None
         has_external = isinstance(getattr(action, "external_evidence", None), list) and len(action.external_evidence) > 0
 
-        if has_external and self._external_adapter is not None and status == VerificationStatus.VERIFIED_SUCCESS:
+        if has_external:
             from intent_kernel.runtime.external_evidence import (
                 ExternalEvidenceRequirementValidator,
+                ExternalObservationResult,
                 external_evidence_contract_hash,
             )
 
             ext_validator = ExternalEvidenceRequirementValidator()
             ext_validation = ext_validator.validate(action.external_evidence)
             if not ext_validation.valid:
+                # M28.2: unsupported evidence contract fails closed.
                 status = VerificationStatus.VERIFIED_FAILURE
                 verifier_name = "RRMEvidenceAdapter"
+                external_failure_reason = "unsupported_evidence_type"
+            elif self._external_adapter is None:
+                # M29-01: required external evidence with NO observer must never
+                # silently skip verification. REQUIRED + MISSING OBSERVER = FAILURE.
+                status = VerificationStatus.VERIFIED_FAILURE
+                verifier_name = "RRMEvidenceAdapter"
+                external_failure_reason = "observer_missing"
             else:
+                external_observer_available = True
                 external_evidence_hash = external_evidence_contract_hash(action.external_evidence)
                 all_matched = True
                 for req in action.external_evidence:
-                    obs = self._external_adapter.observe(req)
+                    try:
+                        obs = self._external_adapter.observe(req)
+                    except Exception:
+                        # M29-02: observer exception fails closed. Never crash
+                        # upward as verification success; never silently skip.
+                        status = VerificationStatus.VERIFIED_FAILURE
+                        verifier_name = "RRMEvidenceAdapter"
+                        external_failure_reason = "observer_exception"
+                        all_matched = False
+                        break
+                    if obs is None or not isinstance(obs, ExternalObservationResult):
+                        # M29-03 E/F: adapter returned None or wrong object type.
+                        status = VerificationStatus.VERIFIED_FAILURE
+                        verifier_name = "RRMEvidenceAdapter"
+                        external_failure_reason = "malformed_observation"
+                        all_matched = False
+                        break
                     external_observations.append(obs)
+                    if not isinstance(obs.matched, bool):
+                        # M29-03 H: matched must be a real bool.
+                        status = VerificationStatus.VERIFIED_FAILURE
+                        verifier_name = "RRMEvidenceAdapter"
+                        external_failure_reason = "malformed_observation"
+                        all_matched = False
+                        break
                     if not obs.matched:
+                        # M29-03 I: observation did not match.
+                        external_failure_reason = obs.reason_code or "state_mismatch"
                         all_matched = False
                         break
                 if not all_matched:
@@ -541,6 +578,9 @@ class VerificationGate:
                 "rule_set_hash": semantic_hash,
                 "semantic_rule_count": semantic_rule_count,
                 "semantic_rule_outcomes": semantic_outcomes,
+                "external_evidence_required": has_external,
+                "external_observer_available": external_observer_available,
+                "external_failure_reason": external_failure_reason,
                 "external_evidence_contract_hash": external_evidence_hash,
                 "external_observations": [
                     {

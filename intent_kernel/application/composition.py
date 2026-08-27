@@ -75,7 +75,7 @@ from intent_kernel.promotion.promotion_service import CanonicalResourcePromotion
 from intent_kernel.activation.service import CanonicalResourceActivationService
 from intent_kernel.rrm.binding import CanonicalResourceBindingAuthority
 from intent_kernel.rrm.models import CapabilityResource, ResourceOrigin, AvailabilitySource
-from intent_kernel.runtime import MissionRuntime
+from intent_kernel.runtime import MissionRuntime, RRMEvidenceAdapter
 from intent_kernel.tools.authorization import ToolAuthorizationGate
 
 LEGACY_ADAPTERS = (
@@ -121,6 +121,7 @@ class ApplicationComponents:
     conversation_content_service: CanonicalConversationContentService
     tool_authorization_gate: ToolAuthorizationGate
     mission_runtime: MissionRuntime
+    external_evidence_adapter: Any
     confirmation_service: CanonicalConfirmationService
     resource_discovery_service: CanonicalResourceDiscoveryService
     resource_promotion_service: CanonicalResourcePromotionService
@@ -351,10 +352,12 @@ class KernelBuilder:
             mission_engine,
             tool_authorization_gate,
         )
+        external_evidence_adapter = RRMEvidenceAdapter(resource_manager)
         mission_runtime = MissionRuntime(
             rrm_service=resource_manager,
             constitution=constitution_engine,
             mission_engine=mission_engine,
+            external_evidence_adapter=external_evidence_adapter,
         )
         confirmation_service = CanonicalConfirmationService(
             mission_engine,
@@ -444,6 +447,7 @@ class KernelBuilder:
             conversation_content_service=conversation_content_service,
             tool_authorization_gate=tool_authorization_gate,
             mission_runtime=mission_runtime,
+            external_evidence_adapter=external_evidence_adapter,
             confirmation_service=confirmation_service,
             resource_discovery_service=resource_discovery_service,
             resource_promotion_service=resource_promotion_service,

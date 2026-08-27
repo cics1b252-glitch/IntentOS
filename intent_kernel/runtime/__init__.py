@@ -42,6 +42,12 @@ from intent_kernel.runtime.semantic_verifier import (
     DeterministicRuleVerifier,
     rule_set_hash,
 )
+from intent_kernel.runtime.external_evidence import (
+    ExternalEvidenceRequirement,
+    ExternalObservationResult,
+    RRMEvidenceAdapter,
+    external_evidence_contract_hash,
+)
 
 __all__ = [
     "MissionRuntimeState",
@@ -72,4 +78,8 @@ __all__ = [
     "DeterministicRuleVerifier",
     "rule_set_hash",
     "MissionRuntime",
+    "ExternalEvidenceRequirement",
+    "ExternalObservationResult",
+    "RRMEvidenceAdapter",
+    "external_evidence_contract_hash",
 ]

@@ -521,6 +521,8 @@ class MissionRuntime:
         - For STRUCTURAL evidence: evidence contract_hash matches current contract
         - For SEMANTIC evidence: evidence rule_set_hash matches current rules
         - For STRUCTURAL+SEMANTIC: both hashes must match
+        - M28.2.1: Mutable PROVIDER_RESOURCE_STATE evidence never restores
+          VERIFIED_SUCCESS — stored observation is historical only, not fresh.
         """
         for ev in evidence_list:
             details = ev.get("details", {})
@@ -578,6 +580,32 @@ class MissionRuntime:
                 elif ev_semantic_hash is not None:
                     # Evidence has semantic hash but current contract doesn't — mismatch
                     return False
+            # M28.2: External evidence contract hash must match current contract
+            if current_action_contract is not None:
+                current_external = getattr(current_action_contract, "external_evidence", None)
+                has_current_external = isinstance(current_external, list) and len(current_external) > 0
+                ev_ext_hash = details.get("external_evidence_contract_hash")
+                if has_current_external:
+                    if ev_ext_hash is None:
+                        return False
+                    from intent_kernel.runtime.external_evidence import external_evidence_contract_hash
+                    current_ext_hash = external_evidence_contract_hash(current_external)
+                    if ev_ext_hash != current_ext_hash:
+                        return False
+                elif ev_ext_hash is not None:
+                    return False
+            # M28.2.1: Mutable PROVIDER_RESOURCE_STATE evidence never restores
+            # VERIFIED_SUCCESS. The external_evidence_contract_hash binds the
+            # evidence to the REQUIREMENT CONTRACT, not to the current observed
+            # RRM state. Because RRM has no canonical generation/version identity,
+            # a stored observation is historical only and cannot prove freshness.
+            if current_action_contract is not None:
+                current_external = getattr(current_action_contract, "external_evidence", None)
+                if isinstance(current_external, list) and len(current_external) > 0:
+                    from intent_kernel.runtime.external_evidence import ExternalEvidenceRequirement
+                    for req in current_external:
+                        if isinstance(req, ExternalEvidenceRequirement) and req.evidence_type == "PROVIDER_RESOURCE_STATE":
+                            return False
             return True
         return False
 

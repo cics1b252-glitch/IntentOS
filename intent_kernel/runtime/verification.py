@@ -402,10 +402,15 @@ _PARSE_FAILED = object()
 class VerificationGate:
     """Post-execution validation gate for individual action nodes."""
 
-    def __init__(self, verifier: Optional[ActionVerificationPort] = None) -> None:
+    def __init__(
+        self,
+        verifier: Optional[ActionVerificationPort] = None,
+        external_adapter: Optional[Any] = None,
+    ) -> None:
         self._exact_verifier = verifier or InMemoryActionVerificationAdapter()
         self._structural_verifier = DeterministicStructuralVerifier()
         self._rule_verifier = DeterministicRuleVerifier()
+        self._external_adapter = external_adapter  # M28.2
 
     async def evaluate_node(
         self,
@@ -420,6 +425,7 @@ class VerificationGate:
         - STRUCTURAL + no semantic_rules → STRUCTURAL only
         - EXACT/None + semantic_rules → semantic rules required
         - STRUCTURAL + semantic_rules → STRUCTURAL AND semantic rules required
+        - ALL external_evidence → ALL_REQUIRED (all must succeed, no scoring/voting)
 
         Failure dominates. Both required and both success → VERIFIED_SUCCESS.
         """
@@ -464,6 +470,35 @@ class VerificationGate:
             else:
                 status = primary_status
 
+        # --- M28.2: External evidence verification (ALL_REQUIRED) ---
+        external_evidence_hash: str | None = None
+        external_observations: list = []
+        has_external = isinstance(getattr(action, "external_evidence", None), list) and len(action.external_evidence) > 0
+
+        if has_external and self._external_adapter is not None and status == VerificationStatus.VERIFIED_SUCCESS:
+            from intent_kernel.runtime.external_evidence import (
+                ExternalEvidenceRequirementValidator,
+                external_evidence_contract_hash,
+            )
+
+            ext_validator = ExternalEvidenceRequirementValidator()
+            ext_validation = ext_validator.validate(action.external_evidence)
+            if not ext_validation.valid:
+                status = VerificationStatus.VERIFIED_FAILURE
+                verifier_name = "RRMEvidenceAdapter"
+            else:
+                external_evidence_hash = external_evidence_contract_hash(action.external_evidence)
+                all_matched = True
+                for req in action.external_evidence:
+                    obs = self._external_adapter.observe(req)
+                    external_observations.append(obs)
+                    if not obs.matched:
+                        all_matched = False
+                        break
+                if not all_matched:
+                    status = VerificationStatus.VERIFIED_FAILURE
+                    verifier_name = "RRMEvidenceAdapter"
+
         is_verified = status == VerificationStatus.VERIFIED_SUCCESS
         contract_hash: str | None = None
         if verification_type == "STRUCTURAL" and action.verification_schema is not None:
@@ -506,6 +541,20 @@ class VerificationGate:
                 "rule_set_hash": semantic_hash,
                 "semantic_rule_count": semantic_rule_count,
                 "semantic_rule_outcomes": semantic_outcomes,
+                "external_evidence_contract_hash": external_evidence_hash,
+                "external_observations": [
+                    {
+                        "evidence_type": obs.evidence_type,
+                        "resource_id": obs.resource_id,
+                        "observer_id": obs.observer_id,
+                        "observer_version": obs.observer_version,
+                        "observed_state": obs.observed_state,
+                        "observed_at": obs.observed_at,
+                        "matched": obs.matched,
+                        "reason_code": obs.reason_code,
+                    }
+                    for obs in external_observations
+                ],
             },
         )
 

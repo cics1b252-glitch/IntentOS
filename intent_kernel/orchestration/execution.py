@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
 
-from intent_kernel.application.mission_engine import MissionEngine
+# MissionEngine imported lazily to avoid circular import
+# with application/composition -> orchestration -> execution
 from intent_kernel.contracts import (
     AgentLimits,
     AgentRequest,
@@ -32,7 +33,11 @@ from intent_kernel.orchestration.registry import (
 )
 from intent_kernel.pkb import KnowledgePipeline
 from intent_kernel.providers import ProviderManager
+# CanonicalResourceBindingAuthority imported at top level
 from intent_kernel.rrm.binding import CanonicalResourceBindingAuthority
+
+# ExecutionPrecondition and PreconditionKind imported lazily to avoid circular import
+# with orchestration/__init__.py -> orchestration/execution.py -> rrm/binding.py -> orchestration/registry
 
 
 @dataclass(slots=True)
@@ -54,7 +59,7 @@ class CapabilityExecutionService:
     def __init__(
         self,
         *,
-        mission_engine: MissionEngine,
+        mission_engine: "MissionEngine",
         constitution: ConstitutionEngine,
         capability_router: CapabilityRouter,
         registry: CanonicalCapabilityRegistry,
@@ -196,12 +201,42 @@ class CapabilityExecutionService:
             )
             return replay
 
+        # M31.2A: Structural revalidation of execution preconditions at dispatch.
+        # This verifies the attached precondition artifact is structurally identical
+        # to the authorized one. It does NOT claim atomic resource freshness enforcement.
+        if not self._verify_precondition_identity(resource_decision, revalidation):
+            return self._error(
+                capability,
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                metadata={
+                    "resource_resolution": resource_decision.to_dict(),
+                    "resource_revalidation": revalidation.to_dict(),
+                    "precondition_identity_mismatch": True,
+                },
+            )
+
+        cache_key = (str(mission.id), capability, idempotency_key)
+        cached = await self.idempotency_store.get(cache_key)
+        if cached is not None:
+            replay = cached
+            replay.result.metadata["idempotent_replay"] = True
+            await self._audit(
+                mission,
+                registration,
+                replay.result,
+                verdict,
+                0.0,
+                idempotency_key,
+            )
+            return replay
+
         started = perf_counter()
         result = await self._dispatch(
             mission,
             registration,
             payload or {},
             context or {},
+            execution_preconditions=resource_decision.execution_preconditions,
         )
         duration_ms = (perf_counter() - started) * 1000
         event_ids = await self._propose_agent_knowledge(
@@ -223,6 +258,10 @@ class CapabilityExecutionService:
         )
         result.metadata.setdefault(
             "resource_revalidation", revalidation.to_dict()
+        )
+        result.metadata.setdefault(
+            "execution_preconditions",
+            [pc.to_dict() for pc in resource_decision.execution_preconditions],
         )
         outcome = CapabilityExecutionOutcome(
             result=result,
@@ -247,7 +286,11 @@ class CapabilityExecutionService:
         registration: Any,
         payload: dict[str, Any],
         context: dict[str, Any],
+        execution_preconditions: tuple[ExecutionPrecondition, ...] = (),
     ) -> CapabilityResult:
+        # Lazy import to avoid circular import
+        from intent_kernel.rrm.binding import ExecutionPrecondition
+
         if registration.executor_kind is ExecutorKind.CORE_APP:
             return await self.capability_router.execute_exact(
                 mission,
@@ -369,6 +412,62 @@ class CapabilityExecutionService:
             },
             correlation_id=mission.context.correlation_id,
         )
+
+    @staticmethod
+    def _error(
+        capability: str,
+        code: ErrorCode,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> CapabilityExecutionOutcome:
+        return CapabilityExecutionOutcome(
+            result=CapabilityResult(
+                capability=capability,
+                success=False,
+                error_code=code,
+                metadata=dict(metadata or {}),
+            )
+        )
+
+    def _verify_precondition_identity(
+        self,
+        decision: Any,  # ResourceBindingDecision
+        revalidation: Any,  # ResourceBindingRevalidation
+    ) -> bool:
+        """M31.2A: Structural revalidation of execution preconditions at dispatch.
+
+        Verifies that the preconditions attached to the binding decision are
+        structurally identical to those in the revalidation. This is a structural
+        identity check only — it does NOT claim atomic resource freshness enforcement.
+
+        Returns True if preconditions match (or both are empty), False if mismatch.
+        """
+        # Lazy import to avoid circular import
+        from intent_kernel.rrm.binding import PreconditionKind
+
+        decision_preconditions = getattr(decision, "execution_preconditions", ())
+        revalidation_preconditions = getattr(revalidation, "execution_preconditions", ())
+
+        # Both empty = compatible (no precondition claim)
+        if not decision_preconditions and not revalidation_preconditions:
+            return True
+
+        # Length mismatch = structural divergence
+        if len(decision_preconditions) != len(revalidation_preconditions):
+            return False
+
+        # Compare each precondition structurally (kind, resource_id, governed_registration_id, expected_generation)
+        for dp, rp in zip(decision_preconditions, revalidation_preconditions):
+            if dp.kind != rp.kind:
+                return False
+            if dp.resource_id != rp.resource_id:
+                return False
+            if dp.governed_registration_id != rp.governed_registration_id:
+                return False
+            if dp.expected_generation != rp.expected_generation:
+                return False
+
+        return True
 
     @staticmethod
     def _error(

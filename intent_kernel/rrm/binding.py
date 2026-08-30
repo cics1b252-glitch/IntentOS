@@ -3,15 +3,68 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from enum import Enum
 from typing import Any
 
-from intent_kernel.orchestration.registry import CapabilityRegistration, ExecutorKind
+from intent_kernel.rrm.generation import LEGACY_UNVERSIONED, GENERATION_INITIAL, is_valid_generation
+
+
+class PreconditionKind(str, Enum):
+    """Kind of execution precondition."""
+    EXISTING_RESOURCE = "existing_resource"
+    EXPECTED_ABSENCE = "expected_absence"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPrecondition:
+    """Immutable canonical execution precondition contract.
+
+    Represents a resource precondition such as:
+    - Existing resource must match governed_registration_id and generation
+    - Expected absence for CREATE operations
+
+    Does NOT contain executable objects, verification status, authority tokens,
+    or mutable RRM references. Immutable and deterministic.
+    """
+
+    kind: PreconditionKind
+    resource_id: str
+    governed_registration_id: str = ""
+    expected_generation: int = 0
+
+    def __post_init__(self) -> None:
+        # Fail closed on malformed preconditions at construction time
+        if not self.resource_id:
+            raise ValueError("ExecutionPrecondition.resource_id must not be empty")
+        if self.kind is PreconditionKind.EXISTING_RESOURCE:
+            if not self.governed_registration_id:
+                raise ValueError("EXISTING_RESOURCE precondition requires governed_registration_id")
+            if not is_valid_generation(self.expected_generation):
+                raise ValueError(
+                    f"EXISTING_RESOURCE precondition requires valid expected_generation (>= {GENERATION_INITIAL}), got {self.expected_generation}"
+                )
+        elif self.kind is PreconditionKind.EXPECTED_ABSENCE:
+            # Absence is represented explicitly, not as generation 0
+            if self.governed_registration_id:
+                raise ValueError("EXPECTED_ABSENCE precondition must not have governed_registration_id")
+            if self.expected_generation != 0:
+                raise ValueError("EXPECTED_ABSENCE precondition must have expected_generation = 0")
+        else:
+            raise ValueError(f"Unknown precondition kind: {self.kind}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind.value,
+            "resource_id": self.resource_id,
+            "governed_registration_id": self.governed_registration_id,
+            "expected_generation": self.expected_generation,
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class ResourceBindingDecision:
     capability: str
-    registration: CapabilityRegistration | None
+    registration: Any | None  # CapabilityRegistration | None (avoid forward ref issues)
     available: bool
     reason: str
     registered: bool = False
@@ -20,6 +73,7 @@ class ResourceBindingDecision:
     selected_binding: str | None = None
     authority: str = "RRM"
     binding_identity: str = ""
+    execution_preconditions: tuple[ExecutionPrecondition, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -32,6 +86,7 @@ class ResourceBindingDecision:
             "selected_binding": self.selected_binding,
             "authority": self.authority,
             "binding_identity": self.binding_identity,
+            "execution_preconditions": [pc.to_dict() for pc in self.execution_preconditions],
         }
 
 
@@ -45,12 +100,23 @@ class ResourceBindingRevalidation:
     reason: str
     authority: str = "RRM"
     binding_identity: str = ""
+    execution_preconditions: tuple[ExecutionPrecondition, ...] = ()
 
     def __bool__(self) -> bool:
         return self.valid
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "capability": self.capability,
+            "valid": self.valid,
+            "binding_registered": self.binding_registered,
+            "rrm_eligible": self.rrm_eligible,
+            "binding_healthy": self.binding_healthy,
+            "reason": self.reason,
+            "authority": self.authority,
+            "binding_identity": self.binding_identity,
+            "execution_preconditions": [pc.to_dict() for pc in self.execution_preconditions],
+        }
 
 
 class CanonicalResourceBindingAuthority:
@@ -63,8 +129,11 @@ class CanonicalResourceBindingAuthority:
         self.last_revalidation: ResourceBindingRevalidation | None = None
 
     async def resolve(
-        self, capability: str, *, preferred_kind: ExecutorKind | None = None
+        self, capability: str, *, preferred_kind: Any | None = None
     ) -> ResourceBindingDecision:
+        # Lazy import to avoid circular import
+        from intent_kernel.orchestration.registry import ExecutorKind
+
         entries = sorted(
             self.registry.discover(capability, executor_kind=preferred_kind),
             key=lambda item: (item.executor_kind.value, item.executor_id),
@@ -79,6 +148,7 @@ class CanonicalResourceBindingAuthority:
         for entry in eligible:
             if not await self.registry.available(entry):
                 continue
+            preconditions = self._build_execution_preconditions(entry)
             decision = ResourceBindingDecision(
                 capability=capability,
                 registration=entry,
@@ -89,6 +159,7 @@ class CanonicalResourceBindingAuthority:
                 binding_healthy=True,
                 selected_binding=f"{entry.executor_kind.value}:{entry.executor_id}",
                 binding_identity=entry.binding_identity,
+                execution_preconditions=tuple(preconditions),
             )
             self.last_resolution = decision
             return decision
@@ -150,11 +221,64 @@ class CanonicalResourceBindingAuthority:
                 if registration is not None
                 else decision.binding_identity
             ),
+            execution_preconditions=decision.execution_preconditions,
         )
         self.last_revalidation = result
         return result
 
-    def _rrm_eligible(self, entry: CapabilityRegistration) -> bool:
+    def _build_execution_preconditions(self, entry: CapabilityRegistration) -> list[ExecutionPrecondition]:
+        """Build execution preconditions for the given binding entry.
+
+        Derives preconditions from the canonical RRM resources that the binding
+        involves. For provider bindings, this includes the provider resource's
+        governed_registration_id and generation. For agent bindings, the agent
+        resource. For core apps, the capability resource.
+        """
+        # Lazy import to avoid circular import
+        from intent_kernel.orchestration.registry import ExecutorKind
+
+        preconditions: list[ExecutionPrecondition] = []
+
+        if entry.executor_kind is ExecutorKind.PROVIDER:
+            provider = self.rrm.get_provider(entry.executor_id)
+            if provider is not None and is_valid_generation(getattr(provider, "generation", 0)):
+                preconditions.append(
+                    ExecutionPrecondition(
+                        kind=PreconditionKind.EXISTING_RESOURCE,
+                        resource_id=entry.executor_id,
+                        governed_registration_id=provider.governed_registration_id or "",
+                        expected_generation=provider.generation,
+                    )
+                )
+        elif entry.executor_kind is ExecutorKind.AGENT:
+            agent = self.rrm.get_agent(entry.executor_id)
+            if agent is not None and is_valid_generation(getattr(agent, "generation", 0)):
+                preconditions.append(
+                    ExecutionPrecondition(
+                        kind=PreconditionKind.EXISTING_RESOURCE,
+                        resource_id=entry.executor_id,
+                        governed_registration_id=agent.governed_registration_id or "",
+                        expected_generation=agent.generation,
+                    )
+                )
+        elif entry.executor_kind is ExecutorKind.CORE_APP:
+            capability_resource = self.rrm.get_capability(entry.capability.name)
+            if capability_resource is not None and is_valid_generation(getattr(capability_resource, "generation", 0)):
+                preconditions.append(
+                    ExecutionPrecondition(
+                        kind=PreconditionKind.EXISTING_RESOURCE,
+                        resource_id=entry.capability.name,
+                        governed_registration_id=capability_resource.governed_registration_id or "",
+                        expected_generation=capability_resource.generation,
+                    )
+                )
+
+        return preconditions
+
+    def _rrm_eligible(self, entry: Any) -> bool:
+        # Lazy import to avoid circular import
+        from intent_kernel.orchestration.registry import ExecutorKind
+
         if entry.executor_kind is ExecutorKind.CORE_APP:
             resource = self.rrm.get_capability(entry.capability.name)
             return bool(

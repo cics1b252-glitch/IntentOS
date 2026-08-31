@@ -23,6 +23,11 @@ from typing import Any, Dict, Optional
 from unittest.mock import MagicMock
 
 from intent_kernel.application.composition import ApplicationFactory
+from intent_kernel.rrm.models import (
+    ProviderResource,
+    ProviderSnapshot,
+    ResourceStatus,
+)
 from intent_kernel.runtime.models import (
     ActionContract,
     RuntimeNode,
@@ -170,18 +175,27 @@ class TestProductionWiring(unittest.TestCase):
         self.assertIs(comps.mission_runtime.action_gate._rrm, comps.resource_manager)  # type: ignore[attr-defined]
 
         # The observer reads the resource the CANONICAL RRM returns for a
-        # provider registered only after composition — proving live identity,
-        # not a snapshot.
+        # provider registered only after composition.
+        # M31.2B-0: public get_provider returns immutable snapshot;
+        # external_evidence_adapter uses internal method to observe live state.
         new_provider = ProviderResource(
             provider_id="live-id", name="Live", status=ResourceStatus.ACTIVE,
         )
         comps.resource_manager.register_provider(new_provider)
+        
+        # Public get_provider returns immutable snapshot
         canons = comps.resource_manager.get_provider("live-id")
+        self.assertIsInstance(canons, ProviderSnapshot)
+        self.assertEqual(canons.provider_id, "live-id")
+        self.assertEqual(canons.generation, 1)
+        
+        # External evidence adapter uses internal method to observe live state
         observed = comps.external_evidence_adapter.observe(
             _requirement("live-id", {"status": "active", "is_eligible": True})
         )
-        self.assertIs(canons, new_provider)
         self.assertTrue(observed.matched)
+        self.assertEqual(observed.resource_generation, 1)
+        self.assertEqual(observed.governed_registration_id, "")
 
 
 # ===========================================================================

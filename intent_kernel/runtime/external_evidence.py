@@ -150,19 +150,6 @@ class RRMEvidenceAdapter:
     def __init__(self, rrm: ResourceQueryReadPort) -> None:
         self._rrm = rrm
 
-    def _get_provider_canonical(self, provider_id: str) -> Optional[Any]:
-        """Get the canonical mutable provider resource for observation.
-        
-        Uses the internal _get_provider_for_mutation method if available
-        (which returns the live canonical object), otherwise falls back to
-        the public get_provider which returns an immutable snapshot.
-        """
-        # Try to use the internal method that returns the canonical mutable object
-        if hasattr(self._rrm, '_get_provider_for_mutation'):
-            return self._rrm._get_provider_for_mutation(provider_id)
-        # Fallback to public method (returns snapshot)
-        return self._rrm.get_provider(provider_id)
-
     def observe(
         self, requirement: ExternalEvidenceRequirement,
     ) -> ExternalObservationResult:
@@ -195,7 +182,7 @@ class RRMEvidenceAdapter:
         if requirement.evidence_type != "PROVIDER_RESOURCE_STATE":
             return _result({}, False, "unsupported_evidence_type")
 
-        resource = self._get_provider_canonical(requirement.resource_id)
+        resource = self._rrm.get_provider(requirement.resource_id)
         if resource is None:
             tombstones = getattr(self._rrm, "_tombstones", None)
             if tombstones is not None and requirement.resource_id in tombstones:

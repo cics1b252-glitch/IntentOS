@@ -459,7 +459,9 @@ class TestRRMHardeningAndProvenance(unittest.TestCase):
         )
         self.rrm.register_provider(p)
         self.assertTrue(p.is_eligible)
-        self.assertIn(p, self.rrm.list_providers(only_eligible=True))
+        # list_providers now returns ProviderSnapshot objects; verify the snapshot exists
+        snapshots = self.rrm.list_providers(only_eligible=True)
+        self.assertTrue(any(s.provider_id == p.provider_id for s in snapshots))
 
     def test_h_adapter_does_not_deliver_templates_to_cor(self):
         """Rule H: Adapter translates only eligible resources to COR."""

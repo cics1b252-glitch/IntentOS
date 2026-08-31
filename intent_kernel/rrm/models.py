@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from types import MappingProxyType
+from typing import Any, Dict, List, Optional, Set, Mapping
 from uuid import uuid4
 
 from intent_kernel.rrm.generation import LEGACY_UNVERSIONED, normalize_for_restore
@@ -124,6 +125,33 @@ class ProviderResource:
         res["availability_source"] = self.availability_source.value if isinstance(self.availability_source, Enum) else str(self.availability_source)
         return res
 
+    def to_snapshot(self) -> 'ProviderSnapshot':
+        """Create an immutable snapshot of this provider resource."""
+        return ProviderSnapshot(
+            provider_id=self.provider_id,
+            name=self.name,
+            reasoning_score=self.reasoning_score,
+            tool_use_support=self.tool_use_support,
+            context_window=self.context_window,
+            cost_per_1k_tokens=self.cost_per_1k_tokens,
+            privacy_tier=self.privacy_tier,
+            availability=self.availability,
+            multimodal=self.multimodal,
+            status=_to_status_str(self.status),
+            resource_origin=_to_resource_origin_str(self.resource_origin),
+            availability_source=_to_availability_source_str(self.availability_source),
+            is_template=self.is_template,
+            is_configured=self.is_configured,
+            has_active_account=self.has_active_account,
+            endpoint_url=self.endpoint_url,
+            governed_registration_id=self.governed_registration_id,
+            generation=self.generation,
+            metadata=_freeze_mapping(self.metadata),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            is_eligible=self.is_eligible,
+        )
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ProviderResource:
         d = dict(data)
@@ -178,6 +206,32 @@ class AccountResource:
         res["availability_source"] = self.availability_source.value if isinstance(self.availability_source, Enum) else str(self.availability_source)
         return res
 
+    def to_snapshot(self) -> 'AccountSnapshot':
+        """Create an immutable snapshot of this account resource."""
+        return AccountSnapshot(
+            account_id=self.account_id,
+            provider_id=self.provider_id,
+            name=self.name,
+            quota_remaining=self.quota_remaining,
+            rate_limit_rpm=self.rate_limit_rpm,
+            rate_limit_tpm=self.rate_limit_tpm,
+            priority=self.priority,
+            cost_multiplier=self.cost_multiplier,
+            status=_to_status_str(self.status),
+            secret_reference=self.secret_reference,
+            resource_origin=_to_resource_origin_str(self.resource_origin),
+            availability_source=_to_availability_source_str(self.availability_source),
+            is_template=self.is_template,
+            is_configured=self.is_configured,
+            allowed_policies=_freeze_list(self.allowed_policies),
+            governed_registration_id=self.governed_registration_id,
+            generation=self.generation,
+            metadata=_freeze_mapping(self.metadata),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            is_eligible=self.is_eligible,
+        )
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AccountResource:
         d = dict(data)
@@ -231,6 +285,31 @@ class ExecutionEnvironmentResource:
         res["resource_origin"] = self.resource_origin.value if isinstance(self.resource_origin, Enum) else str(self.resource_origin)
         res["availability_source"] = self.availability_source.value if isinstance(self.availability_source, Enum) else str(self.availability_source)
         return res
+
+    def to_snapshot(self) -> 'ExecutionEnvironmentSnapshot':
+        """Create an immutable snapshot of this execution environment resource."""
+        return ExecutionEnvironmentSnapshot(
+            environment_id=self.environment_id,
+            type=_to_execution_env_type_str(self.type),
+            status=_to_status_str(self.status),
+            resource_origin=_to_resource_origin_str(self.resource_origin),
+            availability_source=_to_availability_source_str(self.availability_source),
+            is_template=self.is_template,
+            is_discovered=self.is_discovered,
+            capabilities=_freeze_list(self.capabilities),
+            available_tools=_freeze_list(self.available_tools),
+            network_access=self.network_access,
+            privacy_level=self.privacy_level,
+            latency_class=self.latency_class,
+            cost_class=self.cost_class,
+            resource_limits=_freeze_mapping(self.resource_limits),
+            governed_registration_id=self.governed_registration_id,
+            generation=self.generation,
+            metadata=_freeze_mapping(self.metadata),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            is_eligible=self.is_eligible,
+        )
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ExecutionEnvironmentResource:
@@ -287,6 +366,32 @@ class CapabilityResource:
         res["resource_origin"] = self.resource_origin.value if isinstance(self.resource_origin, Enum) else str(self.resource_origin)
         res["availability_source"] = self.availability_source.value if isinstance(self.availability_source, Enum) else str(self.availability_source)
         return res
+
+    def to_snapshot(self) -> 'CapabilitySnapshot':
+        """Create an immutable snapshot of this capability resource."""
+        return CapabilitySnapshot(
+            capability_id=self.capability_id,
+            name=self.name,
+            description=self.description,
+            version=self.version,
+            tags=_freeze_list(self.tags),
+            domains=_freeze_list(self.domains),
+            provided_by_agents=_freeze_list(self.provided_by_agents),
+            effect=self.effect,
+            requires_network=self.requires_network,
+            requires_confirmation=self.requires_confirmation,
+            status=_to_status_str(self.status),
+            resource_origin=_to_resource_origin_str(self.resource_origin),
+            availability_source=_to_availability_source_str(self.availability_source),
+            is_template=self.is_template,
+            is_executable=self.is_executable,
+            governed_registration_id=self.governed_registration_id,
+            generation=self.generation,
+            metadata=_freeze_mapping(self.metadata),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            is_eligible=self.is_eligible,
+        )
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> CapabilityResource:
@@ -349,6 +454,33 @@ class AgentResource:
         res["availability_source"] = self.availability_source.value if isinstance(self.availability_source, Enum) else str(self.availability_source)
         return res
 
+    def to_snapshot(self) -> 'AgentSnapshot':
+        """Create an immutable snapshot of this agent resource."""
+        return AgentSnapshot(
+            agent_id=self.agent_id,
+            name=self.name,
+            capabilities=_freeze_list(self.capabilities),
+            specialization=_freeze_list(self.specialization),
+            availability=self.availability,
+            status=_to_status_str(self.status),
+            installation_state=_to_agent_installation_state_str(self.installation_state),
+            resource_origin=_to_resource_origin_str(self.resource_origin),
+            availability_source=_to_availability_source_str(self.availability_source),
+            is_template=self.is_template,
+            is_enabled=self.is_enabled,
+            version=self.version,
+            historical_confidence=self.historical_confidence,
+            cost_tier=self.cost_tier,
+            latency_tier=self.latency_tier,
+            supported_domains=_freeze_list(self.supported_domains),
+            governed_registration_id=self.governed_registration_id,
+            generation=self.generation,
+            metadata=_freeze_mapping(self.metadata),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            is_eligible=self.is_eligible,
+        )
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AgentResource:
         d = dict(data)
@@ -403,6 +535,33 @@ class ProjectResource:
         res["resource_origin"] = self.resource_origin.value if isinstance(self.resource_origin, Enum) else str(self.resource_origin)
         res["availability_source"] = self.availability_source.value if isinstance(self.availability_source, Enum) else str(self.availability_source)
         return res
+
+    def to_snapshot(self) -> 'ProjectSnapshot':
+        """Create an immutable snapshot of this project resource."""
+        return ProjectSnapshot(
+            project_id=self.project_id,
+            name=self.name,
+            domain=self.domain,
+            description=self.description,
+            owner_id=self.owner_id,
+            status=_to_status_str(self.status),
+            resource_origin=_to_resource_origin_str(self.resource_origin),
+            availability_source=_to_availability_source_str(self.availability_source),
+            is_template=self.is_template,
+            is_demo=self.is_demo,
+            retention_class=self.retention_class,
+            access_scope=self.access_scope,
+            assigned_agents=_freeze_list(self.assigned_agents),
+            assigned_environments=_freeze_list(self.assigned_environments),
+            budget_limit=self.budget_limit,
+            consumed_budget=self.consumed_budget,
+            governed_registration_id=self.governed_registration_id,
+            generation=self.generation,
+            metadata=_freeze_mapping(self.metadata),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            is_eligible=self.is_eligible,
+        )
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ProjectResource:
@@ -544,3 +703,354 @@ class RRMRegistryMetrics:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+# --- Immutable Resource Snapshots (M31.2B-0) ---
+# These are immutable snapshots returned by public RRM observation methods.
+# They contain no references to mutable canonical objects.
+
+def _freeze_mapping(d: Dict[str, Any]) -> Mapping[str, Any]:
+    """Convert a dict to an immutable MappingProxyType."""
+    return MappingProxyType(dict(d))
+
+
+def _freeze_list(lst: List[Any]) -> tuple:
+    """Convert a list to an immutable tuple."""
+    return tuple(lst)
+
+
+def _freeze_set(s: Set[Any]) -> frozenset:
+    """Convert a set to an immutable frozenset."""
+    return frozenset(s)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSnapshot:
+    """Immutable snapshot of a ProviderResource."""
+    provider_id: str
+    name: str
+    reasoning_score: float
+    tool_use_support: bool
+    context_window: int
+    cost_per_1k_tokens: float
+    privacy_tier: str
+    availability: float
+    multimodal: bool
+    status: str  # ResourceStatus as string
+    resource_origin: str  # ResourceOrigin as string
+    availability_source: str  # AvailabilitySource as string
+    is_template: bool
+    is_configured: bool
+    has_active_account: bool
+    endpoint_url: Optional[str]
+    governed_registration_id: str
+    generation: int
+    metadata: Mapping[str, Any]
+    created_at: str
+    updated_at: str
+    is_eligible: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert snapshot to dictionary for serialization/deserialization."""
+        return {
+            "provider_id": self.provider_id,
+            "name": self.name,
+            "reasoning_score": self.reasoning_score,
+            "tool_use_support": self.tool_use_support,
+            "context_window": self.context_window,
+            "cost_per_1k_tokens": self.cost_per_1k_tokens,
+            "privacy_tier": self.privacy_tier,
+            "availability": self.availability,
+            "multimodal": self.multimodal,
+            "status": self.status,
+            "resource_origin": self.resource_origin,
+            "availability_source": self.availability_source,
+            "is_template": self.is_template,
+            "is_configured": self.is_configured,
+            "has_active_account": self.has_active_account,
+            "endpoint_url": self.endpoint_url,
+            "governed_registration_id": self.governed_registration_id,
+            "generation": self.generation,
+            "metadata": dict(self.metadata),
+"created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AccountSnapshot:
+    """Immutable snapshot of an AccountResource."""
+    account_id: str
+    provider_id: str
+    name: str
+    quota_remaining: float
+    rate_limit_rpm: int
+    rate_limit_tpm: int
+    priority: int
+    cost_multiplier: float
+    status: str
+    secret_reference: Optional[str]
+    resource_origin: str
+    availability_source: str
+    is_template: bool
+    is_configured: bool
+    allowed_policies: tuple
+    governed_registration_id: str
+    generation: int
+    metadata: Mapping[str, Any]
+    created_at: str
+    updated_at: str
+    is_eligible: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "account_id": self.account_id,
+            "provider_id": self.provider_id,
+            "name": self.name,
+            "quota_remaining": self.quota_remaining,
+            "rate_limit_rpm": self.rate_limit_rpm,
+            "rate_limit_tpm": self.rate_limit_tpm,
+            "priority": self.priority,
+            "cost_multiplier": self.cost_multiplier,
+            "status": self.status,
+            "secret_reference": self.secret_reference,
+            "resource_origin": self.resource_origin,
+            "availability_source": self.availability_source,
+            "is_template": self.is_template,
+            "is_configured": self.is_configured,
+            "allowed_policies": list(self.allowed_policies),
+            "governed_registration_id": self.governed_registration_id,
+            "generation": self.generation,
+            "metadata": dict(self.metadata),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionEnvironmentSnapshot:
+    """Immutable snapshot of an ExecutionEnvironmentResource."""
+    environment_id: str
+    type: str  # ExecutionEnvironmentType as string
+    status: str
+    resource_origin: str
+    availability_source: str
+    is_template: bool
+    is_discovered: bool
+    capabilities: tuple
+    available_tools: tuple
+    network_access: bool
+    privacy_level: str
+    latency_class: str
+    cost_class: str
+    resource_limits: Mapping[str, Any]
+    governed_registration_id: str
+    generation: int
+    metadata: Mapping[str, Any]
+    created_at: str
+    updated_at: str
+    is_eligible: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "environment_id": self.environment_id,
+            "type": self.type,
+            "status": self.status,
+            "resource_origin": self.resource_origin,
+            "availability_source": self.availability_source,
+            "is_template": self.is_template,
+            "is_discovered": self.is_discovered,
+            "capabilities": list(self.capabilities),
+            "available_tools": list(self.available_tools),
+            "network_access": self.network_access,
+            "privacy_level": self.privacy_level,
+            "latency_class": self.latency_class,
+            "cost_class": self.cost_class,
+            "resource_limits": dict(self.resource_limits),
+            "governed_registration_id": self.governed_registration_id,
+            "generation": self.generation,
+            "metadata": dict(self.metadata),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilitySnapshot:
+    """Immutable snapshot of a CapabilityResource."""
+    capability_id: str
+    name: str
+    description: str
+    version: str
+    tags: tuple
+    domains: tuple
+    provided_by_agents: tuple
+    effect: str
+    requires_network: bool
+    requires_confirmation: bool
+    status: str
+    resource_origin: str
+    availability_source: str
+    is_template: bool
+    is_executable: bool
+    governed_registration_id: str
+    generation: int
+    metadata: Mapping[str, Any]
+    created_at: str
+    updated_at: str
+    is_eligible: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "capability_id": self.capability_id,
+            "name": self.name,
+            "description": self.description,
+            "version": self.version,
+            "tags": list(self.tags),
+            "domains": list(self.domains),
+            "provided_by_agents": list(self.provided_by_agents),
+            "effect": self.effect,
+            "requires_network": self.requires_network,
+            "requires_confirmation": self.requires_confirmation,
+            "status": self.status,
+            "resource_origin": self.resource_origin,
+            "availability_source": self.availability_source,
+            "is_template": self.is_template,
+            "is_executable": self.is_executable,
+            "governed_registration_id": self.governed_registration_id,
+            "generation": self.generation,
+            "metadata": dict(self.metadata),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSnapshot:
+    """Immutable snapshot of an AgentResource."""
+    agent_id: str
+    name: str
+    capabilities: tuple
+    specialization: tuple
+    availability: float
+    status: str
+    installation_state: str  # AgentInstallationState as string
+    resource_origin: str
+    availability_source: str
+    is_template: bool
+    is_enabled: bool
+    version: str
+    historical_confidence: float
+    cost_tier: float
+    latency_tier: float
+    supported_domains: tuple
+    governed_registration_id: str
+    generation: int
+    metadata: Mapping[str, Any]
+    created_at: str
+    updated_at: str
+    is_eligible: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "name": self.name,
+            "capabilities": list(self.capabilities),
+            "specialization": list(self.specialization),
+            "availability": self.availability,
+            "status": self.status,
+            "installation_state": self.installation_state,
+            "resource_origin": self.resource_origin,
+            "availability_source": self.availability_source,
+            "is_template": self.is_template,
+            "is_enabled": self.is_enabled,
+            "version": self.version,
+            "historical_confidence": self.historical_confidence,
+            "cost_tier": self.cost_tier,
+            "latency_tier": self.latency_tier,
+            "supported_domains": list(self.supported_domains),
+            "governed_registration_id": self.governed_registration_id,
+            "generation": self.generation,
+            "metadata": dict(self.metadata),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectSnapshot:
+    """Immutable snapshot of a ProjectResource."""
+    project_id: str
+    name: str
+    domain: str
+    description: str
+    owner_id: str
+    status: str
+    resource_origin: str
+    availability_source: str
+    is_template: bool
+    is_demo: bool
+    retention_class: str
+    access_scope: str
+    assigned_agents: tuple
+    assigned_environments: tuple
+    budget_limit: float
+    consumed_budget: float
+    governed_registration_id: str
+    generation: int
+    metadata: Mapping[str, Any]
+    created_at: str
+    updated_at: str
+    is_eligible: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "name": self.name,
+            "domain": self.domain,
+            "description": self.description,
+            "owner_id": self.owner_id,
+            "status": self.status,
+            "resource_origin": self.resource_origin,
+            "availability_source": self.availability_source,
+            "is_template": self.is_template,
+            "is_demo": self.is_demo,
+            "retention_class": self.retention_class,
+            "access_scope": self.access_scope,
+            "assigned_agents": list(self.assigned_agents),
+            "assigned_environments": list(self.assigned_environments),
+            "budget_limit": self.budget_limit,
+            "consumed_budget": self.consumed_budget,
+            "governed_registration_id": self.governed_registration_id,
+            "generation": self.generation,
+            "metadata": dict(self.metadata),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+# --- Helper functions for snapshot creation ---
+
+def _to_status_str(status: Any) -> str:
+    """Convert ResourceStatus enum to string."""
+    return status.value if hasattr(status, 'value') else str(status)
+
+
+def _to_resource_origin_str(origin: Any) -> str:
+    """Convert ResourceOrigin enum to string."""
+    return origin.value if hasattr(origin, 'value') else str(origin)
+
+
+def _to_availability_source_str(source: Any) -> str:
+    """Convert AvailabilitySource enum to string."""
+    return source.value if hasattr(source, 'value') else str(source)
+
+
+def _to_execution_env_type_str(env_type: Any) -> str:
+    """Convert ExecutionEnvironmentType enum to string."""
+    return env_type.value if hasattr(env_type, 'value') else str(env_type)
+
+
+def _to_agent_installation_state_str(state: Any) -> str:
+    """Convert AgentInstallationState enum to string."""
+    return state.value if hasattr(state, 'value') else str(state)

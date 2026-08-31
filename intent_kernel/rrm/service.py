@@ -14,18 +14,30 @@ from intent_kernel.rrm.models import (
     AccountResource,
     AgentInstallationState,
     AgentResource,
+    AccountSnapshot,
+    AgentSnapshot,
     AvailabilitySource,
     CapabilityResource,
+    CapabilitySnapshot,
     ExecutionEnvironmentResource,
+    ExecutionEnvironmentSnapshot,
     ExecutionEnvironmentType,
     ProjectResource,
+    ProjectSnapshot,
     ProviderResource,
+    ProviderSnapshot,
     ResourceHealthReport,
     ResourceOrigin,
     ResourceQueryFilter,
     ResourceStatus,
     ResourceType,
     RRMRegistryMetrics,
+    ProviderSnapshot,
+    ExecutionEnvironmentSnapshot,
+    CapabilitySnapshot,
+    AgentSnapshot,
+    ProjectSnapshot,
+    ProviderSnapshot,
 )
 from intent_kernel.rrm.ports import ProjectRegistryPort, ResourceQueryPort, RRMRegistryPort
 from intent_kernel.time_utils import utc_iso
@@ -62,18 +74,30 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             self._providers[provider.provider_id] = provider
             return provider
 
-    def get_provider(self, provider_id: str) -> Optional[ProviderResource]:
+    def get_provider(self, provider_id: str) -> Optional[ProviderSnapshot]:
+        with self._lock:
+            provider = self._providers.get(provider_id)
+            if provider is None:
+                return None
+            return provider.to_snapshot()
+
+    def _get_provider_for_mutation(self, provider_id: str) -> Optional[ProviderResource]:
+        """Internal method to get mutable provider for mutation operations.
+        
+        WARNING: This returns the canonical mutable resource. Should only be used
+        by RRM internal mutation methods (register, update, etc.).
+        """
         with self._lock:
             return self._providers.get(provider_id)
 
-    def list_providers(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ProviderResource]:
+    def list_providers(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ProviderSnapshot]:
         with self._lock:
             providers = list(self._providers.values())
             if only_eligible:
                 providers = [p for p in providers if p.is_eligible]
             if status is not None:
                 providers = [p for p in providers if p.status == status]
-            return providers
+            return [p.to_snapshot() for p in providers]
 
     def unregister_provider(self, provider_id: str) -> bool:
         with self._lock:
@@ -98,7 +122,15 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             self._accounts[account.account_id] = account
             return account
 
-    def get_account(self, account_id: str) -> Optional[AccountResource]:
+    def get_account(self, account_id: str) -> Optional[AccountSnapshot]:
+        with self._lock:
+            account = self._accounts.get(account_id)
+            if account is None:
+                return None
+            return account.to_snapshot()
+
+    def _get_account_for_mutation(self, account_id: str) -> Optional[AccountResource]:
+        """Internal method to get mutable account for mutation operations."""
         with self._lock:
             return self._accounts.get(account_id)
 
@@ -107,7 +139,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         provider_id: Optional[str] = None,
         status: Optional[ResourceStatus] = None,
         only_eligible: bool = False,
-    ) -> List[AccountResource]:
+    ) -> List[AccountSnapshot]:
         with self._lock:
             accounts = list(self._accounts.values())
             if only_eligible:
@@ -116,7 +148,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 accounts = [a for a in accounts if a.provider_id == provider_id]
             if status is not None:
                 accounts = [a for a in accounts if a.status == status]
-            return accounts
+            return [a.to_snapshot() for a in accounts]
 
     def unregister_account(self, account_id: str) -> bool:
         with self._lock:
@@ -141,18 +173,26 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             self._environments[environment.environment_id] = environment
             return environment
 
-    def get_environment(self, environment_id: str) -> Optional[ExecutionEnvironmentResource]:
+    def get_environment(self, environment_id: str) -> Optional[ExecutionEnvironmentSnapshot]:
+        with self._lock:
+            env = self._environments.get(environment_id)
+            if env is None:
+                return None
+            return env.to_snapshot()
+
+    def _get_environment_for_mutation(self, environment_id: str) -> Optional[ExecutionEnvironmentResource]:
+        """Internal method to get mutable environment for mutation operations."""
         with self._lock:
             return self._environments.get(environment_id)
 
-    def list_environments(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ExecutionEnvironmentResource]:
+    def list_environments(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ExecutionEnvironmentSnapshot]:
         with self._lock:
             envs = list(self._environments.values())
             if only_eligible:
                 envs = [e for e in envs if e.is_eligible]
             if status is not None:
                 envs = [e for e in envs if e.status == status]
-            return envs
+            return [e.to_snapshot() for e in envs]
 
     def unregister_environment(self, environment_id: str) -> bool:
         with self._lock:
@@ -179,11 +219,19 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 self._capabilities[capability.name] = capability
             return capability
 
-    def get_capability(self, capability_name_or_id: str) -> Optional[CapabilityResource]:
+    def get_capability(self, capability_name_or_id: str) -> Optional[CapabilitySnapshot]:
         with self._lock:
-            return self._capabilities.get(capability_name_or_id)
+            cap = self._capabilities.get(capability_name_or_id)
+            if cap is None:
+                return None
+            return cap.to_snapshot()
 
-    def list_capabilities(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[CapabilityResource]:
+    def _get_capability_for_mutation(self, capability_id: str) -> Optional[CapabilityResource]:
+        """Internal method to get mutable capability for mutation operations."""
+        with self._lock:
+            return self._capabilities.get(capability_id)
+
+    def list_capabilities(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[CapabilitySnapshot]:
         with self._lock:
             unique = {id(c): c for c in self._capabilities.values()}
             caps = list(unique.values())
@@ -191,7 +239,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 caps = [c for c in caps if c.is_eligible]
             if status is not None:
                 caps = [c for c in caps if c.status == status]
-            return caps
+            return [c.to_snapshot() for c in caps]
 
     def unregister_capability(self, capability_id: str) -> bool:
         with self._lock:
@@ -219,18 +267,26 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             self._agents[agent.agent_id] = agent
             return agent
 
-    def get_agent(self, agent_id: str) -> Optional[AgentResource]:
+    def get_agent(self, agent_id: str) -> Optional[AgentSnapshot]:
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent is None:
+                return None
+            return agent.to_snapshot()
+
+    def _get_agent_for_mutation(self, agent_id: str) -> Optional[AgentResource]:
+        """Internal method to get mutable agent for mutation operations."""
         with self._lock:
             return self._agents.get(agent_id)
 
-    def list_agents(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[AgentResource]:
+    def list_agents(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[AgentSnapshot]:
         with self._lock:
             agents = list(self._agents.values())
             if only_eligible:
                 agents = [a for a in agents if a.is_eligible]
             if status is not None:
                 agents = [a for a in agents if a.status == status]
-            return agents
+            return [a.to_snapshot() for a in agents]
 
     def unregister_agent(self, agent_id: str) -> bool:
         with self._lock:
@@ -261,18 +317,26 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             self._projects[project.project_id] = project
             return project
 
-    def get_project(self, project_id: str) -> Optional[ProjectResource]:
+    def get_project(self, project_id: str) -> Optional[ProjectSnapshot]:
+        with self._lock:
+            project = self._projects.get(project_id)
+            if project is None:
+                return None
+            return project.to_snapshot()
+
+    def _get_project_for_mutation(self, project_id: str) -> Optional[ProjectResource]:
+        """Internal method to get mutable project for mutation operations."""
         with self._lock:
             return self._projects.get(project_id)
 
-    def list_projects(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ProjectResource]:
+    def list_projects(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ProjectSnapshot]:
         with self._lock:
             projects = list(self._projects.values())
             if only_eligible:
                 projects = [p for p in projects if p.is_eligible]
             if status is not None:
                 projects = [p for p in projects if p.status == status]
-            return projects
+            return [p.to_snapshot() for p in projects]
 
     def unregister_project(self, project_id: str) -> bool:
         with self._lock:
@@ -468,7 +532,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
             now = utc_iso()
             if resource_type == ResourceType.PROVIDER:
-                res = self._providers.get(resource_id)
+                res = self._get_provider_for_mutation(resource_id)
                 if res:
                     before = res.status
                     res.status = status
@@ -478,7 +542,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                     return True
 
             elif resource_type == ResourceType.ACCOUNT:
-                res = self._accounts.get(resource_id)
+                res = self._get_account_for_mutation(resource_id)
                 if res:
                     before = res.status
                     res.status = status
@@ -488,7 +552,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                     return True
 
             elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
-                res = self._environments.get(resource_id)
+                res = self._get_environment_for_mutation(resource_id)
                 if res:
                     before = res.status
                     res.status = status
@@ -498,7 +562,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                     return True
 
             elif resource_type == ResourceType.CAPABILITY:
-                res = self.get_capability(resource_id)
+                res = self._get_capability_for_mutation(resource_id)
                 if res:
                     before = res.status
                     res.status = status
@@ -508,7 +572,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                     return True
 
             elif resource_type == ResourceType.AGENT:
-                res = self._agents.get(resource_id)
+                res = self._get_agent_for_mutation(resource_id)
                 if res:
                     before = res.status
                     res.status = status
@@ -518,7 +582,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                     return True
 
             elif resource_type == ResourceType.PROJECT:
-                res = self._projects.get(resource_id)
+                res = self._get_project_for_mutation(resource_id)
                 if res:
                     before = res.status
                     res.status = status

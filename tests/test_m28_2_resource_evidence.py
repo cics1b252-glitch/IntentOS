@@ -129,6 +129,8 @@ def _make_adapter(providers: Optional[Dict[str, ProviderResource]] = None) -> RR
     mock_rrm = MagicMock()
     _providers = providers or {"p1": _make_provider()}
     mock_rrm.get_provider = MagicMock(side_effect=lambda pid: _providers.get(pid))
+    # Provide the internal method that the adapter now uses to get the canonical object
+    mock_rrm._get_provider_for_mutation = lambda pid: _providers.get(pid)
     return RRMEvidenceAdapter(mock_rrm)
 
 

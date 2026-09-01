@@ -1190,6 +1190,69 @@ class RegistrationOutcome:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ResourceTombstone:
+    """M31.2B-2A — Canonical immutable tombstone identity contract.
+
+    DATA ONLY. Defines the structured identity of a retired governed
+    registration lineage for FUTURE retirement / re-registration
+    integration. This movement MUST NOT activate structured tombstones in
+    runtime: the productive tombstone mechanism remains
+    ``RegistryResourceManager._tombstones: Set[str]`` and M31.2B-1 tombstone
+    rejection semantics are unchanged.
+
+    This type is an identity contract, NOT a canonical state constructor.
+    It does NOT generate any identity field and does NOT confer authority:
+      - NOT retirement authorization
+      - NOT re-registration authorization
+      - NOT promotion authorization
+      - NOT permission to recreate a resource
+      - NOT evidence that a resource was successfully removed
+
+    Canonical lineage primary identity:
+        (resource_kind, resource_id, governed_registration_id)
+
+    ``observed_generation`` is freshness/version evidence bound to that
+    lineage. It records the canonical generation of the active governed
+    registration observed immediately before productive retirement removal /
+    transition processing — never a post-retirement, B-2B terminal, or
+    re-registration generation. It is NOT part of the lineage primary key.
+
+    It contains no executable / callback fields, no arbitrary mutable
+    metadata object, no authority-bearing methods, and no runtime RRM
+    reference.
+    """
+    resource_kind: ResourceType
+    resource_id: str
+    governed_registration_id: str
+    observed_generation: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if (
+            not isinstance(self.governed_registration_id, str)
+            or not self.governed_registration_id.strip()
+        ):
+            raise ValueError("governed_registration_id must be a non-empty string")
+        if not is_valid_generation(self.observed_generation):
+            raise ValueError(
+                "observed_generation must be a governed/versioned generation "
+                "(positive int, never bool); legacy/unversioned generations are "
+                "NOT silently promoted"
+            )
+
+    @property
+    def lineage_identity(self) -> tuple:
+        """Canonical lineage primary identity (generation excluded)."""
+        return (self.resource_kind, self.resource_id, self.governed_registration_id)
+
+
 # --- Helper functions for snapshot creation ---
 
 def _to_status_str(status: Any) -> str:

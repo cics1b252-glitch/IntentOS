@@ -6,7 +6,10 @@ for Providers, Accounts, Execution Environments, Capabilities, Agents, and Proje
 
 from __future__ import annotations
 
+import dataclasses
+import datetime
 import threading
+import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -38,9 +41,49 @@ from intent_kernel.rrm.models import (
     AgentSnapshot,
     ProjectSnapshot,
     ProviderSnapshot,
+    ConditionalCreateOutcome,
+    ConditionalCreateResult,
+    ConditionalRegistrationRequest,
+    ConditionalResourceStatusRequest,
+    ConditionalUpdateOutcome,
+    ConditionalUpdateResult,
+    ConditionalCreateResult,
+    ConditionalUpdateOutcome,
 )
 from intent_kernel.rrm.ports import ProjectRegistryPort, ResourceQueryPort, RRMRegistryPort
 from intent_kernel.time_utils import utc_iso
+
+
+def _detach_value(value: Any) -> Any:
+    """Recursively clone caller-owned data into fully disconnected structures.
+
+    RA-31.2B1-03: guarantees the canonical mutable object graph shares NO mutable
+    container/leaf with the caller input graph. Only the value types actually
+    admitted by the canonical resource contracts are copied; any other
+    (arbitrary/custom) object is rejected FAIL-CLOSED so that no caller-defined
+    executable protocol hook (e.g. __deepcopy__/__reduce__) runs under the RRM
+    lock and no caller-owned reference can be smuggled into canonical storage.
+    Immutable/effectively-immutable values (str/int/float/bool/bytes, Enum,
+    datetime, uuid) are returned as-is — they cannot alias mutable state.
+    """
+    if value is None or isinstance(value, (str, int, float, bool, bytes, Enum)):
+        return value
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, dict):
+        return {k: _detach_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_detach_value(v) for v in value)
+    if isinstance(value, set):
+        return set(_detach_value(v) for v in value)
+    if isinstance(value, frozenset):
+        return frozenset(_detach_value(v) for v in value)
+    raise ValueError(
+        "conditional create refuses unsupported value type: "
+        f"{type(value).__name__} (must be a plain container or scalar)"
+    )
 
 
 class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistryPort):
@@ -386,6 +429,302 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         resource.generation = (
             (gen + 1) if is_valid_generation(gen) else GENERATION_INITIAL
         )
+
+    # --- M31.2B-1: Typed Conditional Update/Create Operations ---
+
+    def conditional_update_status(
+        self,
+        request: ConditionalResourceStatusRequest,
+    ) -> ConditionalUpdateResult:
+        """Conditionally update resource status with generation and lineage checks.
+
+        Atomically compares expected governed_registration_id and generation
+        against canonical RRM state. If all match, applies the status change
+        and advances generation exactly once.
+
+        Returns a typed result with outcome and observed state.
+        """
+        from intent_kernel.rrm.models import (
+            ConditionalResourceStatusRequest,
+            ConditionalUpdateResult,
+            ConditionalUpdateOutcome,
+        )
+
+        with self._lock:
+            # Locate resource by type and ID
+            resource = self._get_resource_for_mutation(request.resource_type, request.resource_id)
+            if resource is None:
+                return ConditionalUpdateResult(
+                    outcome=ConditionalUpdateOutcome.NOT_FOUND,
+                    resource_type=request.resource_type,
+                    resource_id=request.resource_id,
+                    observed_generation=0,
+                    observed_governed_registration_id="",
+                    previous_status=None,
+                    new_status=None,
+                    reason="resource_not_found",
+                )
+
+            # Verify registration lineage
+            if request.expected_governed_registration_id:
+                actual_grid = getattr(resource, "governed_registration_id", "") or ""
+                if request.expected_governed_registration_id != actual_grid:
+                    return ConditionalUpdateResult(
+                        outcome=ConditionalUpdateOutcome.REGISTRATION_LINEAGE_MISMATCH,
+                        resource_type=request.resource_type,
+                        resource_id=request.resource_id,
+                        observed_generation=getattr(resource, "generation", 0),
+                        observed_governed_registration_id=actual_grid,
+                        previous_status=None,
+                        new_status=None,
+                        reason="registration_lineage_mismatch",
+                    )
+
+            # Verify generation
+            expected_gen = request.expected_generation
+            if expected_gen > 0:
+                actual_gen = getattr(resource, "generation", 0)
+                if expected_gen != actual_gen:
+                    return ConditionalUpdateResult(
+                        outcome=ConditionalUpdateOutcome.GENERATION_MISMATCH,
+                        resource_type=request.resource_type,
+                        resource_id=request.resource_id,
+                        observed_generation=actual_gen,
+                        observed_governed_registration_id=getattr(resource, "governed_registration_id", "") or "",
+                        previous_status=None,
+                        new_status=None,
+                        reason="generation_mismatch",
+                    )
+
+            # Validate transition (basic lifecycle validation)
+            if not self._is_valid_status_transition(request.resource_type, resource, request.desired_status):
+                return ConditionalUpdateResult(
+                    outcome=ConditionalUpdateOutcome.INVALID_TRANSITION,
+                    resource_type=request.resource_type,
+                    resource_id=request.resource_id,
+                    observed_generation=getattr(resource, "generation", 0),
+                    observed_governed_registration_id=getattr(resource, "governed_registration_id", "") or "",
+                    previous_status=resource.status,
+                    new_status=None,
+                    reason="invalid_transition",
+                )
+
+            # Check for no-op
+            if resource.status == request.desired_status:
+                return ConditionalUpdateResult(
+                    outcome=ConditionalUpdateOutcome.NO_OP,
+                    resource_type=request.resource_type,
+                    resource_id=request.resource_id,
+                    observed_generation=getattr(resource, "generation", 0),
+                    observed_governed_registration_id=getattr(resource, "governed_registration_id", "") or "",
+                    previous_status=resource.status,
+                    new_status=resource.status,
+                    reason="",
+                )
+
+            # Apply mutation and advance generation atomically
+            previous_status = resource.status
+            resource.status = request.desired_status
+            self._advance_generation(resource)
+            resource.updated_at = utc_iso()
+
+            return ConditionalUpdateResult(
+                outcome=ConditionalUpdateOutcome.APPLIED,
+                resource_type=request.resource_type,
+                resource_id=request.resource_id,
+                observed_generation=getattr(resource, "generation", 0),
+                observed_governed_registration_id=getattr(resource, "governed_registration_id", "") or "",
+                previous_status=previous_status,
+                new_status=resource.status,
+                reason="",
+            )
+
+    def conditional_create_resource(
+        self,
+        request: ConditionalRegistrationRequest,
+    ) -> ConditionalCreateResult:
+        """Conditionally create a genuinely never-registered resource.
+
+        M31.2B-1 supports ONLY fresh creates of never-registered identities.
+        RRM does NOT authorize re-registration: an existing active identity
+        collides (CONFLICT_ACTIVE) and a tombstoned / previously-governed
+        identity fails closed (REJECTED_TOMBSTONED). No authorization is ever
+        inferred from an expected old registration id, an expected old
+        generation, logical-id equality, or tombstone presence.
+
+        Under the SINGLE self._lock: absence check, tombstone inspection, new
+        canonical resource construction, generation=1 assignment, and
+        installation all occur atomically.
+
+        Returns a detached immutable CREATED result. The caller's resource_data
+        is never mutated, aliased, or installed as the canonical object.
+        """
+        from intent_kernel.rrm.models import (
+            ConditionalRegistrationRequest,
+            ConditionalCreateResult,
+            ConditionalCreateOutcome,
+        )
+
+        with self._lock:
+            resource_type = request.resource_type
+            resource_data = request.resource_data
+
+            store, id_field = self._get_store_for_type(resource_type)
+            if store is None:
+                return ConditionalCreateResult(
+                    outcome=ConditionalCreateOutcome.CONFLICT_ACTIVE,
+                    resource_type=resource_type,
+                    resource_id="",
+                    observed_governed_registration_id="",
+                    observed_generation=0,
+                    reason="unsupported_resource_type",
+                )
+
+            resource_id = getattr(resource_data, id_field, None)
+            if not resource_id:
+                return ConditionalCreateResult(
+                    outcome=ConditionalCreateOutcome.CONFLICT_ACTIVE,
+                    resource_type=resource_type,
+                    resource_id="",
+                    observed_governed_registration_id="",
+                    observed_generation=0,
+                    reason="missing_resource_id",
+                )
+
+            # Defensive: M31.2B-1 does not authorize re-registration. The
+            # request contract rejects expected_absence=False at construction,
+            # but remain fail-closed here regardless.
+            if not request.expected_absence:
+                return ConditionalCreateResult(
+                    outcome=ConditionalCreateOutcome.CONFLICT_ACTIVE,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    observed_governed_registration_id="",
+                    observed_generation=0,
+                    reason="re_registration_not_authorized",
+                )
+
+            # Tombstoned / retired governed identity: fail closed. A tombstone
+            # NEVER implies re-registration authorization.
+            if self._is_tombstoned(resource_id):
+                return ConditionalCreateResult(
+                    outcome=ConditionalCreateOutcome.REJECTED_TOMBSTONED,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    observed_governed_registration_id="",
+                    observed_generation=0,
+                    reason="resource_tombstoned",
+                )
+
+            # Existing active resource collides with expected absence.
+            existing = store.get(resource_id)
+            if existing is not None:
+                return ConditionalCreateResult(
+                    outcome=ConditionalCreateOutcome.CONFLICT_ACTIVE,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    observed_governed_registration_id="",
+                    observed_generation=getattr(existing, "generation", 0),
+                    reason="resource_already_exists",
+                )
+
+            # Genuinely never-registered: construct a NEW canonical internal
+            # resource from the validated caller data. Never mutate, alias, or
+            # install the caller-owned resource_data.
+            canonical = self._build_canonical_copy(resource_type, resource_data)
+            # Governed lineage is RRM/promotion-boundary authority, never caller
+            # input. Assign a clean (empty) governed identity and generation=1.
+            canonical.governed_registration_id = ""
+            self._establish_generation_on_registration(canonical, None)
+            canonical.updated_at = utc_iso()
+            store[resource_id] = canonical
+
+            return ConditionalCreateResult(
+                outcome=ConditionalCreateOutcome.CREATED,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                observed_governed_registration_id="",
+                observed_generation=getattr(canonical, "generation", 0),
+                reason="",
+            )
+
+    def _build_canonical_copy(self, resource_type: ResourceType, source: Any) -> Any:
+        """Construct a fresh, structurally detached canonical resource.
+
+        RA-31.2B1-03: builds the canonical object from caller data that has been
+        recursively detached (shallow-read via dataclass fields, then
+        `_detach_value` deep structural clone). The caller-owned `source` is
+        never mutated, installed, or aliased at any nesting depth.
+        """
+        from intent_kernel.rrm.models import (
+            ProviderResource,
+            AccountResource,
+            ExecutionEnvironmentResource,
+            CapabilityResource,
+            AgentResource,
+            ProjectResource,
+        )
+
+        # Read the caller's fields WITHOUT deepcopy so arbitrary caller objects
+        # never reach copy.deepcopy/asdict hooks; then detach structurally and
+        # fail-closed on unsupported types before any canonical mutation.
+        raw = {f.name: getattr(source, f.name) for f in dataclasses.fields(source)}
+        detached = _detach_value(raw)
+
+        if resource_type == ResourceType.PROVIDER:
+            return ProviderResource.from_dict(detached)
+        elif resource_type == ResourceType.ACCOUNT:
+            return AccountResource.from_dict(detached)
+        elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
+            return ExecutionEnvironmentResource.from_dict(detached)
+        elif resource_type == ResourceType.CAPABILITY:
+            return CapabilityResource.from_dict(detached)
+        elif resource_type == ResourceType.AGENT:
+            return AgentResource.from_dict(detached)
+        elif resource_type == ResourceType.PROJECT:
+            return ProjectResource.from_dict(detached)
+        raise ValueError(f"unsupported resource_type: {resource_type}")
+
+    def _get_resource_for_mutation(self, resource_type: ResourceType, resource_id: str) -> Optional[Any]:
+        """Get mutable resource by type and ID for conditional operations."""
+        if resource_type == ResourceType.PROVIDER:
+            return self._get_provider_for_mutation(resource_id)
+        elif resource_type == ResourceType.ACCOUNT:
+            return self._get_account_for_mutation(resource_id)
+        elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
+            return self._get_environment_for_mutation(resource_id)
+        elif resource_type == ResourceType.CAPABILITY:
+            return self._get_capability_for_mutation(resource_id)
+        elif resource_type == ResourceType.AGENT:
+            return self._get_agent_for_mutation(resource_id)
+        elif resource_type == ResourceType.PROJECT:
+            return self._get_project_for_mutation(resource_id)
+        return None
+
+    def _get_store_for_type(self, resource_type: ResourceType):
+        """Get the storage dict and id attribute name for a resource type."""
+        if resource_type == ResourceType.PROVIDER:
+            return self._providers, "provider_id"
+        elif resource_type == ResourceType.ACCOUNT:
+            return self._accounts, "account_id"
+        elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
+            return self._environments, "environment_id"
+        elif resource_type == ResourceType.CAPABILITY:
+            return self._capabilities, "capability_id"
+        elif resource_type == ResourceType.AGENT:
+            return self._agents, "agent_id"
+        elif resource_type == ResourceType.PROJECT:
+            return self._projects, "project_id"
+        return None, None
+
+    def _is_valid_status_transition(self, resource_type: ResourceType, resource: Any, desired_status: ResourceStatus) -> bool:
+        """Validate status transition rules for the resource type."""
+        # Basic validation: cannot transition from terminal states
+        current = resource.status
+        if current == ResourceStatus.ARCHIVED or current == ResourceStatus.UNINSTALLED:
+            return False
+        # Add more specific rules per resource type if needed
+        return True
 
     def mark_governed(self, resource_id: str, registration_id: str = "") -> None:
         """Compatibility-only marker — does NOT create canonical governed identity.

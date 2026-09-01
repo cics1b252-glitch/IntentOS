@@ -6,14 +6,20 @@ Capabilities, Agents, and Projects within Intent OS.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Dict, List, Optional, Set, Mapping
+from typing import Any, Dict, List, Optional, Set, Mapping, Union
 from uuid import uuid4
 
-from intent_kernel.rrm.generation import LEGACY_UNVERSIONED, normalize_for_restore
+from intent_kernel.rrm.generation import (
+    LEGACY_UNVERSIONED,
+    GENERATION_INITIAL,
+    is_valid_generation,
+    normalize_for_restore,
+)
 from intent_kernel.time_utils import utc_iso
 
 
@@ -710,8 +716,14 @@ class RRMRegistryMetrics:
 # They contain no references to mutable canonical objects.
 
 def _freeze_mapping(d: Dict[str, Any]) -> Mapping[str, Any]:
-    """Convert a dict to an immutable MappingProxyType."""
-    return MappingProxyType(dict(d))
+    """Convert a dict to an immutable MappingProxyType.
+
+    RA-31.2B1-03 / M31.2B-0: the mapping is deep-copied so NO mutable nested
+    container remains shared with the canonical object. A caller holding a
+    public snapshot therefore cannot mutate canonical state through it
+    (PUBLIC_SNAPSHOT_NESTED_ALIAS_ESCAPE=NO) while the top level stays immutable.
+    """
+    return MappingProxyType(copy.deepcopy(dict(d)))
 
 
 def _freeze_list(lst: List[Any]) -> tuple:
@@ -1027,6 +1039,155 @@ class ProjectSnapshot:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+# --- M31.2B-1: Typed Conditional Update/Create Operations ---
+
+
+class ConditionalUpdateOutcome(str, Enum):
+    """Outcome of a conditional resource status update."""
+    APPLIED = "applied"
+    NO_OP = "no_op"
+    NOT_FOUND = "not_found"
+    REGISTRATION_LINEAGE_MISMATCH = "registration_lineage_mismatch"
+    GENERATION_MISMATCH = "generation_mismatch"
+    INVALID_TRANSITION = "invalid_transition"
+
+
+class ConditionalCreateOutcome(str, Enum):
+    """Outcome of a conditional resource creation."""
+    CREATED = "created"
+    CONFLICT_ACTIVE = "conflict_active"
+    REJECTED_TOMBSTONED = "rejected_tombstoned"
+    RE_REGISTRATION_AUTHORIZED = "re_registration_authorized"
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalResourceStatusRequest:
+    """Typed request for conditional resource status update.
+    
+    DATA ONLY — no callbacks, no caller-supplied generation.
+    """
+    resource_type: ResourceType
+    resource_id: str
+    expected_governed_registration_id: str
+    expected_generation: int
+    desired_status: ResourceStatus
+
+    def __post_init__(self) -> None:
+        if not self.resource_id:
+            raise ValueError("resource_id must not be empty")
+        if self.expected_generation < 0:
+            raise ValueError("expected_generation must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalRegistrationRequest:
+    """Typed request for conditional initial resource registration.
+
+    DATA ONLY — no factory callbacks, no caller-supplied generation,
+    no caller-supplied governed registration lineage.
+
+    M31.2B-1 supports ONLY genuinely never-registered fresh creates. RRM does
+    NOT authorize re-registration: a caller may never supply a governed
+    registration lineage or a resulting generation for a create. Authority-bearing
+    lineage input fails closed at request construction (ValueError) before any
+    productive mutation.
+    """
+    resource_type: ResourceType
+    resource_data: Any  # The full resource model data to register
+    expected_absence: bool = True  # M31.2B-1: MUST be True (fresh create only)
+    expected_governed_registration_id: str = ""  # Reserved (must be empty in M31.2B-1)
+    expected_generation: int = 0  # Reserved (must be zero in M31.2B-1)
+
+    def __post_init__(self) -> None:
+        if not self.resource_type:
+            raise ValueError("resource_type must be specified")
+        if self.resource_data is None:
+            raise ValueError("resource_data must be provided")
+        if not self.expected_absence:
+            raise ValueError(
+                "M31.2B-1 does not authorize re-registration; "
+                "expected_absence must be True"
+            )
+
+        caller_lineage = getattr(self.resource_data, "governed_registration_id", "") or ""
+        if caller_lineage:
+            raise ValueError(
+                "caller may not supply governed registration lineage for a "
+                "conditional create"
+            )
+
+        caller_generation = getattr(self.resource_data, "generation", 0)
+        if is_valid_generation(caller_generation):
+            raise ValueError(
+                "caller may not supply a resulting generation for a "
+                "conditional create"
+            )
+
+        if self.expected_governed_registration_id or self.expected_generation != 0:
+            raise ValueError(
+                "For expected absence, governed_registration_id and "
+                "generation must be empty/zero"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalUpdateResult:
+    """Immutable result of a conditional resource status update."""
+    outcome: ConditionalUpdateOutcome
+    resource_type: ResourceType
+    resource_id: str
+    observed_generation: int
+    observed_governed_registration_id: str
+    previous_status: Optional[ResourceStatus]
+    new_status: Optional[ResourceStatus]
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalCreateResult:
+    """Immutable result of a conditional resource creation."""
+    outcome: ConditionalCreateOutcome
+    resource_type: ResourceType
+    resource_id: str
+    observed_governed_registration_id: str
+    observed_generation: int
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RegistrationOutcome:
+    """Complete registration result including creation and re-registration outcomes."""
+    outcome: Union[ConditionalCreateOutcome, ConditionalUpdateOutcome]
+    resource_type: ResourceType
+    resource_id: str
+    governed_registration_id: str
+    generation: int
+    reason: str = ""
+
+    @property
+    def is_success(self) -> bool:
+        return self.outcome in (
+            ConditionalCreateOutcome.CREATED,
+            ConditionalCreateOutcome.RE_REGISTRATION_AUTHORIZED,
+            ConditionalUpdateOutcome.APPLIED,
+            ConditionalUpdateOutcome.NO_OP,
+        )
+
+    @property
+    def is_conflict(self) -> bool:
+        return self.outcome in (
+            ConditionalCreateOutcome.CONFLICT_ACTIVE,
+            ConditionalCreateOutcome.REJECTED_TOMBSTONED,
+        )
+
+    @property
+    def is_mismatch(self) -> bool:
+        return self.outcome in (
+            ConditionalUpdateOutcome.REGISTRATION_LINEAGE_MISMATCH,
+            ConditionalUpdateOutcome.GENERATION_MISMATCH,
+        )
 
 
 # --- Helper functions for snapshot creation ---

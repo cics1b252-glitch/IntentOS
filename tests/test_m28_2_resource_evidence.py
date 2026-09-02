@@ -129,6 +129,7 @@ def _make_adapter(providers: Optional[Dict[str, ProviderResource]] = None) -> RR
     mock_rrm = MagicMock()
     _providers = providers or {"p1": _make_provider()}
     mock_rrm.get_provider = MagicMock(side_effect=lambda pid: _providers.get(pid))
+    mock_rrm.has_tombstoned_resource = MagicMock(return_value=False)
     return RRMEvidenceAdapter(mock_rrm)
 
 

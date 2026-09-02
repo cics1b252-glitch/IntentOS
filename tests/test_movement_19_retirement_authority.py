@@ -487,8 +487,8 @@ class TestRetirementModels:
 
     def test_request_frozen(self):
         req = ResourceRetirementRequest(
-            request_id="r1", resource_id="p1", resource_kind="Provider",
-            governed_registration_id="g1", reason="x",
+            request_id="r1", resource_id="p1", resource_kind=ResourceType.PROVIDER,
+            governed_registration_id="g1", expected_generation=1, reason="x",
         )
         with pytest.raises(AttributeError):
             req.resource_id = "other"
@@ -513,8 +513,8 @@ class TestRetirementModels:
 
     def test_request_to_dict(self):
         req = ResourceRetirementRequest(
-            request_id="r1", resource_id="p1", resource_kind="Provider",
-            governed_registration_id="g1", reason="x",
+            request_id="r1", resource_id="p1", resource_kind=ResourceType.PROVIDER,
+            governed_registration_id="g1", expected_generation=1, reason="x",
         )
         assert req.resource_id == "p1"
         assert req.governed_registration_id == "g1"

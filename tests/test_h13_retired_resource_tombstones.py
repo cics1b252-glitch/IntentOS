@@ -15,6 +15,7 @@ from intent_kernel.rrm.models import (
     ProviderResource,
     ResourceOrigin,
     ResourceStatus,
+    ResourceType,
 )
 from intent_kernel.rrm.retirement import CanonicalResourceRetirementAuthority
 from intent_kernel.rrm.service import RegistryResourceManager
@@ -99,7 +100,7 @@ def test_retired_identity_receives_tombstone():
     rrm = _make_rrm()
     _make_provider(rrm, "prov-tomb", governed_grid="gr-tomb")
     _retire(rrm, "prov-tomb", "gr-tomb")
-    assert rrm._is_tombstoned("prov-tomb") is True
+    assert rrm._is_tombstoned(ResourceType.PROVIDER, "prov-tomb") is True
 
 
 # ---------------------------------------------------------------------------
@@ -263,4 +264,4 @@ def test_tombstone_persists_across_attempts():
         assert result is None
 
     # Tombstone still present
-    assert rrm._is_tombstoned("prov-persist") is True
+    assert rrm._is_tombstoned(ResourceType.PROVIDER, "prov-persist") is True

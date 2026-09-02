@@ -1,13 +1,13 @@
 """M31.2B-2A — Immutable Tombstone Identity Contract (MODEL_D1).
 
-Contract-only movement. ``ResourceTombstone`` defines the canonical immutable
-structured tombstone identity for FUTURE retirement / re-registration
-integration. It is NOT activated in runtime:
+Originally a contract-only movement. ``ResourceTombstone`` defines the
+canonical immutable structured tombstone identity. M31.2B-2B activated it as
+the single authoritative runtime tombstone source:
 
-- ``RegistryResourceManager._tombstones: Set[str]`` remains the only
-  productive tombstone mechanism.
-- M31.2B-1 tombstone rejection behavior is unchanged.
-- No runtime structured tombstone storage / history / query API is added.
+- ``RegistryResourceManager._tombstones`` is now the canonical
+  ``Dict[Tuple[ResourceType, str, str], ResourceTombstone]`` store (M31.2B-2B
+  replaced the legacy ``Set[str]``).
+- M31.2B-1 tombstone rejection behavior is unchanged for same-family IDs.
 - No API installs a caller-supplied canonical tombstone.
 - ``ResourceTombstone`` confers no authority (no retirement, no
   re-registration, no promotion authorization).
@@ -19,8 +19,8 @@ Canonical lineage primary identity:
 it is NOT part of the lineage primary key.
 
 Allowed claim ONLY:
-  "Canonical immutable tombstone identity contract is defined for future
-  retirement/re-registration integration."
+  "Canonical immutable tombstone identity contract is the single authoritative
+  structured tombstone source (TS1)."
 """
 
 from __future__ import annotations
@@ -211,17 +211,16 @@ class ResourceTombstoneDataIsolationTest(unittest.TestCase):
 
 
 class ResourceTombstoneRuntimeNonActivationTest(unittest.TestCase):
-    """Invariants 15-20: no runtime activation, M31.2B-1 preserved, no authority."""
+    """Invariants 15-20: single TS1 store, M31.2B-1 preserved, no authority."""
 
-    def test_15_no_runtime_structured_tombstone_storage_is_introduced(self):
-        # The productive tombstone mechanism remains the legacy Set[str].
+    def test_15_single_authoritative_structured_tombstone_store(self):
+        # M31.2B-2B activates the canonical structured tombstone store, replacing
+        # the legacy Set[str] mechanism with ONE authoritative container.
         rrm = RegistryResourceManager(populate_defaults=False)
-        self.assertIsInstance(rrm._tombstones, set)
-        for item in rrm._tombstones:
-            self.assertIsInstance(item, str)
-        # The RRM holds no structured tombstone container / history / index.
+        self.assertIsInstance(rrm._tombstones, dict)
+        # The RRM holds no additional structured container / history / index.
         rrm_attrs = vars(rrm).keys()
-        for forbidden in ("_tombstone_objects", "_tombstone_history", "_tombstone_index"):
+        for forbidden in ("_tombstone_objects", "_tombstone_history", "_tombstone_index", "_tombstones_set"):
             self.assertNotIn(forbidden, rrm_attrs)
 
     def test_16_m31_2b1_tombstone_rejection_remains_unchanged(self):
@@ -231,7 +230,7 @@ class ResourceTombstoneRuntimeNonActivationTest(unittest.TestCase):
                 provider_id="p1", name="p1", governed_registration_id="R1", generation=1
             )
         )
-        rrm._tombstones.add("p1")
+        rrm._record_tombstone(ResourceType.PROVIDER, "p1", "R1", 1)
         res = rrm.conditional_create_resource(
             ConditionalRegistrationRequest(
                 resource_type=ResourceType.PROVIDER,

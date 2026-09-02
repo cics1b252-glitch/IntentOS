@@ -25,6 +25,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from uuid import uuid4
 
+from intent_kernel.rrm.models import (
+    ConditionalRetirementRequest,
+    ConditionalRetirementResult,
+    ResourceType,
+)
 from intent_kernel.time_utils import utc_iso
 
 
@@ -47,12 +52,18 @@ class ResourceRetirementStateType(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class ResourceRetirementRequest:
-    """A request to retire a governed resource."""
+    """A request to retire a governed resource.
+
+    M31.2B-2B: resource_kind is canonical ResourceType. expected_generation
+    captures the active generation at request time for immutable binding
+    through the authorization chain.
+    """
 
     request_id: str
     resource_id: str
-    resource_kind: str
+    resource_kind: ResourceType
     governed_registration_id: str
+    expected_generation: int
     reason: str
     created_at: str = field(default_factory=utc_iso)
 
@@ -118,6 +129,9 @@ class CanonicalResourceRetirementAuthority:
     ) -> ResourceRetirementRequest:
         """Create a retirement request for a governed resource.
 
+        M31.2B-2B: captures canonical ResourceType and expected_generation
+        from the active resource BEFORE authorization.
+
         Validates:
           1. resource exists in RRM
           2. resource is governed
@@ -133,11 +147,15 @@ class CanonicalResourceRetirementAuthority:
         if actual_grid != governed_registration_id:
             raise RetirementError("governed_registration_id_mismatch")
 
+        resource_kind = self._classify_resource_kind(resource)
+        expected_generation = getattr(resource, "generation", 0)
+
         request = ResourceRetirementRequest(
             request_id=f"ret-req-{uuid4().hex[:12]}",
             resource_id=resource_id,
-            resource_kind=type(resource).__name__,
+            resource_kind=resource_kind,
             governed_registration_id=governed_registration_id,
+            expected_generation=expected_generation,
             reason=reason,
         )
         self._requests[request.request_id] = request
@@ -185,16 +203,17 @@ class CanonicalResourceRetirementAuthority:
         return decision
 
     def apply_retirement(self, decision_id: str) -> ResourceRetirementResult:
-        """Apply an approved retirement decision to remove the resource.
+        """Apply an approved retirement decision via RRM atomic mechanism.
+
+        M31.2B-2B: derives ConditionalRetirementRequest from the approved
+        immutable request and delegates to RRM conditional_retire_resource.
+        No direct dictionary deletion. No parallel productive retirement path.
 
         Validates:
           1. decision exists
           2. decision is APPROVED
           3. decision not yet consumed (single consumption)
-          4. resource still exists with matching governed_registration_id
-          5. Performs actual removal from RRM
-
-        Returns ResourceRetirementResult.
+          4. RRM conditional retirement succeeds or reports typed failure
         """
         decision = self._decisions.get(decision_id)
         if decision is None:
@@ -221,42 +240,38 @@ class CanonicalResourceRetirementAuthority:
                 reason="decision_already_consumed",
             )
 
-        resource = self._get_resource(decision.resource_id)
-        if resource is None:
+        request = self._requests.get(decision.request_id)
+        if request is None:
             return ResourceRetirementResult(
                 success=False,
                 decision_id=decision_id,
                 resource_id=decision.resource_id,
-                reason="resource_not_found",
+                reason="request_not_found",
             )
 
-        actual_grid = getattr(resource, "governed_registration_id", "")
-        if actual_grid != decision.governed_registration_id:
+        rrm_request = ConditionalRetirementRequest(
+            resource_kind=request.resource_kind,
+            resource_id=request.resource_id,
+            governed_registration_id=request.governed_registration_id,
+            expected_generation=request.expected_generation,
+        )
+
+        rrm_result = self._rrm.conditional_retire_resource(rrm_request)
+
+        if rrm_result.outcome.value == "retired":
+            self._consumed.add(decision_id)
             return ResourceRetirementResult(
-                success=False,
+                success=True,
                 decision_id=decision_id,
                 resource_id=decision.resource_id,
-                reason="governed_registration_id_mismatch",
+                retired_at=utc_iso(),
             )
 
-        removed = self._remove_resource(decision.resource_id)
-        if not removed:
-            return ResourceRetirementResult(
-                success=False,
-                decision_id=decision_id,
-                resource_id=decision.resource_id,
-                reason="removal_failed",
-            )
-
-        # H1.3: Record tombstone to prevent re-registration of retired identity
-        self._rrm._record_tombstone(decision.resource_id)
-
-        self._consumed.add(decision_id)
         return ResourceRetirementResult(
-            success=True,
+            success=False,
             decision_id=decision_id,
             resource_id=decision.resource_id,
-            retired_at=utc_iso(),
+            reason=rrm_result.outcome.value,
         )
 
     def get_request(self, request_id: str) -> ResourceRetirementRequest | None:
@@ -276,6 +291,7 @@ class CanonicalResourceRetirementAuthority:
             "get_agent",
             "get_environment",
             "get_account",
+            "get_project",
         ):
             getter = getattr(rrm, getter_name, None)
             if getter is not None:
@@ -284,33 +300,36 @@ class CanonicalResourceRetirementAuthority:
                     return resource
         return None
 
-    def _remove_resource(self, resource_id: str) -> bool:
-        """Remove governed resource directly from RRM internal state.
+    def _classify_resource_kind(self, resource: object) -> ResourceType:
+        """Classify a resource snapshot into canonical ResourceType.
 
-        Bypasses guarded unregister_*() which rejects governed resources.
-        This is the ONLY authorized removal path for governed resources.
+        M31.2B-2B: deterministic finite mapping, no free-form strings.
+        The immutable RRM read surface returns snapshot classes.
         """
-        rrm = self._rrm
-        with rrm._lock:
-            if resource_id in rrm._providers:
-                del rrm._providers[resource_id]
-                return True
-            if resource_id in rrm._accounts:
-                del rrm._accounts[resource_id]
-                return True
-            if resource_id in rrm._environments:
-                del rrm._environments[resource_id]
-                return True
-            if resource_id in rrm._agents:
-                del rrm._agents[resource_id]
-                return True
-            if resource_id in rrm._capabilities:
-                keys_to_del = [k for k, v in rrm._capabilities.items() if k == resource_id or getattr(v, "resource_id", None) == resource_id]
-                for k in keys_to_del:
-                    del rrm._capabilities[k]
-                if keys_to_del:
-                    return True
-        return False
+        from intent_kernel.rrm.models import (
+            ProviderSnapshot,
+            AccountSnapshot,
+            ExecutionEnvironmentSnapshot,
+            CapabilitySnapshot,
+            AgentSnapshot,
+            ProjectSnapshot,
+        )
+
+        _RESOURCE_CLASS_MAP = {
+            ProviderSnapshot: ResourceType.PROVIDER,
+            AccountSnapshot: ResourceType.ACCOUNT,
+            ExecutionEnvironmentSnapshot: ResourceType.EXECUTION_ENVIRONMENT,
+            CapabilitySnapshot: ResourceType.CAPABILITY,
+            AgentSnapshot: ResourceType.AGENT,
+            ProjectSnapshot: ResourceType.PROJECT,
+        }
+
+        resource_type = _RESOURCE_CLASS_MAP.get(type(resource))
+        if resource_type is None:
+            raise RetirementError(
+                f"unsupported_resource_class: {type(resource).__name__}"
+            )
+        return resource_type
 
 
 class RetirementError(Exception):

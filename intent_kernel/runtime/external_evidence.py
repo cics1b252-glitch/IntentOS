@@ -13,6 +13,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
+from intent_kernel.rrm.models import ResourceType
+
 MAX_EXTERNAL_EVIDENCE_REQUIREMENTS = 32
 
 _APPROVED_EXPECTED_STATE_KEYS = frozenset(
@@ -137,6 +139,10 @@ class ResourceQueryReadPort(Protocol):
 
     def get_provider(self, provider_id: str) -> Optional[Any]: ...
 
+    def has_tombstoned_resource(
+        self, resource_kind: ResourceType, resource_id: str,
+    ) -> bool: ...
+
 
 class RRMEvidenceAdapter:
     """Observer-only adapter for RRM provider resource state evidence.
@@ -184,8 +190,9 @@ class RRMEvidenceAdapter:
 
         resource = self._rrm.get_provider(requirement.resource_id)
         if resource is None:
-            tombstones = getattr(self._rrm, "_tombstones", None)
-            if tombstones is not None and requirement.resource_id in tombstones:
+            if self._rrm.has_tombstoned_resource(
+                ResourceType.PROVIDER, requirement.resource_id,
+            ):
                 return _result({}, False, "resource_tombstoned")
             return _result({}, False, "resource_not_found")
 

@@ -1156,6 +1156,66 @@ class ConditionalCreateResult:
     reason: str = ""
 
 
+class ConditionalRetirementOutcome(str, Enum):
+    """Outcome of a conditional governed resource retirement."""
+    RETIRED = "retired"
+    NOT_FOUND = "not_found"
+    REGISTRATION_LINEAGE_MISMATCH = "registration_lineage_mismatch"
+    GENERATION_MISMATCH = "generation_mismatch"
+    ALREADY_RETIRED = "already_retired"
+    INVALID_TRANSITION = "invalid_transition"
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalRetirementRequest:
+    """M31.2B-2B — Typed request for conditional governed resource retirement.
+
+    DATA ONLY — no callbacks, no caller-supplied tombstone, no authority.
+    The four identity fields define the exact governed retirement identity
+    that must match under the RRM lock for successful retirement.
+    """
+    resource_kind: ResourceType
+    resource_id: str
+    governed_registration_id: str
+    expected_generation: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if (
+            not isinstance(self.governed_registration_id, str)
+            or not self.governed_registration_id.strip()
+        ):
+            raise ValueError("governed_registration_id must be a non-empty string")
+        if not is_valid_generation(self.expected_generation):
+            raise ValueError(
+                "expected_generation must be a governed/versioned generation "
+                "(positive int, never bool); legacy/unversioned generations are "
+                "NOT silently promoted"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalRetirementResult:
+    """M31.2B-2B — Immutable result of a conditional governed resource retirement.
+
+    On RETIRED: observed_governed_registration_id and observed_generation
+    contain the exact pre-removal values. On all other outcomes:
+    observed_governed_registration_id=None, observed_generation=None.
+    """
+    outcome: ConditionalRetirementOutcome
+    resource_kind: ResourceType
+    resource_id: str
+    observed_governed_registration_id: Optional[str] = None
+    observed_generation: Optional[int] = None
+    reason: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class RegistrationOutcome:
     """Complete registration result including creation and re-registration outcomes."""
@@ -1192,14 +1252,14 @@ class RegistrationOutcome:
 
 @dataclass(frozen=True, slots=True)
 class ResourceTombstone:
-    """M31.2B-2A — Canonical immutable tombstone identity contract.
+    """M31.2B-2A/B — Canonical immutable tombstone identity contract.
 
     DATA ONLY. Defines the structured identity of a retired governed
-    registration lineage for FUTURE retirement / re-registration
-    integration. This movement MUST NOT activate structured tombstones in
-    runtime: the productive tombstone mechanism remains
-    ``RegistryResourceManager._tombstones: Set[str]`` and M31.2B-1 tombstone
-    rejection semantics are unchanged.
+    registration lineage. Activated as the single authoritative tombstone
+    source by M31.2B-2B, replacing the legacy ``Set[str]`` tombstone
+    mechanism. The canonical tombstone store is a
+    ``Dict[Tuple[ResourceType, str, str], ResourceTombstone]`` keyed by
+    ``(resource_kind, resource_id, governed_registration_id)``.
 
     This type is an identity contract, NOT a canonical state constructor.
     It does NOT generate any identity field and does NOT confer authority:

@@ -326,14 +326,14 @@ class TestRetirementInvalidation(unittest.TestCase):
         ad = RRMEvidenceAdapter(rrm)
         o = ad.observe(_req(expected_state={"status": "active", "is_eligible": True, "resource_generation": 1}))
         self.assertFalse(o.matched)
-        self.assertTrue(o.reason_code in ("resource_tombstoned", "resource_not_found"))
+        self.assertEqual(o.reason_code, "resource_tombstoned")
 
     def test_d3_retired_identity_refuses_reregistration(self):
         rrm, ret, _ = self._governed()
         reqq = ret.request_retirement("p1", "R1")
         dec = ret.decide_retirement(reqq.request_id, approved=True)
         ret.apply_retirement(dec.decision_id)
-        self.assertTrue(rrm._is_tombstoned("p1"))
+        self.assertTrue(rrm._is_tombstoned(ResourceType.PROVIDER, "p1"))
         p2 = ProviderResource(provider_id="p1", name="P", governed_registration_id="R1")
         rrm.register_provider(p2)
         self.assertIsNone(rrm.get_provider("p1"))
@@ -566,7 +566,7 @@ class TestExternalEvidenceIdentity(unittest.TestCase):
         ret.apply_retirement(dec.decision_id)
         o = RRMEvidenceAdapter(rrm).observe(_req(resource_id="p1"))
         self.assertFalse(o.matched)
-        self.assertTrue(o.reason_code in ("resource_tombstoned", "resource_not_found"))
+        self.assertEqual(o.reason_code, "resource_tombstoned")
 
     def _governed(self):
         rrm = _fresh_rrm()
@@ -684,7 +684,7 @@ class TestPreservation(unittest.TestCase):
         reqq = ret.request_retirement("p1", "R1")
         dec = ret.decide_retirement(reqq.request_id, approved=True)
         ret.apply_retirement(dec.decision_id)
-        self.assertTrue(rrm._is_tombstoned("p1"))
+        self.assertTrue(rrm._is_tombstoned(ResourceType.PROVIDER, "p1"))
 
     def _governed(self):
         rrm = _fresh_rrm()

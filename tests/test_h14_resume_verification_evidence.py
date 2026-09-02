@@ -365,6 +365,7 @@ async def test_h13_tombstones_preserved():
         ProviderResource,
         AvailabilitySource,
         ResourceOrigin,
+        ResourceType,
     )
 
     rrm = RegistryResourceManager(populate_defaults=False)
@@ -385,7 +386,7 @@ async def test_h13_tombstones_preserved():
     assert result.success is True
 
     # Tombstone should prevent re-registration
-    assert rrm._is_tombstoned("prov-tomb") is True
+    assert rrm._is_tombstoned(ResourceType.PROVIDER, "prov-tomb") is True
     new_p = ProviderResource(
         provider_id="prov-tomb",
         name="Reincarnation",

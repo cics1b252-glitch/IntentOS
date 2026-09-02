@@ -34,21 +34,17 @@ from intent_kernel.rrm.models import (
     ResourceQueryFilter,
     ResourceStatus,
     ResourceType,
+    ResourceTombstone,
     RRMRegistryMetrics,
-    ProviderSnapshot,
-    ExecutionEnvironmentSnapshot,
-    CapabilitySnapshot,
-    AgentSnapshot,
-    ProjectSnapshot,
-    ProviderSnapshot,
     ConditionalCreateOutcome,
     ConditionalCreateResult,
     ConditionalRegistrationRequest,
     ConditionalResourceStatusRequest,
+    ConditionalRetirementOutcome,
+    ConditionalRetirementRequest,
+    ConditionalRetirementResult,
     ConditionalUpdateOutcome,
     ConditionalUpdateResult,
-    ConditionalCreateResult,
-    ConditionalUpdateOutcome,
 )
 from intent_kernel.rrm.ports import ProjectRegistryPort, ResourceQueryPort, RRMRegistryPort
 from intent_kernel.time_utils import utc_iso
@@ -98,7 +94,9 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         self._agents: Dict[str, AgentResource] = {}
         self._projects: Dict[str, ProjectResource] = {}
         self._governed_ids: Set[str] = set()
-        self._tombstones: Set[str] = set()  # H1.3: retired resource IDs
+        # M31.2B-2B: canonical structured tombstone store replacing legacy Set[str].
+        # Key: (resource_kind, resource_id, governed_registration_id) → ResourceTombstone
+        self._tombstones: Dict[Tuple[ResourceType, str, str], ResourceTombstone] = {}
 
         if populate_defaults:
             self.populate_default_catalog()
@@ -107,7 +105,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_provider(self, provider: ProviderResource) -> ProviderResource:
         with self._lock:
-            if self._is_tombstoned(provider.provider_id):
+            if self._is_tombstoned(ResourceType.PROVIDER, provider.provider_id):
                 return self._providers.get(provider.provider_id)  # H1.3: reject retired identity
             existing = self._providers.get(provider.provider_id)
             if existing is not None and self._is_governed_resource(provider.provider_id):
@@ -123,6 +121,28 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             if provider is None:
                 return None
             return provider.to_snapshot()
+
+    def has_tombstoned_resource(
+        self,
+        resource_kind: ResourceType,
+        resource_id: str,
+    ) -> bool:
+        """Public typed read-only tombstone query (B-0 observation surface).
+
+        RA-31.2B2B-09: external observers must NOT inspect the private
+        ``_tombstones`` container directly. This is a lock-safe, kind-aware,
+        observation-only mechanism that derives from the single canonical
+        structured ResourceTombstone store (TS1).
+
+        True iff at least one lineage has
+        ``tombstone.resource_kind == resource_kind`` and
+        ``tombstone.resource_id == resource_id``.
+
+        Grants NO retirement / re-registration / promotion authority and never
+        mutates or exposes the canonical mutable container.
+        """
+        with self._lock:
+            return self._is_tombstoned(resource_kind, resource_id)
 
     def _get_provider_for_mutation(self, provider_id: str) -> Optional[ProviderResource]:
         """Internal method to get mutable provider for mutation operations.
@@ -155,7 +175,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_account(self, account: AccountResource) -> AccountResource:
         with self._lock:
-            if self._is_tombstoned(account.account_id):
+            if self._is_tombstoned(ResourceType.ACCOUNT, account.account_id):
                 return self._accounts.get(account.account_id)  # H1.3: reject retired identity
             existing = self._accounts.get(account.account_id)
             if existing is not None and self._is_governed_resource(account.account_id):
@@ -206,7 +226,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_environment(self, environment: ExecutionEnvironmentResource) -> ExecutionEnvironmentResource:
         with self._lock:
-            if self._is_tombstoned(environment.environment_id):
+            if self._is_tombstoned(ResourceType.EXECUTION_ENVIRONMENT, environment.environment_id):
                 return self._environments.get(environment.environment_id)  # H1.3: reject retired identity
             existing = self._environments.get(environment.environment_id)
             if existing is not None and self._is_governed_resource(environment.environment_id):
@@ -250,7 +270,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_capability(self, capability: CapabilityResource) -> CapabilityResource:
         with self._lock:
-            if self._is_tombstoned(capability.capability_id):
+            if self._is_tombstoned(ResourceType.CAPABILITY, capability.capability_id):
                 return self._capabilities.get(capability.capability_id)  # H1.3: reject retired identity
             existing = self._capabilities.get(capability.capability_id)
             if existing is not None and self._is_governed_resource(capability.capability_id):
@@ -300,7 +320,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_agent(self, agent: AgentResource) -> AgentResource:
         with self._lock:
-            if self._is_tombstoned(agent.agent_id):
+            if self._is_tombstoned(ResourceType.AGENT, agent.agent_id):
                 return self._agents.get(agent.agent_id)  # H1.3: reject retired identity
             existing = self._agents.get(agent.agent_id)
             if existing is not None and self._is_governed_resource(agent.agent_id):
@@ -354,7 +374,13 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_project(self, project: ProjectResource) -> ProjectResource:
         with self._lock:
+            # M31.2B-2B: kind-aware tombstone guard — parity with other five families
+            if self._is_tombstoned(ResourceType.PROJECT, project.project_id):
+                return self._projects.get(project.project_id)  # H1.3: reject retired identity
             existing = self._projects.get(project.project_id)
+            # M31.2B-2B: governed overwrite guard — parity with other five families
+            if existing is not None and self._is_governed_resource(project.project_id):
+                return existing
             self._establish_generation_on_registration(project, existing)
             project.updated_at = utc_iso()
             self._projects[project.project_id] = project
@@ -383,6 +409,10 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_project(self, project_id: str) -> bool:
         with self._lock:
+            # M31.2B-2B: governed resource guard — parity with other five families.
+            # Governed Project retirement must flow through retirement authority.
+            if self._is_governed_resource(project_id):
+                return False
             if project_id in self._projects:
                 del self._projects[project_id]
                 return True
@@ -606,7 +636,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
             # Tombstoned / retired governed identity: fail closed. A tombstone
             # NEVER implies re-registration authorization.
-            if self._is_tombstoned(resource_id):
+            # M31.2B-2B: kind-aware tombstone query
+            if self._is_tombstoned(resource_type, resource_id):
                 return ConditionalCreateResult(
                     outcome=ConditionalCreateOutcome.REJECTED_TOMBSTONED,
                     resource_type=resource_type,
@@ -647,6 +678,106 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 observed_generation=getattr(canonical, "generation", 0),
                 reason="",
             )
+
+    def conditional_retire_resource(
+        self,
+        request: ConditionalRetirementRequest,
+    ) -> ConditionalRetirementResult:
+        """M31.2B-2B — Conditionally retire a governed resource under a single lock.
+
+        Single-lock critical section: locate → validate → tombstone → remove → result.
+        All validation occurs before productive resource removal.
+        """
+        with self._lock:
+            resource_kind = request.resource_kind
+            resource_id = request.resource_id
+            expected_grid = request.governed_registration_id
+            expected_gen = request.expected_generation
+
+            store, id_field = self._get_store_for_type(resource_kind)
+            if store is None:
+                return ConditionalRetirementResult(
+                    outcome=ConditionalRetirementOutcome.NOT_FOUND,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    reason="unsupported_resource_kind",
+                )
+
+            resource = store.get(resource_id)
+
+            if resource is None:
+                lineage_key = (resource_kind, resource_id, expected_grid)
+                existing_tombstone = self._tombstones.get(lineage_key)
+                if existing_tombstone is not None:
+                    if existing_tombstone.observed_generation == expected_gen:
+                        return ConditionalRetirementResult(
+                            outcome=ConditionalRetirementOutcome.ALREADY_RETIRED,
+                            resource_kind=resource_kind,
+                            resource_id=resource_id,
+                            observed_governed_registration_id=expected_grid,
+                            observed_generation=expected_gen,
+                            reason="exact_retry_matches_tombstone",
+                        )
+                    return ConditionalRetirementResult(
+                        outcome=ConditionalRetirementOutcome.GENERATION_MISMATCH,
+                        resource_kind=resource_kind,
+                        resource_id=resource_id,
+                        observed_governed_registration_id=None,
+                        observed_generation=None,
+                        reason="tombstone_generation_mismatch",
+                    )
+                return ConditionalRetirementResult(
+                    outcome=ConditionalRetirementOutcome.NOT_FOUND,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    observed_governed_registration_id=None,
+                    observed_generation=None,
+                    reason="resource_not_found",
+                )
+
+            actual_grid = getattr(resource, "governed_registration_id", "") or ""
+            if actual_grid != expected_grid:
+                return ConditionalRetirementResult(
+                    outcome=ConditionalRetirementOutcome.REGISTRATION_LINEAGE_MISMATCH,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    observed_governed_registration_id=actual_grid,
+                    observed_generation=getattr(resource, "generation", 0),
+                    reason="registration_lineage_mismatch",
+                )
+
+            actual_gen = getattr(resource, "generation", 0)
+            if actual_gen != expected_gen:
+                return ConditionalRetirementResult(
+                    outcome=ConditionalRetirementOutcome.GENERATION_MISMATCH,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    observed_governed_registration_id=actual_grid,
+                    observed_generation=actual_gen,
+                    reason="generation_mismatch",
+                )
+
+            result = ConditionalRetirementResult(
+                outcome=ConditionalRetirementOutcome.RETIRED,
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                observed_governed_registration_id=actual_grid,
+                observed_generation=actual_gen,
+                reason="",
+            )
+
+            tombstone = ResourceTombstone(
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                governed_registration_id=actual_grid,
+                observed_generation=actual_gen,
+            )
+
+            del store[resource_id]
+
+            self._tombstones[tombstone.lineage_identity] = tombstone
+
+            return result
 
     def _build_canonical_copy(self, resource_type: ResourceType, source: Any) -> Any:
         """Construct a fresh, structurally detached canonical resource.
@@ -791,14 +922,38 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     # --- H1.3 Retired Resource Tombstones ---
 
-    def _record_tombstone(self, resource_id: str) -> None:
-        """Record a retired resource ID to prevent re-registration."""
-        with self._lock:
-            self._tombstones.add(resource_id)
+    def _record_tombstone(
+        self,
+        resource_kind: ResourceType,
+        resource_id: str,
+        governed_registration_id: str,
+        observed_generation: int,
+    ) -> None:
+        """Record a retired resource identity to prevent re-registration.
 
-    def _is_tombstoned(self, resource_id: str) -> bool:
-        """Check if a resource ID has been retired and tombstoned."""
-        return resource_id in self._tombstones
+        M31.2B-2B: constructs a canonical ResourceTombstone and stores it
+        in the single authoritative tombstone dict keyed by
+        (resource_kind, resource_id, governed_registration_id).
+        """
+        with self._lock:
+            tombstone = ResourceTombstone(
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                governed_registration_id=governed_registration_id,
+                observed_generation=observed_generation,
+            )
+            self._tombstones[tombstone.lineage_identity] = tombstone
+
+    def _is_tombstoned(self, resource_kind: ResourceType, resource_id: str) -> bool:
+        """Check if a resource has been retired and tombstoned for that kind.
+
+        M31.2B-2B: kind-aware query against the canonical tombstone store.
+        Cross-family same-ID resources are NOT blocked by each other.
+        """
+        return any(
+            tk == resource_kind and rid == resource_id
+            for (tk, rid, _grid) in self._tombstones
+        )
 
     def _is_compatibility_source(self, resource_origin: ResourceOrigin) -> bool:
         """Check if a resource origin represents a compatibility/bootstrap source."""

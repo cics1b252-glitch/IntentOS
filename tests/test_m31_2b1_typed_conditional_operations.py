@@ -383,7 +383,7 @@ class TestConditionalCreateOutcomes(unittest.TestCase):
         rrm = _fresh()
         p = _make_resource(ResourceType.PROVIDER, "p1")
         rrm.register_provider(p)
-        rrm._tombstones.add("p1")
+        rrm._record_tombstone(ResourceType.PROVIDER, "p1", "R1", 1)
         req = ConditionalRegistrationRequest(
             resource_type=ResourceType.PROVIDER, resource_data=_make_resource(ResourceType.PROVIDER, "p1"),
             expected_absence=True)
@@ -434,8 +434,8 @@ class TestConditionalCreateOutcomes(unittest.TestCase):
         self.assertIs(res.outcome, ConditionalCreateOutcome.REJECTED_TOMBSTONED)
         # no new active registration installed
         self.assertIsNone(rrm.get_provider("p1"))
-        # tombstone intact
-        self.assertIn("p1", rrm._tombstones)
+        # tombstone intact (canonical structured store)
+        self.assertIn((ResourceType.PROVIDER, "p1", "R1"), rrm._tombstones)
 
     def test_create_identity_match_does_not_confer_authority(self):
         # Correct old lineage + correct old generation can prove WHICH prior
@@ -477,7 +477,7 @@ class TestConditionalCreateOutcomes(unittest.TestCase):
             produced.add(res.outcome)
             # tombstoned path
             rrm2 = _fresh()
-            rrm2._tombstones.add(rid)
+            rrm2._record_tombstone(rt, rid, "R-tomb", 1)
             res2 = rrm2.conditional_create_resource(ConditionalRegistrationRequest(
                 resource_type=rt, resource_data=_make_resource(rt, rid),
                 expected_absence=True))
@@ -724,7 +724,8 @@ class TestCanonicalDeepDetach(unittest.TestCase):
                 expected_absence=True)  # caller generation rejected
         p = _make_resource(ResourceType.PROVIDER, "p1")
         rrm.register_provider(p)
-        rrm._tombstones.add("p1")
+        # M31.2B-2B: canonical structured tombstone store (kind-aware)
+        rrm._record_tombstone(ResourceType.PROVIDER, "p1", "R1", 1)
         res = rrm.conditional_create_resource(ConditionalRegistrationRequest(
             resource_type=ResourceType.PROVIDER,
             resource_data=_make_resource(ResourceType.PROVIDER, "p1"),

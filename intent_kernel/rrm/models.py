@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Set, Mapping, Union
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from intent_kernel.rrm.generation import (
     LEGACY_UNVERSIONED,
@@ -1338,3 +1338,219 @@ def _to_execution_env_type_str(env_type: Any) -> str:
 def _to_agent_installation_state_str(state: Any) -> str:
     """Convert AgentInstallationState enum to string."""
     return state.value if hasattr(state, 'value') else str(state)
+
+
+def _detach_rrm_value(value: Any) -> Any:
+    """Recursively clone caller-owned data into fully disconnected structures.
+
+    B-2C: guarantees the canonical ``ResourceLineageConsumption``
+    ``successor_materialization_descriptor`` shares NO mutable container/leaf
+    with the caller input graph at any nesting depth. Only the value types
+    actually admitted by plain-container contracts are copied; any other
+    (arbitrary/custom) object is rejected FAIL-CLOSED so that no caller-defined
+    executable protocol hook (e.g. ``__deepcopy__`` / ``__reduce__``) runs and no
+    caller-owned mutable reference can be smuggled into canonical storage.
+
+    Immutable / effectively-immutable values (str/int/float/bool/bytes, Enum,
+    datetime, uuid) are returned as-is — they cannot alias mutable state.
+    """
+    if value is None or isinstance(value, (str, int, float, bool, bytes, Enum)):
+        return value
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, UUID):
+        return value
+    if isinstance(value, dict):
+        return {k: _detach_rrm_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_detach_rrm_value(v) for v in value)
+    if isinstance(value, set):
+        return set(_detach_rrm_value(v) for v in value)
+    if isinstance(value, frozenset):
+        return frozenset(_detach_rrm_value(v) for v in value)
+    raise ValueError(
+        "reregistration descriptor refuses unsupported type: "
+        f"{type(value).__name__} (must be a plain container or scalar)"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceLineageConsumption:
+    """M31.2B-2C — immutable lineage-consumption lifecycle fact.
+
+    RECORDED UNDER P1: canonical ``ResourceLineageConsumption(A,B,X)`` exists
+    BEFORE successor B becomes visible as active. Its existence means:
+
+        "THIS EXACT PREDECESSOR (A) HAS IRREVERSIBLY BEEN CONSUMED FOR THIS
+        EXACT SUCCESSOR / CANDIDATE (B via exact proposal/decision X)."
+
+    It does NOT mean merely "authorization exists." A can never become eligible
+    again once consumed.
+
+    DATA ONLY — no authorization semantics, no authority-bearing methods, no
+    mutable canonical reference escape. ``successor_materialization_descriptor``
+    is a structurally immutable detached representation of the materialization
+    input for B; it is materialization data, NOT a third authorization identity.
+    """
+
+    resource_kind: ResourceType
+    resource_id: str
+    predecessor_governed_registration_id: str
+    predecessor_observed_generation: int
+    successor_governed_registration_id: str
+    successor_candidate_proposal_id: str
+    successor_candidate_decision_id: str
+    successor_materialization_descriptor: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if (
+            not isinstance(self.predecessor_governed_registration_id, str)
+            or not self.predecessor_governed_registration_id.strip()
+        ):
+            raise ValueError(
+                "predecessor_governed_registration_id must be a non-empty string"
+            )
+        if (
+            not isinstance(self.predecessor_observed_generation, int)
+            or isinstance(self.predecessor_observed_generation, bool)
+            or self.predecessor_observed_generation < 1
+        ):
+            raise ValueError(
+                "predecessor_observed_generation must be a positive int (>=1)"
+            )
+        if (
+            not isinstance(self.successor_governed_registration_id, str)
+            or not self.successor_governed_registration_id.strip()
+        ):
+            raise ValueError(
+                "successor_governed_registration_id must be a non-empty string"
+            )
+        if (
+            not isinstance(self.successor_candidate_proposal_id, str)
+            or not self.successor_candidate_proposal_id.strip()
+        ):
+            raise ValueError("successor_candidate_proposal_id must be non-empty")
+        if (
+            not isinstance(self.successor_candidate_decision_id, str)
+            or not self.successor_candidate_decision_id.strip()
+        ):
+            raise ValueError("successor_candidate_decision_id must be non-empty")
+        object.__setattr__(
+            self,
+            "successor_materialization_descriptor",
+            _detach_rrm_value(self.successor_materialization_descriptor),
+        )
+
+    @property
+    def consumption_key(self) -> tuple:
+        """Canonical consumption primary key (lineage, not generation)."""
+        return (
+            self.resource_kind,
+            self.resource_id,
+            self.predecessor_governed_registration_id,
+        )
+
+    @property
+    def candidate_identity(self) -> tuple:
+        """Exact approved candidate identity (proposal_id, decision_id)."""
+        return (
+            self.successor_candidate_proposal_id,
+            self.successor_candidate_decision_id,
+        )
+
+
+class ConditionalReregistrationOutcome(str, Enum):
+    """M31.2B-2C — deterministic re-registration outcomes.
+
+    RRM enforces state/lifecycle facts. The promotion authority decides
+    permission. ``REJECTED`` is deliberately NOT present as an RRM
+    authorization outcome.
+    """
+
+    REREGISTERED = "reregistered"
+    REREGISTRATION_RECOVERED = "reregistration_recovered"
+    REREGISTRATION_ALREADY_APPLIED = "reregistration_already_applied"
+    NO_TOMBSTONE = "no_tombstone"
+    TOMBSTONE_LINEAGE_MISMATCH = "tombstone_lineage_mismatch"
+    TOMBSTONE_GENERATION_MISMATCH = "tombstone_generation_mismatch"
+    STALE_RETIRED_LINEAGE = "stale_retired_lineage"
+    PENDING_SUCCESSOR_MISMATCH = "pending_successor_mismatch"
+    ACTIVE_RESOURCE_CONFLICT = "active_resource_conflict"
+    INVALID_RESOURCE = "invalid_resource"
+    INVALID_TRANSITION = "invalid_transition"
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalReregistrationRequest:
+    """M31.2B-2C — immutable conditional re-registration request.
+
+    MUST NOT contain: successor_governed_registration_id, caller-supplied
+    resulting generation, authorization token, or a raw retry descriptor
+    override. Candidate identity derives from exact proposal_id + decision_id.
+    """
+
+    resource_kind: ResourceType
+    resource_id: str
+    predecessor_governed_registration_id: str
+    predecessor_observed_generation: int
+    proposal_id: str
+    decision_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if (
+            not isinstance(self.predecessor_governed_registration_id, str)
+            or not self.predecessor_governed_registration_id.strip()
+        ):
+            raise ValueError(
+                "predecessor_governed_registration_id must be a non-empty string"
+            )
+        if (
+            not isinstance(self.predecessor_observed_generation, int)
+            or isinstance(self.predecessor_observed_generation, bool)
+            or self.predecessor_observed_generation < 1
+        ):
+            raise ValueError(
+                "predecessor_observed_generation must be a positive int (>=1)"
+            )
+        if not isinstance(self.proposal_id, str) or not self.proposal_id.strip():
+            raise ValueError("proposal_id must be a non-empty string")
+        if not isinstance(self.decision_id, str) or not self.decision_id.strip():
+            raise ValueError("decision_id must be a non-empty string")
+        if hasattr(self, "successor_governed_registration_id") or hasattr(
+            self, "resulting_generation"
+        ):
+            raise ValueError(
+                "re-registration request must not carry caller-supplied "
+                "successor lineage or resulting generation"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalReregistrationResult:
+    """M31.2B-2C — immutable result of a conditional re-registration.
+
+    On success (REREGISTERED / REREGISTRATION_RECOVERED):
+    successor_governed_registration_id and successor_observed_generation are
+    set. On all other outcomes they are None — NO fake values.
+    """
+
+    outcome: ConditionalReregistrationOutcome
+    resource_kind: ResourceType
+    resource_id: str
+    successor_governed_registration_id: Optional[str] = None
+    successor_observed_generation: Optional[int] = None
+    reason: str = ""

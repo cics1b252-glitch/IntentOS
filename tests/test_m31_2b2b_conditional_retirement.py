@@ -460,15 +460,55 @@ class TestAuthoritySeparation(unittest.TestCase):
         self.assertEqual(ts.lineage_identity, (ResourceType.PROVIDER, "p1", "R1"))
         self.assertEqual(ts.observed_generation, 1)
 
-    def test_25_productive_reregistration_absent(self):
+    def test_25_productive_reregistration_now_rrm_governed(self):
+        # B2C migration: RRM is the sole governed re-registration authority.
+        # Re-registration is a lifecycle enforcement primitive (state/lifecycle
+        # facts) — NOT a permission decision. RRM never grant authorization.
         rrm = _fresh()
-        self.assertFalse(hasattr(rrm, "conditional_reregister_resource"))
+        self.assertTrue(hasattr(rrm, "conditional_reregister_resource"))
+        from intent_kernel.rrm.models import ConditionalReregistrationOutcome
+        self.assertNotIn("rejected", {e.value for e in ConditionalReregistrationOutcome})
+        # No predecessor tombstone => NO_TOMBSTONE, never a fabricated success.
+        res = rrm.conditional_reregister_resource(
+            __import__("intent_kernel.rrm.models", fromlist=["x"]).ConditionalReregistrationRequest(
+                resource_kind=ResourceType.PROVIDER,
+                resource_id="ghost",
+                predecessor_governed_registration_id="R1",
+                predecessor_observed_generation=1,
+                proposal_id="p",
+                decision_id="d",
+            ),
+            materialization_descriptor={"display_name": "X"},
+        )
+        self.assertIs(
+            res.outcome, ConditionalReregistrationOutcome.NO_TOMBSTONE
+        )
 
-    def test_26_rrm_reregistration_authority_absent(self):
-        # No re-registration authority class introduced.
+    def test_26_rrm_reregistration_authority_single_source(self):
+        # B2C migration: the re-registration contract exists but carries NO
+        # caller-supplied successor lineage / resulting generation / auth token,
+        # and there is no second governed-lineage-ID authority.
         import intent_kernel.rrm.models as m
-        self.assertFalse(hasattr(m, "ConditionalReregistrationRequest"))
+        self.assertTrue(hasattr(m, "ConditionalReregistrationRequest"))
         self.assertFalse(hasattr(m, "ReregistrationAuthority"))
+        from intent_kernel.promotion.models import ReRegistrationPrecondition
+        pre = ReRegistrationPrecondition(
+            resource_kind=ResourceType.PROVIDER, resource_id="p",
+            retired_governed_registration_id="R1", retired_observed_generation=1,
+        )
+        req = m.ConditionalReregistrationRequest(
+            resource_kind=ResourceType.PROVIDER, resource_id="p",
+            predecessor_governed_registration_id="R1",
+            predecessor_observed_generation=1,
+            proposal_id="p", decision_id="d",
+        )
+        for forbidden in (
+            "successor_governed_registration_id",
+            "resulting_generation",
+            "authorization_token",
+            "retry_descriptor",
+        ):
+            self.assertFalse(hasattr(req, forbidden), forbidden)
 
     def test_27_m13_exact_binding_path_unaffected(self):
         from intent_kernel.promotion.registration_boundary import CanonicalPromotionRegistrationBoundary

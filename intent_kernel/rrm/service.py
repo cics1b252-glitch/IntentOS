@@ -98,6 +98,14 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         # Key: (resource_kind, resource_id, governed_registration_id) → ResourceTombstone
         self._tombstones: Dict[Tuple[ResourceType, str, str], ResourceTombstone] = {}
 
+        # M31.2B-2C: canonical lineage-consumption store. A predecessor lineage is
+        # IRREVERSIBLY consumed the moment its ResourceLineageConsumption is
+        # recorded — before the successor is visible as active. RRM is the sole
+        # governed-lineage-ID authority.
+        # Key: (resource_kind, resource_id, predecessor_governed_registration_id)
+        #   → ResourceLineageConsumption
+        self._consumptions: Dict[Tuple[ResourceType, str, str], Any] = {}
+
         if populate_defaults:
             self.populate_default_catalog()
 
@@ -143,6 +151,454 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         """
         with self._lock:
             return self._is_tombstoned(resource_kind, resource_id)
+
+    def get_resource_tombstone(
+        self,
+        resource_kind: ResourceType,
+        resource_id: str,
+        governed_registration_id: str,
+    ) -> Optional[ResourceTombstone]:
+        """M31.2B-2C — exact-lineage tombstone lookup (read-only).
+
+        Returns the canonical immutable ResourceTombstone whose
+        ``(resource_kind, resource_id, governed_registration_id)`` lineage
+        identity matches EXACTLY, or None.
+
+        Grants NO re-registration / promotion / retirement authority. This is
+        the authoritative predecessor-retirement fact surface used by
+        generation-bound re-registration decision authorization.
+        """
+        with self._lock:
+            if not isinstance(governed_registration_id, str) or not governed_registration_id:
+                return None
+            return self._tombstones.get(
+                (resource_kind, resource_id, governed_registration_id)
+            )
+
+    def _generate_governed_registration_id(
+        self,
+        resource_kind: ResourceType,
+        resource_id: str,
+    ) -> str:
+        """M31.2B-2C — RRM is the SOLE governed-lineage-ID authority.
+
+        Generates a successor lineage identity for re-registration. The caller
+        NEVER supplies a successor lineage; only RRM mints governed lineage IDs.
+        Bound to kind + resource identity; unprefixed / unguessable, never
+        derived from caller-provided strings.
+        """
+        from intent_kernel.rrm.models import ResourceType
+        kind_str = resource_kind.value.lower() if isinstance(resource_kind, ResourceType) else str(resource_kind)
+        return f"gov-{kind_str}-{uuid.uuid4().hex}"
+
+    def _materialize_successor_resource(
+        self,
+        resource_kind: ResourceType,
+        resource_id: str,
+        successor_grid: str,
+        successor_generation: int,
+        descriptor: Dict[str, Any],
+    ) -> Optional[Any]:
+        """Construct the active successor B resource from the frozen descriptor.
+
+        RRM-internal only — invoked atomically under the RRM lock as WRITE 2 of
+        a generation-bound re-registration. Successor lineage ID and generation
+        come exclusively from RRM, never from the caller or the descriptor.
+
+        B1 parity note: Project/Account mirror the ordinary-promotion construction
+        used for the other families so that all six families share one governed
+        re-registration surface.
+        """
+        from intent_kernel.rrm.models import (
+            AccountResource,
+            AgentResource,
+            AvailabilitySource,
+            CapabilityResource,
+            ExecutionEnvironmentResource,
+            ProviderResource,
+            ProjectResource,
+            ResourceOrigin,
+            ResourceStatus,
+        )
+
+        desc = descriptor if isinstance(descriptor, dict) else {}
+        display_name = desc.get("display_name", resource_id)
+        capabilities = tuple(desc.get("capability_claims", []))
+
+        base_meta: Dict[str, Any] = {
+            "promotion_via": "governed_reregistration",
+            "canonical_registration_id": successor_grid,
+        }
+
+        if resource_kind == ResourceType.PROVIDER:
+            return ProviderResource(
+                provider_id=resource_id,
+                name=display_name,
+                resource_origin=ResourceOrigin.USER_REGISTRATION,
+                availability_source=AvailabilitySource.UNKNOWN,
+                is_template=False,
+                is_configured=False,
+                has_active_account=False,
+                status=ResourceStatus.ACTIVE,
+                governed_registration_id=successor_grid,
+                generation=successor_generation,
+                metadata=base_meta,
+            )
+        if resource_kind == ResourceType.ACCOUNT:
+            return AccountResource(
+                account_id=resource_id,
+                provider_id=desc.get("provider_id", desc.get("parent_id", "")),
+                name=display_name,
+                resource_origin=ResourceOrigin.USER_REGISTRATION,
+                availability_source=AvailabilitySource.UNKNOWN,
+                is_template=False,
+                is_configured=False,
+                status=ResourceStatus.ACTIVE,
+                governed_registration_id=successor_grid,
+                generation=successor_generation,
+                metadata=base_meta,
+            )
+        if resource_kind == ResourceType.EXECUTION_ENVIRONMENT:
+            return ExecutionEnvironmentResource(
+                environment_id=resource_id,
+                type=None,
+                resource_origin=ResourceOrigin.USER_REGISTRATION,
+                availability_source=AvailabilitySource.UNKNOWN,
+                is_template=False,
+                is_discovered=False,
+                status=ResourceStatus.ACTIVE,
+                governed_registration_id=successor_grid,
+                generation=successor_generation,
+                metadata=base_meta,
+            )
+        if resource_kind == ResourceType.CAPABILITY:
+            return CapabilityResource(
+                capability_id=resource_id,
+                name=display_name,
+                resource_origin=ResourceOrigin.USER_REGISTRATION,
+                availability_source=AvailabilitySource.UNKNOWN,
+                is_template=False,
+                is_executable=False,
+                status=ResourceStatus.ACTIVE,
+                tags=list(capabilities),
+                governed_registration_id=successor_grid,
+                generation=successor_generation,
+                metadata=base_meta,
+            )
+        if resource_kind == ResourceType.AGENT:
+            return AgentResource(
+                agent_id=resource_id,
+                name=display_name,
+                resource_origin=ResourceOrigin.USER_REGISTRATION,
+                availability_source=AvailabilitySource.UNKNOWN,
+                is_template=False,
+                is_enabled=False,
+                installation_state=None,
+                status=ResourceStatus.ACTIVE,
+                governed_registration_id=successor_grid,
+                generation=successor_generation,
+                metadata=base_meta,
+            )
+        if resource_kind == ResourceType.PROJECT:
+            return ProjectResource(
+                project_id=resource_id,
+                name=display_name,
+                resource_origin=ResourceOrigin.USER_REGISTRATION,
+                availability_source=AvailabilitySource.UNKNOWN,
+                is_template=False,
+                is_demo=False,
+                status=ResourceStatus.ACTIVE,
+                governed_registration_id=successor_grid,
+                generation=successor_generation,
+                metadata=base_meta,
+            )
+        return None
+
+    def conditional_reregister_resource(
+        self,
+        request: "ConditionalReregistrationRequest",
+        materialization_descriptor: Optional[Dict[str, Any]] = None,
+    ) -> "ConditionalReregistrationResult":
+        """M31.2B-2C — RRM-governed generation-bound re-registration.
+
+        Executes the frozen MODEL_R2 mutation sequence atomically under the RRM
+        lock:
+
+            validate → detach/freeze candidate descriptor → allocate successor
+            lineage B → construct B → construct consumption(A,B,X) → construct
+            result → WRITE 1 (consumption) → WRITE 2 (active B).
+
+        Exact consumed predecessor = exact approved candidate = exact lineage B.
+        After WRITE 1 the predecessor lineage is permanently consumed; there is
+        NO rollback that reopens A. RRM is the sole governed-lineage-ID
+        authority; the caller never supplies successor lineage or resulting
+        generation.
+
+        Performs NO authorization (the promotion authority decides permission) —
+        RRM enforces only state/lifecycle facts. No arbitrary callbacks run
+        under the lock.
+        """
+        from intent_kernel.rrm.models import (
+            ConditionalReregistrationOutcome as O,
+            ConditionalReregistrationRequest,
+            ConditionalReregistrationResult,
+            ResourceLineageConsumption,
+            ResourceStatus,
+            ResourceType,
+        )
+
+        with self._lock:
+            store, id_attr = self._get_store_for_type(request.resource_kind)
+            if store is None:
+                return ConditionalReregistrationResult(
+                    outcome=O.INVALID_RESOURCE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="unsupported_resource_kind",
+                )
+            if not isinstance(request.resource_id, str) or not request.resource_id.strip():
+                return ConditionalReregistrationResult(
+                    outcome=O.INVALID_RESOURCE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="blank_resource_id",
+                )
+
+            lineage_key = (
+                request.resource_kind,
+                request.resource_id,
+                request.predecessor_governed_registration_id,
+            )
+            consumption = self._consumptions.get(lineage_key)
+            tombstone = self._tombstones.get(lineage_key)
+
+            # ------------------------------------------------------------------
+            # PHASE 1: predecessor-retirement fact (fresh re-registration only).
+            # ------------------------------------------------------------------
+            if consumption is None:
+                if tombstone is None:
+                    if self._is_tombstoned(
+                        request.resource_kind, request.resource_id
+                    ):
+                        return ConditionalReregistrationResult(
+                            outcome=O.TOMBSTONE_LINEAGE_MISMATCH,
+                            resource_kind=request.resource_kind,
+                            resource_id=request.resource_id,
+                            reason="predecessor_lineage_mismatch",
+                        )
+                    return ConditionalReregistrationResult(
+                        outcome=O.NO_TOMBSTONE,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        reason="predecessor_not_retired",
+                    )
+                if (
+                    tombstone.observed_generation
+                    != request.predecessor_observed_generation
+                ):
+                    return ConditionalReregistrationResult(
+                        outcome=O.TOMBSTONE_GENERATION_MISMATCH,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        reason="predecessor_generation_mismatch",
+                    )
+
+            # ------------------------------------------------------------------
+            # PHASE 2: existing consumption → recovery / staleness / applied.
+            # ------------------------------------------------------------------
+            if consumption is not None:
+                if (
+                    consumption.successor_candidate_proposal_id
+                    != request.proposal_id
+                    or consumption.successor_candidate_decision_id
+                    != request.decision_id
+                ):
+                    return ConditionalReregistrationResult(
+                        outcome=O.PENDING_SUCCESSOR_MISMATCH,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        reason="pending_successor_mismatch",
+                    )
+
+                successor_tombstone_key = (
+                    request.resource_kind,
+                    request.resource_id,
+                    consumption.successor_governed_registration_id,
+                )
+                if successor_tombstone_key in self._tombstones:
+                    return ConditionalReregistrationResult(
+                        outcome=O.STALE_RETIRED_LINEAGE,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        reason="successor_already_retired",
+                    )
+
+                active = self._get_resource_for_mutation(
+                    request.resource_kind, request.resource_id
+                )
+                if active is not None:
+                    active_grid = getattr(
+                        active, "governed_registration_id", ""
+                    ) or ""
+                    if active_grid == consumption.successor_governed_registration_id:
+                        return ConditionalReregistrationResult(
+                            outcome=O.REREGISTRATION_ALREADY_APPLIED,
+                            resource_kind=request.resource_kind,
+                            resource_id=request.resource_id,
+                            successor_governed_registration_id=active_grid,
+                            successor_observed_generation=getattr(
+                                active, "generation", 0
+                            ),
+                            reason="reregistration_already_applied",
+                        )
+                    return ConditionalReregistrationResult(
+                        outcome=O.ACTIVE_RESOURCE_CONFLICT,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        reason="active_resource_conflict",
+                    )
+
+                # Recovery: WRITE 1 exists, WRITE 2 missing. Reuse the STORED
+                # materialization descriptor (never a retry descriptor).
+                stored_descriptor = consumption.successor_materialization_descriptor
+                if not isinstance(stored_descriptor, dict) or not stored_descriptor:
+                    return ConditionalReregistrationResult(
+                        outcome=O.PENDING_SUCCESSOR_MISMATCH,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        reason="missing_materialization_descriptor",
+                    )
+                successor_grid = consumption.successor_governed_registration_id
+                successor_generation = consumption.predecessor_observed_generation + 1
+                successor = self._materialize_successor_resource(
+                    request.resource_kind,
+                    request.resource_id,
+                    successor_grid,
+                    successor_generation,
+                    stored_descriptor,
+                )
+                if successor is None:
+                    return ConditionalReregistrationResult(
+                        outcome=O.INVALID_RESOURCE,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        reason="unsupported_resource_kind",
+                    )
+                store[getattr(successor, id_attr)] = successor  # WRITE 2 (only)
+                return ConditionalReregistrationResult(
+                    outcome=O.REREGISTRATION_RECOVERED,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    successor_governed_registration_id=successor_grid,
+                    successor_observed_generation=successor_generation,
+                    reason="reregistration_recovered",
+                )
+
+            # ------------------------------------------------------------------
+            # PHASE 3: fresh re-registration (no consumption yet).
+            # ------------------------------------------------------------------
+            active = self._get_resource_for_mutation(
+                request.resource_kind, request.resource_id
+            )
+            if active is not None:
+                return ConditionalReregistrationResult(
+                    outcome=O.ACTIVE_RESOURCE_CONFLICT,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="resource_already_active",
+                )
+
+            if not isinstance(materialization_descriptor, dict):
+                return ConditionalReregistrationResult(
+                    outcome=O.INVALID_RESOURCE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="missing_materialization_descriptor",
+                )
+
+            from intent_kernel.rrm.models import _detach_rrm_value
+
+            try:
+                frozen_desc = _detach_rrm_value(materialization_descriptor)
+            except ValueError:
+                return ConditionalReregistrationResult(
+                    outcome=O.INVALID_RESOURCE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="unsupported_descriptor_type",
+                )
+
+            # RRM enforces lifecycle facts: re-registration into a terminal
+            # state is an invalid transition.
+            desired_status = frozen_desc.get("status")
+            if desired_status is not None:
+                try:
+                    status_val = (
+                        ResourceStatus(desired_status)
+                        if isinstance(desired_status, str)
+                        else desired_status
+                    )
+                except ValueError:
+                    status_val = None
+                if status_val in (
+                    ResourceStatus.ARCHIVED,
+                    ResourceStatus.UNINSTALLED,
+                ):
+                    return ConditionalReregistrationResult(
+                        outcome=O.INVALID_TRANSITION,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        reason="terminal_successor_state",
+                    )
+
+            successor_grid = self._generate_governed_registration_id(
+                request.resource_kind, request.resource_id
+            )
+            successor_generation = request.predecessor_observed_generation + 1
+
+            consumption = ResourceLineageConsumption(
+                resource_kind=request.resource_kind,
+                resource_id=request.resource_id,
+                predecessor_governed_registration_id=(
+                    request.predecessor_governed_registration_id
+                ),
+                predecessor_observed_generation=(
+                    request.predecessor_observed_generation
+                ),
+                successor_governed_registration_id=successor_grid,
+                successor_candidate_proposal_id=request.proposal_id,
+                successor_candidate_decision_id=request.decision_id,
+                successor_materialization_descriptor=frozen_desc,
+            )
+            self._consumptions[consumption.consumption_key] = consumption  # WRITE 1
+
+            successor = self._materialize_successor_resource(
+                request.resource_kind,
+                request.resource_id,
+                successor_grid,
+                successor_generation,
+                frozen_desc,
+            )
+            if successor is None:
+                # WRITE 1 already consumed A; there is intentionally NO rollback
+                # that reopens A. Guarded in practice by the earlier
+                # _get_store_for_type check for supported kinds.
+                return ConditionalReregistrationResult(
+                    outcome=O.INVALID_RESOURCE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="unsupported_resource_kind",
+                )
+            store[getattr(successor, id_attr)] = successor  # WRITE 2
+
+            return ConditionalReregistrationResult(
+                outcome=O.REREGISTERED,
+                resource_kind=request.resource_kind,
+                resource_id=request.resource_id,
+                successor_governed_registration_id=successor_grid,
+                successor_observed_generation=successor_generation,
+                reason="reregistered",
+            )
 
     def _get_provider_for_mutation(self, provider_id: str) -> Optional[ProviderResource]:
         """Internal method to get mutable provider for mutation operations.

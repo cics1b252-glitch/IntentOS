@@ -252,9 +252,22 @@ class ResourceTombstoneRuntimeNonActivationTest(unittest.TestCase):
         rrm_public = {n for n in dir(RegistryResourceManager) if not n.startswith("_")}
         for forbidden in ("install_tombstone", "register_tombstone", "set_tombstone"):
             self.assertNotIn(forbidden, rrm_public)
-        # No generic mutation interface accepting tombstone objects.
+        # No generic MUTATION interface accepting/installing tombstone objects.
+        # (B2C permits only read-only observation surfaces: has_tombstoned_resource
+        # and the exact-lineage get_resource_tombstone query — both are non-mutating.)
         for method_like in rrm_public:
+            if method_like in ("get_resource_tombstone", "has_tombstoned_resource"):
+                self.assertTrue(callable(getattr(RegistryResourceManager, method_like)))
+                continue
             self.assertFalse(method_like.endswith("tombstone"))
+        # the read-only exact-lineage query must not expose a mutation surface
+        self.assertTrue(
+            not any(
+                m.endswith(("install_tombstone", "write_tombstone", "set_tombstone",
+                            "add_tombstone", "mutate_tombstone", "overwrite_tombstone"))
+                for m in rrm_public
+            )
+        )
 
     def test_19_authority_ownership_remains_unchanged(self):
         # ResourceTombstone exposes NO callable helper surface; all authority

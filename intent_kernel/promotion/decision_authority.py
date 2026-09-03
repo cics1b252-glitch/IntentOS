@@ -23,6 +23,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from intent_kernel.promotion.models import (
+    ReRegistrationPrecondition,
     ResourcePromotionDecision,
     ResourcePromotionDecisionType,
     ResourcePromotionProposal,
@@ -74,8 +75,15 @@ class ResourcePromotionDecisionAuthority:
         *,
         decided_by: str = "system",
         reasoning: str = "",
+        re_registration_precondition: ReRegistrationPrecondition | None = None,
     ) -> ResourcePromotionDecision:
-        """Make a typed decision on a PENDING proposal."""
+        """Make a typed decision on a PENDING proposal.
+
+        ``re_registration_precondition`` is optional. When provided, it
+        immutably binds the exact retired predecessor (kind/id/lineage/
+        generation) that this approval authorizes re-registration for. Ordinary
+        first-time promotion decisions remain valid without it.
+        """
         proposal = self._proposal_service.get_proposal(proposal_id)
         if proposal is None:
             raise PromotionError(f"Proposal not found: {proposal_id}")
@@ -102,6 +110,7 @@ class ResourcePromotionDecisionAuthority:
             decided_by=decided_by,
             reasoning=reasoning,
             scope=proposal.requested_scope,
+            re_registration_precondition=re_registration_precondition,
         )
 
         self._decisions[decision_id] = decision

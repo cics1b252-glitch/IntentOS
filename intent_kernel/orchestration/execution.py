@@ -186,24 +186,10 @@ class CapabilityExecutionService:
                     "resource_revalidation": revalidation.to_dict(),
                 },
             )
-        cache_key = (str(mission.id), capability, idempotency_key)
-        cached = await self.idempotency_store.get(cache_key)
-        if cached is not None:
-            replay = cached
-            replay.result.metadata["idempotent_replay"] = True
-            await self._audit(
-                mission,
-                registration,
-                replay.result,
-                verdict,
-                0.0,
-                idempotency_key,
-            )
-            return replay
-
-        # M31.2A: Structural revalidation of execution preconditions at dispatch.
-        # This verifies the attached precondition artifact is structurally identical
-        # to the authorized one. It does NOT claim atomic resource freshness enforcement.
+        # M31.3B-1A: structural execution-precondition identity verification MUST
+        # precede any idempotency replay opportunity. A cached result must never
+        # bypass structural identity validation (closes the STEP_09-before-STEP_11
+        # ordering defect).
         if not self._verify_precondition_identity(resource_decision, revalidation):
             return self._error(
                 capability,
@@ -212,6 +198,26 @@ class CapabilityExecutionService:
                     "resource_resolution": resource_decision.to_dict(),
                     "resource_revalidation": revalidation.to_dict(),
                     "precondition_identity_mismatch": True,
+                },
+            )
+
+        # M31.3B-1A Hc: current canonical freshness check BEFORE the single
+        # idempotency lookup. Prevents stale cached SUCCESS from being replayed
+        # when the current RRM generation/lineage no longer matches the selected
+        # ExecutionPrecondition. READ-ONLY observation; never mutates RRM.
+        freshness_reason = self._check_current_freshness(
+            registration.executor_kind,
+            resource_decision.execution_preconditions,
+        )
+        if freshness_reason is not None:
+            return self._error(
+                capability,
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                metadata={
+                    "resource_resolution": resource_decision.to_dict(),
+                    "resource_revalidation": revalidation.to_dict(),
+                    "freshness": freshness_reason,
+                    "freshness_phase": "hc",
                 },
             )
 
@@ -229,6 +235,27 @@ class CapabilityExecutionService:
                 idempotency_key,
             )
             return replay
+
+        # M31.3B-1A Hd: on cache MISS only, perform a second canonical freshness
+        # observation immediately before dispatch. idempotency_store.get is an await
+        # point, so a resource may legitimately advance between Hc and dispatch.
+        # This is the LAST current-generation RRM observation before local dispatch.
+        # READ-ONLY observation; never mutates RRM.
+        freshness_reason = self._check_current_freshness(
+            registration.executor_kind,
+            resource_decision.execution_preconditions,
+        )
+        if freshness_reason is not None:
+            return self._error(
+                capability,
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                metadata={
+                    "resource_resolution": resource_decision.to_dict(),
+                    "resource_revalidation": revalidation.to_dict(),
+                    "freshness": freshness_reason,
+                    "freshness_phase": "hd",
+                },
+            )
 
         started = perf_counter()
         result = await self._dispatch(
@@ -279,6 +306,79 @@ class CapabilityExecutionService:
         if idempotency_key:
             await self.idempotency_store.save(cache_key, outcome)
         return outcome
+
+    def _read_current_resource(self, executor_kind: Any, resource_id: str) -> Any:
+        """Read the current canonical immutable snapshot for a dispatched resource.
+
+        READ-ONLY observation via existing public RRM observation APIs. Never
+        mutates RRM and never takes the RRM mutation lock. Returns None for an
+        unknown executor kind so callers fail closed.
+        """
+        rrm = self.resource_authority.rrm
+        if executor_kind is ExecutorKind.PROVIDER:
+            return rrm.get_provider(resource_id)
+        if executor_kind is ExecutorKind.AGENT:
+            return rrm.get_agent(resource_id)
+        if executor_kind is ExecutorKind.CORE_APP:
+            return rrm.get_capability(resource_id)
+        return None
+
+    def _check_current_freshness(
+        self,
+        executor_kind: Any,
+        preconditions: tuple[Any, ...],
+    ) -> str | None:
+        """M31.3B-1A current canonical freshness validation (Hc / Hd).
+
+        Data-only, READ-ONLY RRM observation. Returns None when the current
+        canonical RRM identities exactly match every ExecutionPrecondition, else a
+        fail-closed reason string. Exact equality only — no ">= expected" shortcut.
+
+        Supported emitted resource kinds: PROVIDER / AGENT / CAPABILITY.
+        """
+        # Lazy import to avoid circular import
+        from intent_kernel.rrm.binding import PreconditionKind
+        from intent_kernel.rrm.generation import is_valid_generation
+
+        for pc in preconditions:
+            kind = getattr(pc, "kind", None)
+            resource_id = getattr(pc, "resource_id", None)
+            expected_grid = getattr(pc, "governed_registration_id", None)
+            expected_gen = getattr(pc, "expected_generation", None)
+
+            # Malformed precondition => fail closed.
+            if not isinstance(resource_id, str) or not resource_id:
+                return "malformed_precondition"
+
+            if kind is PreconditionKind.EXISTING_RESOURCE:
+                # Fail closed on malformed expectations carried by the precondition.
+                if not isinstance(expected_grid, str) or not expected_grid:
+                    return "malformed_precondition"
+                if (
+                    not isinstance(expected_gen, int)
+                    or isinstance(expected_gen, bool)
+                    or not is_valid_generation(expected_gen)
+                ):
+                    return "malformed_precondition"
+
+                snapshot = self._read_current_resource(executor_kind, resource_id)
+                if snapshot is None:
+                    return "resource_not_found"
+                current_grid = getattr(snapshot, "governed_registration_id", None)
+                current_gen = getattr(snapshot, "generation", None)
+                if not isinstance(current_grid, str) or not current_grid:
+                    return "registration_lineage_mismatch"
+                if not is_valid_generation(current_gen):
+                    return "legacy_unversioned"
+                if current_grid != expected_grid:
+                    return "registration_lineage_mismatch"
+                if current_gen != expected_gen:
+                    return "generation_mismatch"
+            else:
+                # EXPECTED_ABSENCE / unknown kinds cannot be emitted in this dispatch
+                # path; keep handling fail-closed and minimal.
+                return "unsupported_precondition"
+        return None
 
     async def _dispatch(
         self,

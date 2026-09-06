@@ -257,6 +257,251 @@ class CanonicalPromotionRegistrationBoundary:
             reason="registered",
         )
 
+    def govern_existing(
+        self,
+        proposal_id: str,
+        decision_id: str,
+        *,
+        fresh: bool = True,
+    ) -> ResourcePromotionResult:
+        """M31.3B-1B — first-govern an existing pre-governed canonical resource.
+
+        Inverse conflict direction of ``register``: the governed canonical
+        resource MUST already exist in RRM (pre-governed, ungoverned lineage).
+        RRM performs the atomic first governance (single lineage mint, exact
+        generation advance) under its lock; the boundary NEVER mints lineage
+        and NEVER supplies a resulting generation.
+
+        The decision is consumed ONLY after a successful apply / recovery /
+        already-applied report. On any failure the decision remains retryable
+        so an exact retry is idempotent at RRM level.
+        """
+        reg_at = utc_iso()
+
+        # --- TOCTOU CHECK 1: proposal still exists ---
+        proposal = self._proposals.get_proposal(proposal_id)
+        if proposal is None:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id="",
+                registered_at=reg_at,
+                reason="proposal_not_found",
+            )
+
+        # --- TOCTOU CHECK 2: proposal still APPROVED ---
+        if proposal.status is not ResourcePromotionStatus.APPROVED:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason=f"proposal_not_approved_{proposal.status.value}",
+            )
+
+        # --- TOCTOU CHECK 3: decision exists, is APPROVED, matches exact proposal ---
+        decision = self._decisions.get_decision(decision_id)
+        if decision is None:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="decision_not_found",
+            )
+        if decision.decision_type is not ResourcePromotionDecisionType.APPROVE:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="decision_not_approved",
+            )
+        if decision.proposal_id != proposal_id:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="decision_proposal_mismatch",
+            )
+
+        # --- TOCTOU CHECK 4: decision not yet consumed ---
+        if self._decisions.is_consumed(decision_id):
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="decision_already_consumed",
+            )
+
+        # --- TOCTOU CHECK 5: discovery evidence still exists ---
+        evidence = self._proposals._discovery.get(proposal.discovery_id)  # noqa: SLF001
+        if evidence is None:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="evidence_not_found",
+            )
+
+        # --- TOCTOU CHECK 6: evidence identity matches proposal provenance ---
+        if evidence.discovery_id != proposal.evidence_identity:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="evidence_identity_mismatch",
+            )
+
+        # --- TOCTOU CHECK 7: evidence not revoked ---
+        if evidence.status is ResourceDiscoveryStatus.REVOKED:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="evidence_revoked",
+            )
+
+        # --- TOCTOU CHECK 8: evidence not stale (if freshness required) ---
+        if fresh and evidence.status is ResourceDiscoveryStatus.STALE:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="evidence_stale",
+            )
+
+        # --- TOCTOU CHECK 9: scope still matches ---
+        if decision.scope != proposal.requested_scope:
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="scope_mismatch",
+            )
+
+        # --- TOCTOU CHECK 10: the first-governance precondition is bound ---
+        precondition = getattr(decision, "first_governance_precondition", None)
+        from intent_kernel.promotion.models import FirstGovernancePrecondition
+        if not isinstance(precondition, FirstGovernancePrecondition):
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="missing_first_governance_precondition",
+            )
+
+        # --- TOCTOU CHECK 11: precondition names the EXACT proposed resource ---
+        proposal_kind_str = (
+            getattr(proposal.resource_kind, "value", "") or ""
+        )
+        precondition_kind_str = (
+            getattr(precondition.resource_kind, "value", "") or ""
+        ).upper()
+        if (
+            proposal_kind_str != precondition_kind_str
+            or precondition.resource_id != proposal.resource_id
+        ):
+            return ResourcePromotionResult(
+                success=False,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type="",
+                resource_id=proposal.resource_id,
+                registered_at=reg_at,
+                reason="precondition_proposal_mismatch",
+            )
+
+        from intent_kernel.rrm.models import (
+            FirstGovernanceOutcome,
+            FirstGovernanceRequest,
+        )
+
+        request = FirstGovernanceRequest(
+            resource_kind=precondition.resource_kind,
+            resource_id=precondition.resource_id,
+            expected_pre_governed_generation=(
+                precondition.expected_pre_governed_generation
+            ),
+            expected_ungoverned_lineage=True,
+            proposal_id=proposal_id,
+            decision_id=decision_id,
+        )
+
+        fg = self._rrm.conditional_govern_existing_resource(request)
+        outcome = getattr(fg, "outcome", None)
+        reg_type = f"{self._kind_family_string(proposal)}/first_governance"
+
+        success_outcomes = (
+            FirstGovernanceOutcome.APPLIED,
+            FirstGovernanceOutcome.ALREADY_APPLIED_SAME_DECISION,
+        )
+        if outcome in success_outcomes:
+            self._decisions.consume(decision_id)
+            self._proposals.transition_to_consumed(proposal_id)
+            reason = (
+                "first_governance_applied"
+                if outcome is FirstGovernanceOutcome.APPLIED
+                else "first_governance_already_applied"
+            )
+            return ResourcePromotionResult(
+                success=True,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                registration_type=reg_type,
+                resource_id=precondition.resource_id,
+                registered_at=reg_at,
+                reason=reason,
+                governed_registration_id=(
+                    getattr(fg, "governed_registration_id", "") or ""
+                ),
+                observed_generation=(
+                    getattr(fg, "resulting_generation", 0) or 0
+                ),
+            )
+
+        return ResourcePromotionResult(
+            success=False,
+            proposal_id=proposal_id,
+            decision_id=decision_id,
+            registration_type=reg_type,
+            resource_id=precondition.resource_id,
+            registered_at=reg_at,
+            reason=(getattr(outcome, "value", "") or "first_governance_failed"),
+        )
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

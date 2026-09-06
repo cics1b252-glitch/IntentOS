@@ -45,6 +45,9 @@ from intent_kernel.rrm.models import (
     ConditionalRetirementResult,
     ConditionalUpdateOutcome,
     ConditionalUpdateResult,
+    FirstGovernanceOutcome,
+    FirstGovernanceRequest,
+    FirstGovernanceResult,
 )
 from intent_kernel.rrm.ports import ProjectRegistryPort, ResourceQueryPort, RRMRegistryPort
 from intent_kernel.time_utils import utc_iso
@@ -105,6 +108,14 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         # Key: (resource_kind, resource_id, predecessor_governed_registration_id)
         #   → ResourceLineageConsumption
         self._consumptions: Dict[Tuple[ResourceType, str, str], Any] = {}
+
+        # M31.3B-1B: canonical first-governance fact store. Keyed by
+        # (resource_kind, resource_id) → (proposal_id, decision_id,
+        # governed_registration_id, resulting_generation). Written atomically
+        # under the RRM lock BEFORE the active resource becomes governed so that
+        # an exact retry is idempotent: same lineage, NO second mint, NO further
+        # generation advance.
+        self._first_governances: Dict[Tuple[ResourceType, str], Tuple[str, str, str, int]] = {}
 
         if populate_defaults:
             self.populate_default_catalog()
@@ -600,9 +611,194 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 reason="reregistered",
             )
 
+    def conditional_govern_existing_resource(
+        self,
+        request: FirstGovernanceRequest,
+    ) -> FirstGovernanceResult:
+        """M31.3B-1B — atomically govern an existing pre-governed resource.
+
+        Executes the typed first-governance mutation in a SINGLE critical
+        section under ``self._lock``:
+
+            validate → locate → pre-governed lineage check (grid == "")
+            → expected pre-governed generation check → RRM-internal lineage
+            mint → record governance fact (WRITE 1) → apply governed identity
+            + generation N+1 (WRITE 2) → detached immutable result.
+
+        RRM is the SOLE governed-lineage-ID authority and the caller supplies
+        NEITHER a new governed registration lineage NOR a resulting generation:
+        the governing grid is minted internally via
+        ``_generate_governed_registration_id`` and the resulting generation is
+        ALWAYS ``expected_pre_governed_generation + 1``.
+
+        Retries are idempotent: an exact same-decision retry returns
+        ALREADY_APPLIED_SAME_DECISION with the STORED lineage and generation —
+        never a second mint and never a further generation advance. A retry
+        whose fact was recorded but whose active write is missing (recovery
+        window) is completed with the STORED lineage/generation, never a retry
+        mint.
+
+        Performs NO authorization (the bootstrap decision authority decides
+        permission) — RRM enforces only state/lifecycle facts. No arbitrary
+        callbacks run under the lock.
+        """
+        from intent_kernel.rrm.models import (
+            ResourceStatus,
+            FirstGovernanceOutcome as O,
+        )
+
+        with self._lock:
+            store, _id_attr = self._get_store_for_type(request.resource_kind)
+            if store is None:
+                return FirstGovernanceResult(
+                    outcome=O.INVALID_STATE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="unsupported_resource_kind",
+                )
+            if not request.expected_ungoverned_lineage:
+                return FirstGovernanceResult(
+                    outcome=O.INVALID_STATE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="ungoverned_lineage_expected",
+                )
+
+            key = (request.resource_kind, request.resource_id)
+            record = self._first_governances.get(key)
+            existing = store.get(request.resource_id)
+
+            # ------------------------------------------------------------------
+            # PHASE 1: recorded first-governance fact → idempotent retry/recovery.
+            # ------------------------------------------------------------------
+            if record is not None:
+                rec_prop, rec_dec, rec_grid, rec_gen = record
+                if (rec_prop, rec_dec) == (request.proposal_id, request.decision_id):
+                    if existing is None:
+                        return FirstGovernanceResult(
+                            outcome=O.NOT_FOUND,
+                            resource_kind=request.resource_kind,
+                            resource_id=request.resource_id,
+                            reason="resource_not_found",
+                        )
+                    active_grid = (
+                        getattr(existing, "governed_registration_id", "") or ""
+                    )
+                    if active_grid == rec_grid:
+                        return FirstGovernanceResult(
+                            outcome=O.ALREADY_APPLIED_SAME_DECISION,
+                            resource_kind=request.resource_kind,
+                            resource_id=request.resource_id,
+                            governed_registration_id=rec_grid,
+                            resulting_generation=rec_gen,
+                            reason="first_governance_already_applied",
+                        )
+                    if active_grid == "":
+                        # Recovery: WRITE 1 (fact) exists, WRITE 2 (governed
+                        # active) missing. Reuse the STORED lineage/generation —
+                        # never a retry mint, never a further advance.
+                        existing.governed_registration_id = rec_grid
+                        existing.generation = rec_gen
+                        existing.updated_at = utc_iso()
+                        return FirstGovernanceResult(
+                            outcome=O.APPLIED,
+                            resource_kind=request.resource_kind,
+                            resource_id=request.resource_id,
+                            governed_registration_id=rec_grid,
+                            resulting_generation=rec_gen,
+                            reason="first_governance_recovered",
+                        )
+                    return FirstGovernanceResult(
+                        outcome=O.ALREADY_GOVERNED,
+                        resource_kind=request.resource_kind,
+                        resource_id=request.resource_id,
+                        governed_registration_id=active_grid,
+                        resulting_generation=getattr(existing, "generation", 0),
+                        reason="governed_by_other_lineage",
+                    )
+                return FirstGovernanceResult(
+                    outcome=O.ALREADY_GOVERNED,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="governed_by_other_decisions",
+                )
+
+            # ------------------------------------------------------------------
+            # PHASE 2: fresh first governance — state/lifecycle facts only.
+            # ------------------------------------------------------------------
+            if existing is None:
+                return FirstGovernanceResult(
+                    outcome=O.NOT_FOUND,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="resource_not_found",
+                )
+
+            active_grid = (
+                getattr(existing, "governed_registration_id", "") or ""
+            )
+            if active_grid:
+                return FirstGovernanceResult(
+                    outcome=O.ALREADY_GOVERNED,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    governed_registration_id=active_grid,
+                    resulting_generation=getattr(existing, "generation", 0),
+                    reason="resource_already_governed",
+                )
+
+            actual_gen = getattr(existing, "generation", 0)
+            if actual_gen != request.expected_pre_governed_generation:
+                return FirstGovernanceResult(
+                    outcome=O.GENERATION_MISMATCH,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    governed_registration_id="",
+                    resulting_generation=0,
+                    reason="pre_governed_generation_mismatch",
+                )
+
+            if existing.status in (
+                ResourceStatus.ARCHIVED,
+                ResourceStatus.UNINSTALLED,
+            ):
+                return FirstGovernanceResult(
+                    outcome=O.INVALID_STATE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason="terminal_state",
+                )
+
+            governed_registration_id = self._generate_governed_registration_id(
+                request.resource_kind, request.resource_id
+            )
+            resulting_generation = request.expected_pre_governed_generation + 1
+
+            # WRITE 1 (record) BEFORE the active resource becomes governed so an
+            # interrupted apply is recoverably idempotent at retry time.
+            self._first_governances[key] = (
+                request.proposal_id,
+                request.decision_id,
+                governed_registration_id,
+                resulting_generation,
+            )
+
+            existing.governed_registration_id = governed_registration_id
+            existing.generation = resulting_generation
+            existing.updated_at = utc_iso()  # WRITE 2
+
+            return FirstGovernanceResult(
+                outcome=O.APPLIED,
+                resource_kind=request.resource_kind,
+                resource_id=request.resource_id,
+                governed_registration_id=governed_registration_id,
+                resulting_generation=resulting_generation,
+                reason="",
+            )
+
     def _get_provider_for_mutation(self, provider_id: str) -> Optional[ProviderResource]:
         """Internal method to get mutable provider for mutation operations.
-        
+
         WARNING: This returns the canonical mutable resource. Should only be used
         by RRM internal mutation methods (register, update, etc.).
         """

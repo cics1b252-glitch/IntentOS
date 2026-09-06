@@ -408,6 +408,7 @@ class CapabilityExecutionService:
                     limits=AgentLimits(),
                 ),
                 agent_id=registration.executor_id,
+                expected_executor=registration.executor,
             )
         self.provider_manager.reset_execution_tracking()
         provider = self.provider_manager.bind_selected(

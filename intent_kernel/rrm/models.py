@@ -1554,3 +1554,94 @@ class ConditionalReregistrationResult:
     successor_governed_registration_id: Optional[str] = None
     successor_observed_generation: Optional[int] = None
     reason: str = ""
+
+
+class FirstGovernanceOutcome(str, Enum):
+    """M31.3B-1B — deterministic first-governance outcomes.
+
+    RRM enforces state/lifecycle facts (resource present, ungoverned lineage,
+    expected pre-governed generation); the promotion authority decides
+    approval. NO authorization outcome exists at RRM level.
+    """
+
+    APPLIED = "applied"
+    ALREADY_APPLIED_SAME_DECISION = "already_applied_same_decision"
+    GENERATION_MISMATCH = "generation_mismatch"
+    ALREADY_GOVERNED = "already_governed"
+    NOT_FOUND = "not_found"
+    INVALID_STATE = "invalid_state"
+
+
+@dataclass(frozen=True, slots=True)
+class FirstGovernanceRequest:
+    """M31.3B-1B — immutable request for first governance of a pre-governed resource.
+
+    Governs an EXISTING canonical resource that is still in its pre-governed
+    state (``governed_registration_id == ""``, canonical generation N). The
+    caller supplies NO new governed registration lineage and NO resulting
+    generation: RRM is the sole governed-lineage-ID authority and the resulting
+    generation is ALWAYS ``expected_pre_governed_generation + 1``.
+
+    ``expected_pre_governed_generation`` is a precondition (the observed
+    canonical N), exactly like ``predecessor_observed_generation`` in
+    re-registration — NOT a caller-supplied resulting generation.
+    """
+
+    resource_kind: ResourceType
+    resource_id: str
+    expected_pre_governed_generation: int
+    expected_ungoverned_lineage: bool = True
+    proposal_id: str = ""
+    decision_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if (
+            not isinstance(self.expected_pre_governed_generation, int)
+            or isinstance(self.expected_pre_governed_generation, bool)
+            or not is_valid_generation(self.expected_pre_governed_generation)
+        ):
+            raise ValueError(
+                "expected_pre_governed_generation must be a governed/versioned "
+                "generation (positive int, never bool); legacy/unversioned "
+                "generations are NOT silently promoted"
+            )
+        if not self.expected_ungoverned_lineage:
+            raise ValueError(
+                "first governance requires expected_ungoverned_lineage=True"
+            )
+        if not isinstance(self.proposal_id, str) or not self.proposal_id.strip():
+            raise ValueError("proposal_id must be a non-empty string")
+        if not isinstance(self.decision_id, str) or not self.decision_id.strip():
+            raise ValueError("decision_id must be a non-empty string")
+        if hasattr(self, "governed_registration_id") or hasattr(
+            self, "resulting_generation"
+        ):
+            raise ValueError(
+                "first governance request must not carry caller-supplied "
+                "governed lineage or resulting generation"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class FirstGovernanceResult:
+    """M31.3B-1B — immutable result of a conditional first governance.
+
+    On APPLIED / ALREADY_APPLIED_SAME_DECISION, ``governed_registration_id``
+    is the RRM-minted lineage and ``resulting_generation`` is
+    ``expected_pre_governed_generation + 1``. On ALL other outcomes both are
+    empty/zero — NO fake values.
+    """
+
+    outcome: FirstGovernanceOutcome
+    resource_kind: ResourceType
+    resource_id: str
+    governed_registration_id: str = ""
+    resulting_generation: int = 0
+    reason: str = ""

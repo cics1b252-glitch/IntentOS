@@ -13,6 +13,8 @@ from intent_kernel.rrm.models import (
     AgentResource,
     CapabilityResource,
     ExecutionEnvironmentResource,
+    FirstGovernanceRequest,
+    FirstGovernanceResult,
     ProjectResource,
     ProviderResource,
     ResourceHealthReport,
@@ -94,6 +96,14 @@ class RRMRegistryPort(Protocol):
     # Query & Status Operations
     def query_resources(self, filter_criteria: ResourceQueryFilter) -> List[Any]: ...
     def update_resource_status(self, resource_type: ResourceType, resource_id: str, status: ResourceStatus) -> bool: ...
+
+    # Registration Lineage Operations
+    def conditional_reregister_resource(self, request: Any) -> Any: ...
+
+    # M31.3B-1B: First Governance (atomic, canonical-lineage minting)
+    def conditional_govern_existing_resource(
+        self, request: FirstGovernanceRequest,
+    ) -> FirstGovernanceResult: ...
 
     # Health & Metrics
     def check_health(self) -> ResourceHealthReport: ...

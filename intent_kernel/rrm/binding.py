@@ -241,7 +241,7 @@ class CanonicalResourceBindingAuthority:
 
         if entry.executor_kind is ExecutorKind.PROVIDER:
             provider = self.rrm.get_provider(entry.executor_id)
-            if provider is not None and is_valid_generation(getattr(provider, "generation", 0)):
+            if self._resource_is_governed(provider):
                 preconditions.append(
                     ExecutionPrecondition(
                         kind=PreconditionKind.EXISTING_RESOURCE,
@@ -252,7 +252,7 @@ class CanonicalResourceBindingAuthority:
                 )
         elif entry.executor_kind is ExecutorKind.AGENT:
             agent = self.rrm.get_agent(entry.executor_id)
-            if agent is not None and is_valid_generation(getattr(agent, "generation", 0)):
+            if self._resource_is_governed(agent):
                 preconditions.append(
                     ExecutionPrecondition(
                         kind=PreconditionKind.EXISTING_RESOURCE,
@@ -263,7 +263,7 @@ class CanonicalResourceBindingAuthority:
                 )
         elif entry.executor_kind is ExecutorKind.CORE_APP:
             capability_resource = self.rrm.get_capability(entry.capability.name)
-            if capability_resource is not None and is_valid_generation(getattr(capability_resource, "generation", 0)):
+            if self._resource_is_governed(capability_resource):
                 preconditions.append(
                     ExecutionPrecondition(
                         kind=PreconditionKind.EXISTING_RESOURCE,
@@ -275,6 +275,19 @@ class CanonicalResourceBindingAuthority:
 
         return preconditions
 
+    @staticmethod
+    def _resource_is_governed(resource: Any) -> bool:
+        """M31.3B-1B — a pre-governed resource is governed ONLY when it carries
+        a non-empty canonical governed registration lineage AND a valid canonical
+        generation. A resource with an empty lineage (grid == "") is NOT
+        governed — it must never produce an EXISTING_RESOURCE precondition or a
+        governed eligibility hit."""
+        return bool(
+            resource is not None
+            and (getattr(resource, "governed_registration_id", "") or "")
+            and is_valid_generation(getattr(resource, "generation", 0))
+        )
+
     def _rrm_eligible(self, entry: Any) -> bool:
         # Lazy import to avoid circular import
         from intent_kernel.orchestration.registry import ExecutorKind
@@ -282,16 +295,27 @@ class CanonicalResourceBindingAuthority:
         if entry.executor_kind is ExecutorKind.CORE_APP:
             resource = self.rrm.get_capability(entry.capability.name)
             return bool(
-                resource and resource.is_eligible
+                resource and self._resource_is_governed(resource)
+                and resource.is_eligible
                 and resource.metadata.get("executor_kind") == "core_app"
                 and resource.metadata.get("executor_id") == entry.executor_id
             )
         if entry.executor_kind is ExecutorKind.AGENT:
             resource = self.rrm.get_agent(entry.executor_id)
-            return bool(resource and resource.is_eligible and entry.capability.name in resource.capabilities)
+            return bool(
+                resource
+                and self._resource_is_governed(resource)
+                and resource.is_eligible
+                and entry.capability.name in resource.capabilities
+            )
         if entry.executor_kind is ExecutorKind.PROVIDER:
             resource = self.rrm.get_provider(entry.executor_id)
             capabilities = resource.metadata.get("capabilities", []) if resource else []
             provider_capability = entry.capability.name.removeprefix("provider.")
-            return bool(resource and resource.is_eligible and provider_capability in capabilities)
+            return bool(
+                resource
+                and self._resource_is_governed(resource)
+                and resource.is_eligible
+                and provider_capability in capabilities
+            )
         return False

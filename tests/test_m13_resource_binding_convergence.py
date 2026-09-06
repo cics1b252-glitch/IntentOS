@@ -17,13 +17,16 @@ from intent_kernel.contracts import (
     ProviderResponse,
 )
 from intent_kernel.orchestration.registry import ExecutorKind
+from intent_kernel.promotion.models import BootstrapResourceDeclaration
 from intent_kernel.providers.authority import CanonicalProviderAuthority
 from intent_kernel.rrm.models import (
     AvailabilitySource,
     CapabilityResource,
-    ProviderResource,
+    ConditionalResourceStatusRequest,
+    ConditionalUpdateOutcome,
     ResourceOrigin,
     ResourceStatus,
+    ResourceType,
 )
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.adapter import RRMToCORAdapter
@@ -88,14 +91,42 @@ def _register_switchable(components, app: SwitchableApp) -> None:
     components.capability_router.register(app)
     components.capability_registry.register_core_app(app)
     RuntimeResourceProjection(components.resource_manager).project_core_app(app)
+    _govern_core_app_binding(components, app.app_id, "resource.switchable")
+
+
+def _govern_core_app_binding(components, executor_id: str, capability_name: str) -> None:
+    """M31.3B-1B — govern a runtime-added core-app binding via the production
+    chain (single source: canonical capability registry)."""
+    registrations = components.capability_registry.discover(
+        capability_name,
+        executor_kind=ExecutorKind.CORE_APP,
+    )
+    registration = next(
+        r for r in registrations if r.executor_id == executor_id
+    )
+    report = components.resource_promotion_service.bootstrap_govern(
+        [BootstrapResourceDeclaration.from_registration(registration)]
+    )
+    assert report.success, [
+        (e.resource_id, e.reason) for e in report.entries
+    ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [ResourceStatus.UNAVAILABLE, ResourceStatus.DEGRADED])
 async def test_registered_healthy_binding_cannot_override_rrm(status, tmp_path):
     components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
-    resource = components.resource_manager.get_capability("finance.intent")
-    resource.status = status
+    snapshot = components.resource_manager.get_capability("finance.intent")
+    update = components.resource_manager.conditional_update_status(
+        ConditionalResourceStatusRequest(
+            resource_type=ResourceType.CAPABILITY,
+            resource_id="finance.intent",
+            expected_governed_registration_id=snapshot.governed_registration_id,
+            expected_generation=snapshot.generation,
+            desired_status=status,
+        )
+    )
+    assert update.outcome is ConditionalUpdateOutcome.APPLIED
 
     decision = await components.capability_execution_service.resource_authority.resolve(
         "finance.intent"
@@ -113,8 +144,12 @@ async def test_registry_only_and_rrm_only_resources_are_not_executable(tmp_path)
     components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
     authority = components.capability_execution_service.resource_authority
 
-    components.resource_manager.unregister_capability("finance.intent")
-    registry_only = await authority.resolve("finance.intent")
+    app = SwitchableApp()
+    components.capability_router.register(app)
+    components.capability_registry.register_core_app(app)
+    # Deliberately NOT projected into RRM and NOT governed: a registry-only
+    # binding must never become executable.
+    registry_only = await authority.resolve("resource.switchable")
 
     components.resource_manager.register_capability(CapabilityResource(
         capability_id="rrm.only",
@@ -128,6 +163,7 @@ async def test_registry_only_and_rrm_only_resources_are_not_executable(tmp_path)
     assert registry_only.available is False
     assert registry_only.registered is True
     assert registry_only.rrm_eligible is False
+    assert registry_only.reason == "rrm_rejected_bindings"
     assert rrm_only.available is False
     assert rrm_only.registered is False
     assert rrm_only.reason == "binding_missing"
@@ -183,16 +219,13 @@ async def test_stale_registry_binding_is_rejected_before_dispatch(tmp_path):
 
 @pytest.mark.asyncio
 async def test_canonical_provider_execution_uses_observed_invocation_boundary(tmp_path):
-    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
-    components.resource_manager.register_provider(ProviderResource(
-        provider_id="mock",
-        name="mock",
-        is_configured=True,
-        has_active_account=True,
-        resource_origin=ResourceOrigin.PROVIDER_DISCOVERY,
-        availability_source=AvailabilitySource.RUNTIME_DISCOVERY,
-        metadata={"capabilities": ["text_completion"]},
-    ))
+    spare = RecordingProvider("spare")
+    components = (
+        KernelBuilder()
+        .with_provider("spare", spare, default=True)
+        .with_pkb_path(tmp_path / "pkb")
+        .build()
+    )
     mission = await _running_mission(components)
 
     outcome = await components.capability_execution_service.execute(
@@ -203,8 +236,8 @@ async def test_canonical_provider_execution_uses_observed_invocation_boundary(tm
     )
 
     assert outcome.result.success is True
-    assert components.provider_manager.last_attempted == "mock"
-    assert components.provider_manager.last_used == "mock"
+    assert components.provider_manager.last_attempted == "spare"
+    assert components.provider_manager.last_used == "spare"
     assert outcome.result.metadata["provider_invocation_attempted"] is True
 
 

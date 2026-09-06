@@ -149,6 +149,53 @@ class ReRegistrationPrecondition:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class FirstGovernancePrecondition:
+    """M31.3B-1B — immutable bootstrap first-governance precondition.
+
+    Carried immutably on an approved ResourcePromotionDecision when the decision
+    authorizes first governance of an EXISTING pre-governed canonical resource.
+    DATA ONLY — no authority, no governed registration lineage, no candidate
+    identity.
+
+    Exact semantic fields correspond to the canonical
+    ``FirstGovernanceRequest(resource_kind, resource_id,
+    expected_pre_governed_generation, expected_ungoverned_lineage)`` used for
+    authorization.
+
+    No defaults convert a missing generation into 0 or 1: a construction without
+    an explicit valid pre-governed generation FAILS CLOSED.
+    """
+
+    resource_kind: "ResourceType"
+    resource_id: str
+    expected_pre_governed_generation: int
+    expected_ungoverned_lineage: bool = True
+
+    def __post_init__(self) -> None:
+        from intent_kernel.rrm.models import ResourceType
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if (
+            not isinstance(self.expected_pre_governed_generation, int)
+            or isinstance(self.expected_pre_governed_generation, bool)
+            or self.expected_pre_governed_generation < 1
+        ):
+            raise ValueError(
+                "expected_pre_governed_generation must be a positive int (>=1), "
+                "never a missing/legacy 0 or 1 default"
+            )
+        if not self.expected_ungoverned_lineage:
+            raise ValueError(
+                "first governance requires expected_ungoverned_lineage=True"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Frozen dataclasses
 # ---------------------------------------------------------------------------
@@ -222,6 +269,7 @@ class ResourcePromotionDecision:
     scope: str = ""
     metadata: dict[str, object] = field(default_factory=dict, compare=False)
     re_registration_precondition: Optional["ReRegistrationPrecondition"] = None
+    first_governance_precondition: Optional["FirstGovernancePrecondition"] = None
 
     def __post_init__(self) -> None:
         if (
@@ -231,6 +279,23 @@ class ResourcePromotionDecision:
             raise ValueError(
                 "re_registration_precondition must be a ReRegistrationPrecondition "
                 "or None"
+            )
+        if (
+            self.first_governance_precondition is not None
+            and not isinstance(
+                self.first_governance_precondition, FirstGovernancePrecondition
+            )
+        ):
+            raise ValueError(
+                "first_governance_precondition must be a "
+                "FirstGovernancePrecondition or None"
+            )
+        if (
+            self.re_registration_precondition is not None
+            and self.first_governance_precondition is not None
+        ):
+            raise ValueError(
+                "a decision may carry re_registration or first_governance, not both"
             )
         object.__setattr__(
             self, "metadata", _detach_promotion_value(self.metadata),
@@ -256,6 +321,16 @@ class ResourcePromotionDecision:
                     p.retired_governed_registration_id
                 ),
                 "retired_observed_generation": p.retired_observed_generation,
+            }
+        if self.first_governance_precondition is not None:
+            p = self.first_governance_precondition
+            out["first_governance_precondition"] = {
+                "resource_kind": p.resource_kind.value,
+                "resource_id": p.resource_id,
+                "expected_pre_governed_generation": (
+                    p.expected_pre_governed_generation
+                ),
+                "expected_ungoverned_lineage": p.expected_ungoverned_lineage,
             }
         return out
 
@@ -289,3 +364,131 @@ class ResourcePromotionResult:
             "observed_generation": self.observed_generation,
             "re_registration": self.re_registration,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapResourceDeclaration:
+    """M31.3B-1B — immutable first-governance declaration for a built-in resource.
+
+    BOOTSTRAP_DATA_ONLY. Names the EXISTING pre-governed canonical resource
+    (kind + id) that the bootstrap policy will govern. Carries NO governance
+    authority, NO governed lineage, and NO generation — the observed pre-governed
+    generation is derived by the governance pipeline from the detached RRM
+    snapshot, never supplied on the declaration.
+
+    ``resource_id`` resolves the exact RRM resource:
+      - core_app  → the canonical CAPABILITY resource named by ``capability_name``
+      - agent     → the canonical AGENT resource keyed by ``executor_id``
+      - provider  → the canonical PROVIDER resource keyed by ``executor_id``
+    """
+
+    resource_kind: "ResourceType"
+    capability_name: str
+    executor_kind: str
+    executor_id: str
+    executor: object = field(default=None, compare=False)
+
+    def __post_init__(self) -> None:
+        from intent_kernel.rrm.models import ResourceType
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if self.resource_kind.value not in ("capability", "agent", "provider"):
+            raise ValueError(
+                "bootstrap governance supports capability/agent/provider only, "
+                f"got {self.resource_kind.value}"
+            )
+        if not isinstance(self.capability_name, str) or not self.capability_name.strip():
+            raise ValueError("capability_name must be a non-empty string")
+        if self.executor_kind not in ("core_app", "agent", "provider"):
+            raise ValueError(
+                "executor_kind must be core_app/agent/provider, "
+                f"got {self.executor_kind!r}"
+            )
+        if not isinstance(self.executor_id, str) or not self.executor_id.strip():
+            raise ValueError("executor_id must be a non-empty string")
+
+    @property
+    def resource_id(self) -> str:
+        """Exact canonical RRM resource id for this declaration."""
+        if self.executor_kind == "core_app":
+            return self.capability_name
+        return self.executor_id
+
+    @property
+    def discovery_kind(self) -> "ResourceDiscoveryKind":
+        """Discovery kind observed for this declaration's canonical resource."""
+        from intent_kernel.discovery.models import ResourceDiscoveryKind
+        if self.executor_kind == "provider":
+            return ResourceDiscoveryKind.PROVIDER
+        if self.executor_kind == "agent":
+            return ResourceDiscoveryKind.AGENT
+        return ResourceDiscoveryKind.CAPABILITY
+
+    @classmethod
+    def from_registration(cls, registration: object) -> "BootstrapResourceDeclaration":
+        """Declare from a canonical capability-registry registration."""
+        from intent_kernel.rrm.models import ResourceType
+
+        executor_kind_val = (
+            getattr(getattr(registration, "executor_kind", None), "value", None)
+        )
+        kind_map = {
+            "core_app": ResourceType.CAPABILITY,
+            "agent": ResourceType.AGENT,
+            "provider": ResourceType.PROVIDER,
+        }
+        resource_kind = kind_map.get(executor_kind_val)
+        if resource_kind is None:
+            raise ValueError(
+                "unsupported registration executor_kind: "
+                f"{executor_kind_val!r}"
+            )
+        capability = getattr(registration, "capability", None)
+        capability_name = (
+            getattr(capability, "name", "") if capability is not None else ""
+        )
+        return cls(
+            resource_kind=resource_kind,
+            capability_name=capability_name,
+            executor_kind=executor_kind_val,
+            executor_id=getattr(registration, "executor_id", ""),
+            executor=getattr(registration, "executor", None),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapGovernanceEntry:
+    """M31.3B-1B — immutable per-resource outcome of the bootstrap governance pass."""
+
+    resource_kind: "ResourceType"
+    resource_id: str
+    capability_name: str
+    executor_kind: str
+    executor_id: str
+    success: bool
+    outcome: str = ""
+    governed_registration_id: str = ""
+    resulting_generation: int = 0
+    reason: str = ""
+    verified: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapGovernanceReport:
+    """M31.3B-1B — immutable aggregate report of the bootstrap governance pass.
+
+    ``success`` is True ONLY when every entry governed successfully AND the
+    detached post-governance verification pass confirms each governed lineage.
+    """
+
+    success: bool
+    entries: tuple[BootstrapGovernanceEntry, ...] = ()
+    verified: bool = False
+    reason: str = ""
+
+    @property
+    def governed_count(self) -> int:
+        return sum(1 for e in self.entries if e.success)

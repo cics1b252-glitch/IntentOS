@@ -88,6 +88,31 @@ LEGACY_ADAPTERS = (
 )
 
 
+def _build_bootstrap_declarations(capability_registry: object) -> list[Any]:
+    """M31.3B-1B — derive first-governance declarations for built-in resources.
+
+    SINGLE SOURCE OF TRUTH: the canonical capability registry
+    (``discover(None)`` = every registration). Declarations are deduplicated
+    by (canonical kind, canonical resource id) so a core-app capability
+    (8), an agent (1 per agent; multiple capabilities share the agent) and a
+    provider (1) each appear exactly once.
+    """
+    from intent_kernel.promotion.models import BootstrapResourceDeclaration
+
+    seen: set[tuple[str, str]] = set()
+    declarations: list[Any] = []
+    for registration in capability_registry.discover(None):
+        declaration = BootstrapResourceDeclaration.from_registration(
+            registration
+        )
+        key = (declaration.resource_kind.value, declaration.resource_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        declarations.append(declaration)
+    return declarations
+
+
 @dataclass(slots=True)
 class ApplicationComponents:
     kernel: Kernel
@@ -372,6 +397,33 @@ class KernelBuilder:
             discovery_service=resource_discovery_service,
             rrm=resource_manager,
         )
+
+        # --- M31.3B-1B: bootstrap first-governance gate (fail closed) ---
+        # Every declared built-in resource (canonical capability registry) must
+        # end governed and verified BEFORE canonical execution is attached. If
+        # any declaration is not governed, the build DOES NOT complete.
+        from intent_kernel.promotion.promotion_service import (
+            BootstrapGovernanceError,
+        )
+
+        bootstrap_declarations = _build_bootstrap_declarations(
+            capability_registry
+        )
+        bootstrap_report = resource_promotion_service.bootstrap_govern(
+            bootstrap_declarations,
+            decided_by="bootstrap",
+            reasoning="canonical build first governance",
+        )
+        if not bootstrap_report.success:
+            failures = ", ".join(
+                f"{e.resource_kind.value}:{e.resource_id}={e.reason}"
+                for e in bootstrap_report.entries
+                if not e.success
+            )
+            raise BootstrapGovernanceError(
+                f"bootstrap first-governance gate failed: {failures}"
+            )
+
         resource_activation_service = CanonicalResourceActivationService(
             rrm=resource_manager,
         )

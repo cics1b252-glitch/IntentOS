@@ -45,12 +45,30 @@ class CanonicalAgentOrchestrator:
         request: AgentRequest,
         *,
         agent_id: str | None = None,
+        expected_executor: Agent | None = None,
     ) -> CapabilityResult:
         agent = (
             self.get(agent_id)
             if agent_id is not None
             else self.select(request.capability)
         )
+        # M31.3B-1B: the second registry lookup is a revalidation only. It MUST
+        # resolve the exact already-selected executable object. If the same
+        # agent_id now maps to a different object, fail closed: neither the
+        # originally selected executor nor any substitute may run.
+        if expected_executor is not None and agent is not expected_executor:
+            return CapabilityResult(
+                capability=request.capability,
+                success=False,
+                error_code=ErrorCode.CAPABILITY_UNAVAILABLE,
+                metadata={
+                    "reason": "agent_identity_mismatch",
+                    "agent_id": str(agent_id) if agent_id is not None else None,
+                    "expected_agent_id": str(expected_executor.agent_id),
+                    "resolved_agent_present": agent is not None,
+                    "exact_executor_identity": True,
+                },
+            )
         if agent is None or request.capability not in {
             item.name for item in agent.capabilities
         }:

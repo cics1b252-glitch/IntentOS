@@ -12,6 +12,8 @@ from intent_kernel.rrm.models import (
     AccountResource,
     AgentResource,
     CapabilityResource,
+    DurableRRMState,
+    DurableCommitResult,
     ExecutionEnvironmentResource,
     FirstGovernanceRequest,
     FirstGovernanceResult,
@@ -108,3 +110,23 @@ class RRMRegistryPort(Protocol):
     # Health & Metrics
     def check_health(self) -> ResourceHealthReport: ...
     def get_metrics(self) -> RRMRegistryMetrics: ...
+
+
+@runtime_checkable
+class RRMStateStorePort(Protocol):
+    """M32A — Passive RRM authority-state storage port.
+
+    RRM_STATE_STORE_IS_AUTHORITY=NO
+    RRM_REMAINS_SOLE_AUTHORITY=YES
+
+    The store may validate storage-level format/revision but may NOT make
+    governance decisions.
+    """
+
+    def load(self) -> Optional[Any]: ...
+
+    def commit(
+        self,
+        expected_revision: int,
+        state: Any
+    ) -> Any: ...

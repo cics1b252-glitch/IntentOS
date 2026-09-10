@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from intent_kernel.rrm.models import (
     AccountResource,
+    ActiveGovernedIdentityRecord,
     AgentInstallationState,
     AgentResource,
     AccountSnapshot,
@@ -22,19 +23,36 @@ from intent_kernel.rrm.models import (
     AvailabilitySource,
     CapabilityResource,
     CapabilitySnapshot,
+    ConditionalCreateOutcome,
+    ConditionalCreateResult,
+    ConditionalRegistrationRequest,
+    ConditionalResourceStatusRequest,
+    ConditionalRetirementOutcome,
+    ConditionalRetirementRequest,
+    ConditionalRetirementResult,
+    ConditionalUpdateOutcome,
+    ConditionalUpdateResult,
+    DurableFirstGovernanceRecord,
+    DurableRRMState,
+    DurableCommitOutcome,
+    DurableCommitResult,
     ExecutionEnvironmentResource,
     ExecutionEnvironmentSnapshot,
     ExecutionEnvironmentType,
+    FirstGovernanceOutcome,
+    FirstGovernanceRequest,
+    FirstGovernanceResult,
     ProjectResource,
     ProjectSnapshot,
     ProviderResource,
     ProviderSnapshot,
     ResourceHealthReport,
+    ResourceLineageConsumption,
     ResourceOrigin,
     ResourceQueryFilter,
     ResourceStatus,
-    ResourceType,
     ResourceTombstone,
+    ResourceType,
     RRMRegistryMetrics,
     ConditionalCreateOutcome,
     ConditionalCreateResult,
@@ -49,7 +67,8 @@ from intent_kernel.rrm.models import (
     FirstGovernanceRequest,
     FirstGovernanceResult,
 )
-from intent_kernel.rrm.ports import ProjectRegistryPort, ResourceQueryPort, RRMRegistryPort
+from intent_kernel.rrm.ports import ProjectRegistryPort, ResourceQueryPort, RRMRegistryPort, RRMStateStorePort
+from intent_kernel.rrm.persistence import JsonFileRRMStateStore
 from intent_kernel.time_utils import utc_iso
 
 
@@ -88,7 +107,11 @@ def _detach_value(value: Any) -> Any:
 class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistryPort):
     """Canonical Registry & Resource Manager (RRM) service implementation."""
 
-    def __init__(self, populate_defaults: bool = True) -> None:
+    def __init__(
+        self,
+        populate_defaults: bool = True,
+        durable_store: Optional[JsonFileRRMStateStore] = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._providers: Dict[str, ProviderResource] = {}
         self._accounts: Dict[str, AccountResource] = {}
@@ -117,13 +140,302 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         # generation advance.
         self._first_governances: Dict[Tuple[ResourceType, str], Tuple[str, str, str, int]] = {}
 
+        # M32A: Durable authority state store
+        self._durable_store: Optional[JsonFileRRMStateStore] = durable_store
+        self._durable_active: Dict[Tuple[ResourceType, str], Dict[str, Any]] = {}
+        self._durable_revision: int = 0
+        self._poisoned: bool = False
+        self._poison_reason: str = ""
+
         if populate_defaults:
             self.populate_default_catalog()
+
+        # M32A: Load or initialize durable authority state
+        if self._durable_store is not None:
+            self._load_or_initialize_durable_state()
+
+    # --- M32A: Durable Authority State Methods ---
+
+    def _load_or_initialize_durable_state(self) -> None:
+        """Load existing durable state or initialize fresh state.
+
+        COLD PRE-M32 UPGRADE: If continuity identity exists but no authority state,
+        FAIL CLOSED — require explicit migration/reset acknowledgement.
+        """
+        assert self._durable_store is not None
+
+        loaded = self._durable_store.load()
+        if loaded is not None:
+            # Existing M32A state — load and reconcile
+            self._reconcile_durable_state(loaded)
+            self._durable_revision = loaded.get("revision", 0)
+            return
+
+        # No authority.json — check continuity identity
+        # Check if this looks like a pre-M32 installation (has continuity but no authority.json)
+        if self._has_pre_m32_artifacts():
+            # COLD PRE-M32 UPGRADE — FAIL CLOSED
+            raise RuntimeError(
+                "COLD PRE-M32 UPGRADE DETECTED: prior installation evidence exists "
+                "but no M32A authority state found. Requires explicit migration/reset "
+                "acknowledgement. Cannot silently bootstrap new governance."
+            )
+
+        # NEW INSTALL — initialize clean authority state
+        fresh_state = self._durable_store.initialize_fresh()
+        # Persist initial state
+        result = self._durable_store.commit(0, fresh_state)
+        if result.get("outcome") != "committed":
+            raise RuntimeError(f"Failed to initialize fresh authority state: {result.get('reason')}")
+        self._durable_revision = result["revision"]
+
+    def _has_pre_m32_artifacts(self) -> bool:
+        """Cold startup must never silently replace an existing installation."""
+        assert self._durable_store is not None
+        return self._durable_store.has_prior_installation_evidence()
+
+    def _reconcile_durable_state(self, loaded: Dict[str, Any]) -> None:
+        """Reconcile in-memory state with loaded durable authority state.
+
+        Startup order:
+        1. Fresh declarations already loaded via populate_default_catalog
+        2. Load durable authority state
+        3. Project fresh declarations as pre-governed runtime resources
+        3. Reconcile fresh declarations with durable ActiveGovernedIdentityRecord
+        4. Preserve exact durable grid/generation/status
+        5. Bootstrap only resources that have NEVER been governed
+        6. Reject tombstoned logical resources
+        7. Preserve successor lineage / consumption state
+        """
+        # Load tombstones
+        self._tombstones.clear()
+        for ts_data in loaded.get("tombstones", []):
+            ts = ResourceTombstone(
+                resource_kind=ResourceType(ts_data["resource_kind"]),
+                resource_id=ts_data["resource_id"],
+                governed_registration_id=ts_data["governed_registration_id"],
+                observed_generation=ts_data["observed_generation"],
+            )
+            self._tombstones[ts.lineage_identity] = ts
+
+        # Load consumptions
+        self._consumptions.clear()
+        for c_data in loaded.get("consumptions", []):
+            cons = ResourceLineageConsumption(
+                resource_kind=ResourceType(c_data["resource_kind"]),
+                resource_id=c_data["resource_id"],
+                predecessor_governed_registration_id=c_data["predecessor_governed_registration_id"],
+                predecessor_observed_generation=c_data["predecessor_observed_generation"],
+                successor_governed_registration_id=c_data["successor_governed_registration_id"],
+                successor_candidate_proposal_id=c_data["successor_candidate_proposal_id"],
+                successor_candidate_decision_id=c_data["successor_candidate_decision_id"],
+                successor_materialization_descriptor=c_data.get("successor_materialization_descriptor", {}),
+            )
+            self._consumptions[cons.consumption_key] = cons
+
+        # Load first-governance records
+        self._first_governances.clear()
+        for fg_data in loaded.get("first_governances", []):
+            key = (ResourceType(fg_data["resource_kind"]), fg_data["resource_id"])
+            self._first_governances[key] = (
+                fg_data["proposal_id"],
+                fg_data["decision_id"],
+                fg_data["governed_registration_id"],
+                fg_data["resulting_generation"],
+            )
+
+        # Reconcile active governed identities with in-memory resources
+        # Preserve exact durable grid/generation/status
+        active_governed = loaded.get("active_governed", [])
+        self._durable_active = {
+            (ResourceType(record["resource_kind"]), record["resource_id"]): dict(record)
+            for record in active_governed
+        }
+        for ag_data in active_governed:
+            resource_kind = ResourceType(ag_data["resource_kind"])
+            resource_id = ag_data["resource_id"]
+            grid = ag_data["governed_registration_id"]
+            generation = ag_data["generation"]
+            status = ResourceStatus(ag_data["status"])
+
+            # Find the in-memory resource and update its governed identity
+            resource = self._get_resource_for_mutation(resource_kind, resource_id)
+            if resource is not None:
+                # Preserve exact durable grid/generation/status
+                resource.governed_registration_id = grid
+                resource.generation = generation
+                resource.status = status
+            else:
+                # Resource not currently in memory but has durable governed identity
+                # This is a USER-CREATED ACTIVE IDENTITY WITHOUT DESCRIPTOR
+                # Preserve authority as non-executable durable identity placeholder/fact
+                # Do NOT fabricate an executable Provider/Agent/Capability/etc.
+                pass  # Authority remains reserved; productive binding will fail closed
+
+    def _build_durable_state_snapshot(self) -> Dict[str, Any]:
+        """Build complete durable state snapshot for atomic commit (P2 step 3).
+
+        Called under RRM lock. Derives candidate post-state WITHOUT mutating
+        canonical memory — only reads current state.
+        """
+        from intent_kernel.rrm.generation import is_valid_generation
+        # Build tombstones
+        tombstones = [ts.to_dict() for ts in self._tombstones.values()]
+
+        # Build consumptions
+        consumptions = []
+        for cons in self._consumptions.values():
+            consumptions.append({
+                "resource_kind": cons.resource_kind.value,
+                "resource_id": cons.resource_id,
+                "predecessor_governed_registration_id": cons.predecessor_governed_registration_id,
+                "predecessor_observed_generation": cons.predecessor_observed_generation,
+                "successor_governed_registration_id": cons.successor_governed_registration_id,
+                "successor_candidate_proposal_id": cons.successor_candidate_proposal_id,
+                "successor_candidate_decision_id": cons.successor_candidate_decision_id,
+                "successor_materialization_descriptor": cons.successor_materialization_descriptor,
+            })
+
+        # Build first-governances
+        first_governances = []
+        for (resource_kind, resource_id), (prop_id, dec_id, grid, gen) in self._first_governances.items():
+            first_governances.append({
+                "resource_kind": resource_kind.value,
+                "resource_id": resource_id,
+                "proposal_id": prop_id,
+                "decision_id": dec_id,
+                "governed_registration_id": grid,
+                "resulting_generation": gen,
+            })
+
+        # Build active governed identities
+        active_by_key = {
+            key: dict(record) for key, record in self._durable_active.items()
+            if (key[0], key[1], record["governed_registration_id"]) not in self._tombstones
+        }
+        # Collect from all resource stores
+        stores = [
+            (ResourceType.PROVIDER, self._providers, "provider_id"),
+            (ResourceType.ACCOUNT, self._accounts, "account_id"),
+            (ResourceType.EXECUTION_ENVIRONMENT, self._environments, "environment_id"),
+            (ResourceType.CAPABILITY, self._capabilities, "capability_id"),
+            (ResourceType.AGENT, self._agents, "agent_id"),
+            (ResourceType.PROJECT, self._projects, "project_id"),
+        ]
+        for resource_kind, store, id_field in stores:
+            for resource in store.values():
+                grid = getattr(resource, "governed_registration_id", "") or ""
+                if grid and is_valid_generation(getattr(resource, "generation", 0)):
+                    rid = getattr(resource, id_field, "")
+                    active_by_key[(resource_kind, rid)] = {
+                        "resource_kind": resource_kind.value,
+                        "resource_id": rid,
+                        "governed_registration_id": grid,
+                        "generation": getattr(resource, "generation", 0),
+                        "status": resource.status.value,
+                    }
+
+        return {
+            "schema_version": 1,
+            "installation_id": self._durable_store.get_continuity_identity() if self._durable_store else "",
+            "revision": self._durable_revision + 1,
+            "tombstones": tombstones,
+            "consumptions": consumptions,
+            "first_governances": first_governances,
+            "active_governed": list(active_by_key.values()),
+        }
+
+    def _commit_durable_state(self) -> DurableCommitResult:
+        """P2 DURABLE-BEFORE-MEMORY PROTOCOL step 5-7.
+
+        1. Acquire RRM lock (already held by caller)
+        2. Validate current canonical state (already done by caller)
+        3. Derive candidate post-state WITHOUT mutating canonical memory
+        4. Validate candidate
+        5. Verify expected durable revision
+        6. Durable atomic commit candidate
+        7. Only after commit succeeds, publish matching in-memory change
+           (but memory was already updated before calling this — this is for
+           the revision tracking and fail-stop)
+        8. Return success
+
+        If durable commit fails: MEMORY_MUTATED=NO (caller must not have mutated yet)
+        SUCCESS_RETURNED=NO
+
+        Fail closed.
+        """
+        if self._durable_store is None:
+            return DurableCommitResult(
+                outcome=DurableCommitOutcome.COMMITTED,  # No durability required
+                revision=self._durable_revision,
+                reason="no durable store configured",
+            )
+
+        if self._poisoned:
+            return DurableCommitResult(
+                outcome=DurableCommitOutcome.POISONED,
+                revision=self._durable_revision,
+                reason=self._poison_reason or "RRM poisoned",
+            )
+
+        candidate = self._build_durable_state_snapshot()
+        candidate_revision = candidate["revision"]
+        expected_revision = self._durable_revision
+
+        # P2 step 5-6: verify expected revision, durable atomic commit
+        result = self._durable_store.commit(expected_revision, candidate)
+        outcome_str = result.get("outcome", "io_error")
+        committed_revision = result.get("revision", self._durable_revision)
+        reason = result.get("reason", "")
+
+        if outcome_str == "committed":
+            self._durable_revision = committed_revision
+            return DurableCommitResult(
+                outcome=DurableCommitOutcome.COMMITTED,
+                revision=committed_revision,
+                reason="",
+            )
+        elif outcome_str == "revision_mismatch":
+            return DurableCommitResult(
+                outcome=DurableCommitOutcome.REVISION_MISMATCH,
+                revision=committed_revision,
+                reason=result.get("reason", "revision mismatch"),
+            )
+        elif outcome_str == "validation_failed":
+            return DurableCommitResult(
+                outcome=DurableCommitOutcome.VALIDATION_FAILED,
+                revision=committed_revision,
+                reason=result.get("reason", "validation failed"),
+            )
+        elif outcome_str == "io_error":
+            return DurableCommitResult(
+                outcome=DurableCommitOutcome.IO_ERROR,
+                revision=committed_revision,
+                reason=result.get("reason", "I/O error"),
+            )
+        else:
+            return DurableCommitResult(
+                outcome=DurableCommitOutcome.IO_ERROR,
+                revision=committed_revision,
+                reason=f"Unknown outcome: {outcome_str}",
+            )
+
+    def _poison_rrm(self, reason: str) -> None:
+        """Poison the RRM — reject all subsequent authority operations."""
+        self._poisoned = True
+        self._poison_reason = reason
+        if self._durable_store:
+            self._durable_store.poison(reason)
+
+    def _check_poisoned(self) -> None:
+        if self._poisoned:
+            raise RuntimeError(f"RRM poisoned: {self._poison_reason}")
 
     # --- Provider Operations ---
 
     def register_provider(self, provider: ProviderResource) -> ProviderResource:
         with self._lock:
+            self._check_poisoned()
             if self._is_tombstoned(ResourceType.PROVIDER, provider.provider_id):
                 return self._providers.get(provider.provider_id)  # H1.3: reject retired identity
             existing = self._providers.get(provider.provider_id)
@@ -136,6 +448,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def get_provider(self, provider_id: str) -> Optional[ProviderSnapshot]:
         with self._lock:
+            self._check_poisoned()
             provider = self._providers.get(provider_id)
             if provider is None:
                 return None
@@ -161,6 +474,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         mutates or exposes the canonical mutable container.
         """
         with self._lock:
+            self._check_poisoned()
             return self._is_tombstoned(resource_kind, resource_id)
 
     def get_resource_tombstone(
@@ -180,6 +494,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         generation-bound re-registration decision authorization.
         """
         with self._lock:
+            self._check_poisoned()
             if not isinstance(governed_registration_id, str) or not governed_registration_id:
                 return None
             return self._tombstones.get(
@@ -325,6 +640,60 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             )
         return None
 
+    def _commit_reregistration_successor(
+        self, consumption: ResourceLineageConsumption, successor: Any,
+        store: Dict[str, Any], id_attr: str,
+    ) -> None:
+        """Under the RRM lock: commit the exact candidate, then publish memory.
+
+        Reuse the recorded lineage/descriptor on recovery. Any uncertain durable
+        or post-commit publication failure poisons authority until restart.
+        """
+        kind, rid = consumption.resource_kind, consumption.resource_id
+        candidate = self._build_durable_state_snapshot()
+        candidate["consumptions"] = [
+            record for record in candidate["consumptions"]
+            if (record["resource_kind"], record["resource_id"],
+                record["predecessor_governed_registration_id"]) !=
+               (kind.value, rid, consumption.predecessor_governed_registration_id)
+        ]
+        candidate["consumptions"].append({
+            "resource_kind": kind.value,
+            "resource_id": rid,
+            "predecessor_governed_registration_id": consumption.predecessor_governed_registration_id,
+            "predecessor_observed_generation": consumption.predecessor_observed_generation,
+            "successor_governed_registration_id": consumption.successor_governed_registration_id,
+            "successor_candidate_proposal_id": consumption.successor_candidate_proposal_id,
+            "successor_candidate_decision_id": consumption.successor_candidate_decision_id,
+            "successor_materialization_descriptor": consumption.successor_materialization_descriptor,
+        })
+        record = {
+            "resource_kind": kind.value, "resource_id": rid,
+            "governed_registration_id": successor.governed_registration_id,
+            "generation": successor.generation, "status": successor.status.value,
+        }
+        candidate["active_governed"] = [
+            active for active in candidate["active_governed"]
+            if (active["resource_kind"], active["resource_id"]) != (kind.value, rid)
+        ] + [record]
+        if self._durable_store is not None:
+            try:
+                result = self._durable_store.commit(self._durable_revision, candidate)
+                if result.get("outcome") != "committed":
+                    raise RuntimeError(f"Durable reregistration failed: {result}")
+            except Exception:
+                self._poison_rrm("Reregistration durable commit failed")
+                raise
+        try:
+            self._consumptions[consumption.consumption_key] = consumption
+            store[getattr(successor, id_attr)] = successor
+            if self._durable_store is not None:
+                self._durable_active[(kind, rid)] = record
+                self._durable_revision = result["revision"]
+        except Exception:
+            self._poison_rrm("Reregistration memory publication failed after commit")
+            raise
+
     def conditional_reregister_resource(
         self,
         request: "ConditionalReregistrationRequest",
@@ -332,18 +701,19 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
     ) -> "ConditionalReregistrationResult":
         """M31.2B-2C — RRM-governed generation-bound re-registration.
 
+        M32A P2: Durable-before-memory protocol.
+
         Executes the frozen MODEL_R2 mutation sequence atomically under the RRM
         lock:
 
             validate → detach/freeze candidate descriptor → allocate successor
-            lineage B → construct B → construct consumption(A,B,X) → construct
-            result → WRITE 1 (consumption) → WRITE 2 (active B).
+            lineage B → construct consumption(A,B,X) → derive candidate state
+            → durable commit candidate → commit → publish canonical changes.
 
         Exact consumed predecessor = exact approved candidate = exact lineage B.
-        After WRITE 1 the predecessor lineage is permanently consumed; there is
-        NO rollback that reopens A. RRM is the sole governed-lineage-ID
-        authority; the caller never supplies successor lineage or resulting
-        generation.
+        Durable commit precedes canonical memory publication.
+        RRM is the sole governed-lineage-ID authority; the caller never
+        supplies successor lineage or resulting generation.
 
         Performs NO authorization (the promotion authority decides permission) —
         RRM enforces only state/lifecycle facts. No arbitrary callbacks run
@@ -359,6 +729,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         )
 
         with self._lock:
+            self._check_poisoned()
+
             store, id_attr = self._get_store_for_type(request.resource_kind)
             if store is None:
                 return ConditionalReregistrationResult(
@@ -481,6 +853,15 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                     )
                 successor_grid = consumption.successor_governed_registration_id
                 successor_generation = consumption.predecessor_observed_generation + 1
+                durable_identity = self._durable_active.get((request.resource_kind, request.resource_id))
+                if durable_identity is not None:
+                    if durable_identity["governed_registration_id"] != successor_grid:
+                        return ConditionalReregistrationResult(
+                            outcome=O.ACTIVE_RESOURCE_CONFLICT,
+                            resource_kind=request.resource_kind, resource_id=request.resource_id,
+                            reason="durable_active_resource_conflict",
+                        )
+                    successor_generation = durable_identity["generation"]
                 successor = self._materialize_successor_resource(
                     request.resource_kind,
                     request.resource_id,
@@ -495,7 +876,13 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                         resource_id=request.resource_id,
                         reason="unsupported_resource_kind",
                     )
-                store[getattr(successor, id_attr)] = successor  # WRITE 2 (only)
+
+                if durable_identity is not None:
+                    successor.status = ResourceStatus(durable_identity["status"])
+                self._commit_reregistration_successor(
+                    consumption, successor, store, id_attr,
+                )
+
                 return ConditionalReregistrationResult(
                     outcome=O.REREGISTRATION_RECOVERED,
                     resource_kind=request.resource_kind,
@@ -581,26 +968,21 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 successor_candidate_decision_id=request.decision_id,
                 successor_materialization_descriptor=frozen_desc,
             )
-            self._consumptions[consumption.consumption_key] = consumption  # WRITE 1
 
             successor = self._materialize_successor_resource(
-                request.resource_kind,
-                request.resource_id,
-                successor_grid,
-                successor_generation,
-                frozen_desc,
+                request.resource_kind, request.resource_id, successor_grid,
+                successor_generation, frozen_desc,
             )
             if successor is None:
-                # WRITE 1 already consumed A; there is intentionally NO rollback
-                # that reopens A. Guarded in practice by the earlier
-                # _get_store_for_type check for supported kinds.
                 return ConditionalReregistrationResult(
                     outcome=O.INVALID_RESOURCE,
                     resource_kind=request.resource_kind,
                     resource_id=request.resource_id,
                     reason="unsupported_resource_kind",
                 )
-            store[getattr(successor, id_attr)] = successor  # WRITE 2
+            self._commit_reregistration_successor(
+                consumption, successor, store, id_attr,
+            )
 
             return ConditionalReregistrationResult(
                 outcome=O.REREGISTERED,
@@ -617,6 +999,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
     ) -> FirstGovernanceResult:
         """M31.3B-1B — atomically govern an existing pre-governed resource.
 
+        M32A P2: Durable-before-memory protocol.
         Executes the typed first-governance mutation in a SINGLE critical
         section under ``self._lock``:
 
@@ -638,6 +1021,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         window) is completed with the STORED lineage/generation, never a retry
         mint.
 
+        M32A P2: Durable-before-memory protocol. Durable commit precedes memory mutation.
         Performs NO authorization (the bootstrap decision authority decides
         permission) — RRM enforces only state/lifecycle facts. No arbitrary
         callbacks run under the lock.
@@ -648,6 +1032,8 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         )
 
         with self._lock:
+            self._check_poisoned()
+
             store, _id_attr = self._get_store_for_type(request.resource_kind)
             if store is None:
                 return FirstGovernanceResult(
@@ -697,9 +1083,45 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                         # Recovery: WRITE 1 (fact) exists, WRITE 2 (governed
                         # active) missing. Reuse the STORED lineage/generation —
                         # never a retry mint, never a further advance.
+                        # P2: Need durable commit for recovery too
+                        candidate_snapshot = self._build_durable_state_snapshot()
+                        # Add first-governance record to candidate
+                        candidate_snapshot["first_governances"].append({
+                            "resource_kind": request.resource_kind.value,
+                            "resource_id": request.resource_id,
+                            "proposal_id": request.proposal_id,
+                            "decision_id": request.decision_id,
+                            "governed_registration_id": rec_grid,
+                            "resulting_generation": rec_gen,
+                        })
+                        # Add active governed
+                        candidate_snapshot["active_governed"].append({
+                            "resource_kind": request.resource_kind.value,
+                            "resource_id": request.resource_id,
+                            "governed_registration_id": rec_grid,
+                            "generation": rec_gen,
+                            "status": existing.status.value,
+                        })
+
+                        if self._durable_store:
+                            self._durable_store._validate_candidate_state(candidate_snapshot)
+                        result = self._durable_store.commit(self._durable_revision, candidate_snapshot) if self._durable_store else {"outcome": "committed"}
+                        if result.get("outcome") != "committed":
+                            if self._durable_store:
+                                self._poison_rrm(f"Durable commit failed for first-governance recovery: {result.get('reason')}")
+                            return FirstGovernanceResult(
+                                outcome=O.INVALID_STATE,
+                                resource_kind=request.resource_kind,
+                                resource_id=request.resource_id,
+                                reason=f"durable_commit_failed: {result.get('reason', 'unknown')}",
+                            )
+
                         existing.governed_registration_id = rec_grid
                         existing.generation = rec_gen
                         existing.updated_at = utc_iso()
+                        if self._durable_store:
+                            self._durable_revision += 1
+
                         return FirstGovernanceResult(
                             outcome=O.APPLIED,
                             resource_kind=request.resource_kind,
@@ -774,8 +1196,43 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             )
             resulting_generation = request.expected_pre_governed_generation + 1
 
-            # WRITE 1 (record) BEFORE the active resource becomes governed so an
-            # interrupted apply is recoverably idempotent at retry time.
+            # P2 Step 3: Derive candidate post-state WITHOUT mutating canonical memory
+            candidate_snapshot = self._build_durable_state_snapshot()
+            # Add first-governance record to candidate
+            candidate_snapshot["first_governances"].append({
+                "resource_kind": request.resource_kind.value,
+                "resource_id": request.resource_id,
+                "proposal_id": request.proposal_id,
+                "decision_id": request.decision_id,
+                "governed_registration_id": governed_registration_id,
+                "resulting_generation": resulting_generation,
+            })
+            # Add active governed
+            candidate_snapshot["active_governed"].append({
+                "resource_kind": request.resource_kind.value,
+                "resource_id": request.resource_id,
+                "governed_registration_id": governed_registration_id,
+                "generation": resulting_generation,
+                "status": existing.status.value,
+            })
+
+# P2 Step 4: Validate candidate
+            if self._durable_store:
+                self._durable_store._validate_candidate_state(candidate_snapshot)
+
+            # P2 Step 5-6: Verify expected revision, durable atomic commit
+            result = self._durable_store.commit(self._durable_revision, candidate_snapshot) if self._durable_store else {"outcome": "committed"}
+            if result.get("outcome") != "committed":
+                if self._durable_store:
+                    self._poison_rrm(f"Durable commit failed for first-governance recovery: {result.get('reason')}")
+                return FirstGovernanceResult(
+                    outcome=O.INVALID_STATE,
+                    resource_kind=request.resource_kind,
+                    resource_id=request.resource_id,
+                    reason=f"durable_commit_failed: {result.get('reason', 'unknown')}",
+                )
+
+            # P2 Step 7: Only after commit succeeds, publish matching in-memory change
             self._first_governances[key] = (
                 request.proposal_id,
                 request.decision_id,
@@ -786,6 +1243,9 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             existing.governed_registration_id = governed_registration_id
             existing.generation = resulting_generation
             existing.updated_at = utc_iso()  # WRITE 2
+
+            if self._durable_store:
+                self._durable_revision += 1
 
             return FirstGovernanceResult(
                 outcome=O.APPLIED,
@@ -807,6 +1267,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def list_providers(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ProviderSnapshot]:
         with self._lock:
+            self._check_poisoned()
             providers = list(self._providers.values())
             if only_eligible:
                 providers = [p for p in providers if p.is_eligible]
@@ -816,6 +1277,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_provider(self, provider_id: str) -> bool:
         with self._lock:
+            self._check_poisoned()
             if self._is_governed_resource(provider_id):
                 return False
             if provider_id in self._providers:
@@ -827,6 +1289,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_account(self, account: AccountResource) -> AccountResource:
         with self._lock:
+            self._check_poisoned()
             if self._is_tombstoned(ResourceType.ACCOUNT, account.account_id):
                 return self._accounts.get(account.account_id)  # H1.3: reject retired identity
             existing = self._accounts.get(account.account_id)
@@ -839,6 +1302,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def get_account(self, account_id: str) -> Optional[AccountSnapshot]:
         with self._lock:
+            self._check_poisoned()
             account = self._accounts.get(account_id)
             if account is None:
                 return None
@@ -856,6 +1320,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         only_eligible: bool = False,
     ) -> List[AccountSnapshot]:
         with self._lock:
+            self._check_poisoned()
             accounts = list(self._accounts.values())
             if only_eligible:
                 accounts = [a for a in accounts if a.is_eligible]
@@ -867,6 +1332,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_account(self, account_id: str) -> bool:
         with self._lock:
+            self._check_poisoned()
             if self._is_governed_resource(account_id):
                 return False
             if account_id in self._accounts:
@@ -878,6 +1344,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_environment(self, environment: ExecutionEnvironmentResource) -> ExecutionEnvironmentResource:
         with self._lock:
+            self._check_poisoned()
             if self._is_tombstoned(ResourceType.EXECUTION_ENVIRONMENT, environment.environment_id):
                 return self._environments.get(environment.environment_id)  # H1.3: reject retired identity
             existing = self._environments.get(environment.environment_id)
@@ -890,6 +1357,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def get_environment(self, environment_id: str) -> Optional[ExecutionEnvironmentSnapshot]:
         with self._lock:
+            self._check_poisoned()
             env = self._environments.get(environment_id)
             if env is None:
                 return None
@@ -902,6 +1370,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def list_environments(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ExecutionEnvironmentSnapshot]:
         with self._lock:
+            self._check_poisoned()
             envs = list(self._environments.values())
             if only_eligible:
                 envs = [e for e in envs if e.is_eligible]
@@ -911,6 +1380,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_environment(self, environment_id: str) -> bool:
         with self._lock:
+            self._check_poisoned()
             if self._is_governed_resource(environment_id):
                 return False
             if environment_id in self._environments:
@@ -922,6 +1392,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_capability(self, capability: CapabilityResource) -> CapabilityResource:
         with self._lock:
+            self._check_poisoned()
             if self._is_tombstoned(ResourceType.CAPABILITY, capability.capability_id):
                 return self._capabilities.get(capability.capability_id)  # H1.3: reject retired identity
             existing = self._capabilities.get(capability.capability_id)
@@ -936,6 +1407,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def get_capability(self, capability_name_or_id: str) -> Optional[CapabilitySnapshot]:
         with self._lock:
+            self._check_poisoned()
             cap = self._capabilities.get(capability_name_or_id)
             if cap is None:
                 return None
@@ -948,6 +1420,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def list_capabilities(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[CapabilitySnapshot]:
         with self._lock:
+            self._check_poisoned()
             unique = {id(c): c for c in self._capabilities.values()}
             caps = list(unique.values())
             if only_eligible:
@@ -958,6 +1431,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_capability(self, capability_id: str) -> bool:
         with self._lock:
+            self._check_poisoned()
             if self._is_governed_resource(capability_id):
                 return False
             cap = self._capabilities.get(capability_id)
@@ -972,6 +1446,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def register_agent(self, agent: AgentResource) -> AgentResource:
         with self._lock:
+            self._check_poisoned()
             if self._is_tombstoned(ResourceType.AGENT, agent.agent_id):
                 return self._agents.get(agent.agent_id)  # H1.3: reject retired identity
             existing = self._agents.get(agent.agent_id)
@@ -984,6 +1459,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def get_agent(self, agent_id: str) -> Optional[AgentSnapshot]:
         with self._lock:
+            self._check_poisoned()
             agent = self._agents.get(agent_id)
             if agent is None:
                 return None
@@ -996,6 +1472,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def list_agents(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[AgentSnapshot]:
         with self._lock:
+            self._check_poisoned()
             agents = list(self._agents.values())
             if only_eligible:
                 agents = [a for a in agents if a.is_eligible]
@@ -1005,6 +1482,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def unregister_agent(self, agent_id: str) -> bool:
         with self._lock:
+            self._check_poisoned()
             if self._is_governed_resource(agent_id):
                 return False
             if agent_id in self._agents:
@@ -1014,6 +1492,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def find_agents_for_capabilities(self, capabilities: List[str], only_eligible: bool = True) -> List[AgentResource]:
         with self._lock:
+            self._check_poisoned()
             matching = []
             for agent in self._agents.values():
                 if only_eligible and not agent.is_eligible:
@@ -1027,6 +1506,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
     def register_project(self, project: ProjectResource) -> ProjectResource:
         with self._lock:
             # M31.2B-2B: kind-aware tombstone guard — parity with other five families
+            self._check_poisoned()
             if self._is_tombstoned(ResourceType.PROJECT, project.project_id):
                 return self._projects.get(project.project_id)  # H1.3: reject retired identity
             existing = self._projects.get(project.project_id)
@@ -1040,6 +1520,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def get_project(self, project_id: str) -> Optional[ProjectSnapshot]:
         with self._lock:
+            self._check_poisoned()
             project = self._projects.get(project_id)
             if project is None:
                 return None
@@ -1052,6 +1533,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def list_projects(self, status: Optional[ResourceStatus] = None, only_eligible: bool = False) -> List[ProjectSnapshot]:
         with self._lock:
+            self._check_poisoned()
             projects = list(self._projects.values())
             if only_eligible:
                 projects = [p for p in projects if p.is_eligible]
@@ -1063,6 +1545,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         with self._lock:
             # M31.2B-2B: governed resource guard — parity with other five families.
             # Governed Project retirement must flow through retirement authority.
+            self._check_poisoned()
             if self._is_governed_resource(project_id):
                 return False
             if project_id in self._projects:
@@ -1088,6 +1571,22 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         )
 
         if existing is None:
+            families = (
+                (ProviderResource, ResourceType.PROVIDER, "provider_id"),
+                (AccountResource, ResourceType.ACCOUNT, "account_id"),
+                (ExecutionEnvironmentResource, ResourceType.EXECUTION_ENVIRONMENT, "environment_id"),
+                (CapabilityResource, ResourceType.CAPABILITY, "capability_id"),
+                (AgentResource, ResourceType.AGENT, "agent_id"),
+                (ProjectResource, ResourceType.PROJECT, "project_id"),
+            )
+            for resource_class, kind, id_field in families:
+                if isinstance(incoming, resource_class):
+                    record = self._durable_active.get((kind, getattr(incoming, id_field)))
+                    if record is not None:
+                        incoming.governed_registration_id = record["governed_registration_id"]
+                        incoming.generation = record["generation"]
+                        incoming.status = ResourceStatus(record["status"])
+                        return
             incoming.generation = GENERATION_INITIAL
         elif is_valid_generation(getattr(existing, "generation", 0)):
             incoming.generation = existing.generation
@@ -1120,9 +1619,10 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
     ) -> ConditionalUpdateResult:
         """Conditionally update resource status with generation and lineage checks.
 
+        M32A P2: Durable-before-memory protocol.
         Atomically compares expected governed_registration_id and generation
         against canonical RRM state. If all match, applies the status change
-        and advances generation exactly once.
+        and advances generation exactly once. Durable commit precedes memory mutation.
 
         Returns a typed result with outcome and observed state.
         """
@@ -1133,6 +1633,9 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         )
 
         with self._lock:
+            self._check_poisoned()
+
+            # P2 Step 1-2: Acquire lock, validate current canonical state
             # Locate resource by type and ID
             resource = self._get_resource_for_mutation(request.resource_type, request.resource_id)
             if resource is None:
@@ -1204,11 +1707,51 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                     reason="",
                 )
 
-            # Apply mutation and advance generation atomically
+            # P2 Step 3: Derive candidate post-state WITHOUT mutating canonical memory
+            new_generation = getattr(resource, "generation", 0)
+            from intent_kernel.rrm.generation import GENERATION_INITIAL, is_valid_generation
+            gen = getattr(resource, "generation", 0)
+            candidate_generation = (
+                (gen + 1) if is_valid_generation(gen) else GENERATION_INITIAL
+            )
+            candidate_status = request.desired_status
+
+            # Build candidate durable state snapshot (simulating mutation)
+            candidate_snapshot = self._build_durable_state_snapshot()
+            # Update the candidate snapshot with the simulated mutation
+            for ag in candidate_snapshot.get("active_governed", []):
+                if ag["resource_kind"] == request.resource_type.value and ag["resource_id"] == request.resource_id:
+                    ag["generation"] = candidate_generation
+                    ag["status"] = candidate_status.value
+                    break
+
+# P2 Step 4: Validate candidate
+            if self._durable_store:
+                self._durable_store._validate_candidate_state(candidate_snapshot)
+
+            # P2 Step 5-6: Verify expected revision, durable atomic commit
+            result = self._durable_store.commit(self._durable_revision, candidate_snapshot) if self._durable_store else {"outcome": "committed"}
+            if result.get("outcome") != "committed":
+                if self._durable_store:
+                    self._poison_rrm(f"Durable commit failed for status update: {result.get('reason')}")
+                return ConditionalRetirementResult(
+                    outcome=ConditionalRetirementOutcome.INVALID_TRANSITION,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    observed_governed_registration_id=actual_grid,
+                    observed_generation=actual_gen,
+                    reason=f"durable_commit_failed: {result.get('reason', 'unknown')}",
+                )
+
+            # P2 Step 7: Only after commit succeeds, publish matching in-memory change
             previous_status = resource.status
             resource.status = request.desired_status
             self._advance_generation(resource)
             resource.updated_at = utc_iso()
+
+            # Update durable revision tracking
+            if self._durable_store:
+                self._durable_revision += 1
 
             return ConditionalUpdateResult(
                 outcome=ConditionalUpdateOutcome.APPLIED,
@@ -1248,6 +1791,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         )
 
         with self._lock:
+            self._check_poisoned()
             resource_type = request.resource_type
             resource_data = request.resource_data
 
@@ -1337,10 +1881,14 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
     ) -> ConditionalRetirementResult:
         """M31.2B-2B — Conditionally retire a governed resource under a single lock.
 
+        M32A P2: Durable-before-memory protocol.
         Single-lock critical section: locate → validate → tombstone → remove → result.
         All validation occurs before productive resource removal.
+        Durable commit precedes memory mutation.
         """
         with self._lock:
+            self._check_poisoned()
+
             resource_kind = request.resource_kind
             resource_id = request.resource_id
             expected_grid = request.governed_registration_id
@@ -1409,7 +1957,41 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                     reason="generation_mismatch",
                 )
 
-            result = ConditionalRetirementResult(
+            # P2 Step 3: Derive candidate post-state WITHOUT mutating canonical memory
+            candidate_snapshot = self._build_durable_state_snapshot()
+            # Add tombstone to candidate
+            candidate_snapshot["tombstones"].append({
+                "resource_kind": resource_kind.value,
+                "resource_id": resource_id,
+                "governed_registration_id": actual_grid,
+                "observed_generation": actual_gen,
+            })
+            # Remove from active governed
+            candidate_snapshot["active_governed"] = [
+                ag for ag in candidate_snapshot.get("active_governed", [])
+                if not (ag["resource_kind"] == resource_kind.value and ag["resource_id"] == resource_id)
+            ]
+
+# P2 Step 4: Validate candidate
+            if self._durable_store:
+                self._durable_store._validate_candidate_state(candidate_snapshot)
+
+            # P2 Step 5-6: Verify expected revision, durable atomic commit
+            result = self._durable_store.commit(self._durable_revision, candidate_snapshot) if self._durable_store else {"outcome": "committed"}
+            if result.get("outcome") != "committed":
+                if self._durable_store:
+                    self._poison_rrm(f"Durable commit failed for retirement: {result.get('reason')}")
+                return ConditionalRetirementResult(
+                    outcome=ConditionalRetirementOutcome.INVALID_TRANSITION,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    observed_governed_registration_id=actual_grid,
+                    observed_generation=actual_gen,
+                    reason=f"durable_commit_failed: {result.get('reason', 'unknown')}",
+                )
+
+            # P2 Step 7: Only after commit succeeds, publish matching in-memory change
+            result_obj = ConditionalRetirementResult(
                 outcome=ConditionalRetirementOutcome.RETIRED,
                 resource_kind=resource_kind,
                 resource_id=resource_id,
@@ -1426,10 +2008,12 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
             )
 
             del store[resource_id]
-
             self._tombstones[tombstone.lineage_identity] = tombstone
 
-            return result
+            if self._durable_store:
+                self._durable_revision += 1
+
+            return result_obj
 
     def _build_canonical_copy(self, resource_type: ResourceType, source: Any) -> Any:
         """Construct a fresh, structurally detached canonical resource.
@@ -1525,7 +2109,9 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         CanonicalPromotionRegistrationBoundary via governed_registration_id
         on the resource object.
         """
-        pass
+        with self._lock:
+            self._check_poisoned()
+            pass
 
     def is_governed(self, resource_id: str) -> bool:
         """Check if a resource ID is governed.
@@ -1533,17 +2119,19 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         COMPATIBILITY_ONLY — checks canonical governed_registration_id
         on the resource object. Does NOT consult _governed_ids set.
         """
-        existing = (
-            self._providers.get(resource_id)
-            or self._capabilities.get(resource_id)
-            or self._agents.get(resource_id)
-            or self._environments.get(resource_id)
-            or self._accounts.get(resource_id)
-            or self._projects.get(resource_id)
-        )
-        if existing is not None:
-            return bool(getattr(existing, "governed_registration_id", ""))
-        return False
+        with self._lock:
+            self._check_poisoned()
+            existing = (
+                self._providers.get(resource_id)
+                or self._capabilities.get(resource_id)
+                or self._agents.get(resource_id)
+                or self._environments.get(resource_id)
+                or self._accounts.get(resource_id)
+                or self._projects.get(resource_id)
+            )
+            if existing is not None:
+                return bool(getattr(existing, "governed_registration_id", ""))
+            return False
 
     def _is_governed_resource(self, resource_id: str) -> bool:
         """Check if a resource has canonical governed provenance.
@@ -1619,6 +2207,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def query_resources(self, filter_criteria: ResourceQueryFilter) -> List[Any]:
         with self._lock:
+            self._check_poisoned()
             results: List[Any] = []
 
             # Providers
@@ -1673,6 +2262,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         for governed resource lifecycle transitions.
         """
         with self._lock:
+            self._check_poisoned()
             if self._is_governed_resource(resource_id):
                 return False
 
@@ -1743,6 +2333,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def check_health(self) -> ResourceHealthReport:
         with self._lock:
+            self._check_poisoned()
             degraded: List[str] = []
             exhausted_accounts = 0
 
@@ -1801,6 +2392,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
 
     def get_metrics(self) -> RRMRegistryMetrics:
         with self._lock:
+            self._check_poisoned()
             counts = {
                 "providers": len(self._providers),
                 "accounts": len(self._accounts),
@@ -1850,6 +2442,7 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         """
         with self._lock:
             # 1. Default Capabilities (Templates)
+            self._check_poisoned()
             default_caps = [
                 ("cap_retrieval_financial", "retrieval.financial_context", "Resgate de histórico financeiro", ["finance", "retrieval"], ["finance"], "read"),
                 ("cap_modeling_allocation", "modeling.allocation_scenarios", "Modelagem de cenários de alocação", ["finance", "modeling"], ["finance"], "compute"),

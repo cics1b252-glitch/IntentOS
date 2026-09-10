@@ -1312,6 +1312,14 @@ class ResourceTombstone:
         """Canonical lineage primary identity (generation excluded)."""
         return (self.resource_kind, self.resource_id, self.governed_registration_id)
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "resource_kind": self.resource_kind.value,
+            "resource_id": self.resource_id,
+            "governed_registration_id": self.governed_registration_id,
+            "observed_generation": self.observed_generation,
+        }
+
 
 # --- Helper functions for snapshot creation ---
 
@@ -1645,3 +1653,173 @@ class FirstGovernanceResult:
     governed_registration_id: str = ""
     resulting_generation: int = 0
     reason: str = ""
+
+
+# --- M32A: Durable RRM Authority State Models ---
+
+@dataclass(frozen=True, slots=True)
+class ActiveGovernedIdentityRecord:
+    """M32A — Immutable durable record of an active governed resource identity.
+
+    Contains ONLY authority identity, NOT complete resource data.
+    Does NOT contain executor objects, provider objects, agent objects,
+    CoreApp objects, CapabilityRegistration Python identity, or arbitrary
+    resource metadata for product continuity.
+    """
+    resource_kind: ResourceType
+    resource_id: str
+    governed_registration_id: str
+    generation: int
+    status: ResourceStatus
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if (
+            not isinstance(self.governed_registration_id, str)
+            or not self.governed_registration_id.strip()
+        ):
+            raise ValueError("governed_registration_id must be a non-empty string")
+        if not isinstance(self.generation, int) or isinstance(self.generation, bool):
+            raise ValueError("generation must be an int")
+        if not is_valid_generation(self.generation):
+            raise ValueError(
+                f"generation must be a governed/versioned generation (>= {GENERATION_INITIAL}), got {self.generation}"
+            )
+        if not isinstance(self.status, ResourceStatus):
+            raise ValueError(
+                f"status must be a ResourceStatus, got {type(self.status).__name__}"
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "resource_kind": self.resource_kind.value,
+            "resource_id": self.resource_id,
+            "governed_registration_id": self.governed_registration_id,
+            "generation": self.generation,
+            "status": self.status.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ActiveGovernedIdentityRecord':
+        d = dict(data)
+        d["resource_kind"] = ResourceType(d["resource_kind"])
+        d["status"] = ResourceStatus(d["status"])
+        return cls(**d)
+
+
+@dataclass(frozen=True, slots=True)
+class DurableFirstGovernanceRecord:
+    """M32A — Immutable durable first-governance retry fact record.
+
+    Preserves exact retry fact for idempotent restart recovery.
+    """
+    resource_kind: ResourceType
+    resource_id: str
+    proposal_id: str
+    decision_id: str
+    governed_registration_id: str
+    resulting_generation: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if not isinstance(self.proposal_id, str) or not self.proposal_id.strip():
+            raise ValueError("proposal_id must be a non-empty string")
+        if not isinstance(self.decision_id, str) or not self.decision_id.strip():
+            raise ValueError("decision_id must be a non-empty string")
+        if (
+            not isinstance(self.governed_registration_id, str)
+            or not self.governed_registration_id.strip()
+        ):
+            raise ValueError("governed_registration_id must be a non-empty string")
+        if not is_valid_generation(self.resulting_generation):
+            raise ValueError(
+                f"resulting_generation must be a governed/versioned generation (>= {GENERATION_INITIAL}), got {self.resulting_generation}"
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "resource_kind": self.resource_kind.value,
+            "resource_id": self.resource_id,
+            "proposal_id": self.proposal_id,
+            "decision_id": self.decision_id,
+            "governed_registration_id": self.governed_registration_id,
+            "resulting_generation": self.resulting_generation,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DurableFirstGovernanceRecord':
+        d = dict(data)
+        d["resource_kind"] = ResourceType(d["resource_kind"])
+        return cls(**d)
+
+
+@dataclass(frozen=True, slots=True)
+class DurableRRMState:
+    """M32A — Complete durable RRM authority state snapshot.
+
+    MODEL_F2 — Single authority file containing all authority-critical state.
+    """
+    schema_version: int = 1
+    installation_id: str = ""
+    revision: int = 0
+    tombstones: List[Dict[str, Any]] = field(default_factory=list)
+    consumptions: List[Dict[str, Any]] = field(default_factory=list)
+    first_governances: List[Dict[str, Any]] = field(default_factory=list)
+    active_governed: List[Dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.schema_version, int) or self.schema_version < 1:
+            raise ValueError("schema_version must be >= 1")
+        if not isinstance(self.installation_id, str) or not self.installation_id.strip():
+            raise ValueError("installation_id must be a non-empty string")
+        if not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("revision must be a non-negative integer")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "installation_id": self.installation_id,
+            "revision": self.revision,
+            "tombstones": self.tombstones,
+            "consumptions": self.consumptions,
+            "first_governances": self.first_governances,
+            "active_governed": self.active_governed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DurableRRMState':
+        d = dict(data)
+        return cls(**d)
+
+
+class DurableCommitOutcome(str, Enum):
+    """M32A — Outcome of a durable RRM state commit."""
+    COMMITTED = "committed"
+    REVISION_MISMATCH = "revision_mismatch"
+    VALIDATION_FAILED = "validation_failed"
+    IO_ERROR = "io_error"
+    POISONED = "poisoned"
+
+
+@dataclass(frozen=True, slots=True)
+class DurableCommitResult:
+    """M32A — Immutable result of a durable RRM state commit."""
+    outcome: 'DurableCommitOutcome'
+    revision: int
+    reason: str = ""
+
+    @property
+    def is_success(self) -> bool:
+        return self.outcome == DurableCommitOutcome.COMMITTED

@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from pathlib import Path
+
+import pytest
 
 from intent_kernel.application.composition import KernelBuilder
 from intent_kernel.contracts import Capability
@@ -321,11 +324,20 @@ class TestBootstrapGovernPipeline(unittest.TestCase):
         self.assertEqual(result.observed_generation, 2)
 
 
+@pytest.mark.usefixtures("m32a_isolated_store_root")
 class TestProductionChainAndBuildRegression(unittest.TestCase):
     """BB7-BB8 — canonical production chain + productive-set build gate."""
 
+    @pytest.fixture(autouse=True)
+    def _setup_paths(self, m32a_isolated_store_root: Path) -> None:
+        self._authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+        self._continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
+
     def test_bb7_runtime_added_core_app_is_governed_and_resolvable(self) -> None:
-        components = KernelBuilder().build()
+        components = KernelBuilder().build(authority_file=self._authority_file, continuity_file=self._continuity_file)
+
+    def test_bb7_runtime_added_core_app_is_governed_and_resolvable(self) -> None:
+        components = KernelBuilder().build(authority_file=self._authority_file, continuity_file=self._continuity_file)
         app = _SwitchableApp()
 
         components.capability_router.register(app)
@@ -361,7 +373,7 @@ class TestProductionChainAndBuildRegression(unittest.TestCase):
         self.assertEqual(precondition.expected_generation, 2)
 
     def test_bb8_productive_set_gate_and_resolution(self) -> None:
-        components = KernelBuilder().build()
+        components = KernelBuilder().build(authority_file=self._authority_file, continuity_file=self._continuity_file)
         rrm = components.resource_manager
 
         governed_caps = {

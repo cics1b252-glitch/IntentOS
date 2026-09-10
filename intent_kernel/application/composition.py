@@ -70,6 +70,7 @@ from intent_kernel.providers import (
 from intent_kernel.router import ModuleRouter
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.service import RegistryResourceManager
+from intent_kernel.rrm.persistence import create_json_file_rrm_state_store
 from intent_kernel.discovery import CanonicalResourceDiscoveryService
 from intent_kernel.promotion.promotion_service import CanonicalResourcePromotionService
 from intent_kernel.activation.service import CanonicalResourceActivationService
@@ -236,7 +237,7 @@ class KernelBuilder:
             )
         return self
 
-    def build(self) -> ApplicationComponents:
+    def build(self, authority_file: Optional[Path] = None, continuity_file: Optional[Path] = None) -> ApplicationComponents:
         constitution = self._constitution or create_default_constitution()
         store = self._store or JsonFileStore(
             self._pkb_path or "~/.intent-os/pkb"
@@ -248,7 +249,12 @@ class KernelBuilder:
                 providers.set_default(name)
         if not providers.available:
             providers.register("mock", MockProvider())
-        resource_manager = RegistryResourceManager(populate_defaults=False)
+        # M32A: Durable RRM authority state store
+        durable_store = create_json_file_rrm_state_store(
+            authority_file=authority_file,
+            continuity_file=continuity_file,
+        )
+        resource_manager = RegistryResourceManager(populate_defaults=False, durable_store=durable_store)
         projection = RuntimeResourceProjection(resource_manager)
         providers.set_resource_projection(projection.project_provider)
         for provider_name in providers.available:
@@ -515,9 +521,9 @@ class ApplicationFactory:
         self._builder = builder or KernelBuilder()
         self._components: ApplicationComponents | None = None
 
-    def get_components(self) -> ApplicationComponents:
+    def get_components(self, authority_file: Optional[Path] = None, continuity_file: Optional[Path] = None) -> ApplicationComponents:
         if self._components is None:
-            self._components = self._builder.build()
+            self._components = self._builder.build(authority_file=authority_file, continuity_file=continuity_file)
         return self._components
 
     def get_kernel(self) -> Kernel:

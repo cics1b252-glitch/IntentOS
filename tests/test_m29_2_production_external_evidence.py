@@ -18,7 +18,9 @@ M29 invariant:
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock
 
@@ -137,27 +139,48 @@ def _run(gate, node, result="A"):
 class TestProductionWiring(unittest.TestCase):
     """A: Canonical composition root wires the SAME RRM into the observer."""
 
+    def setUp(self):
+        # M32B-1 post-M32A isolation: explicit isolated durable authority
+        # paths (same canonical injection as M13/M32A tests). Default
+        # production paths are never used, so the M32A cold pre-M32
+        # fail-closed gate cannot trigger and real user state is untouched.
+        self._tmp = tempfile.TemporaryDirectory(prefix="m29-2-")
+        store_root = Path(self._tmp.name) / ".intent-os"
+        (store_root / "rrm").mkdir(parents=True, exist_ok=True)
+        (store_root / "continuity").mkdir(parents=True, exist_ok=True)
+        self._authority_file = store_root / "rrm" / "authority.json"
+        self._continuity_file = store_root / "continuity" / "identity.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _components(self):
+        return ApplicationFactory().get_components(
+            authority_file=self._authority_file,
+            continuity_file=self._continuity_file,
+        )
+
     def test_a1_canonical_composition_creates_adapter(self):
-        comps = ApplicationFactory().get_components()
+        comps = self._components()
         self.assertIsNotNone(comps.external_evidence_adapter)
         self.assertIsInstance(comps.external_evidence_adapter, RRMEvidenceAdapter)
 
     def test_a2_adapter_uses_same_canonical_rrm_instance(self):
-        comps = ApplicationFactory().get_components()
+        comps = self._components()
         self.assertIs(
             comps.external_evidence_adapter._rrm,  # type: ignore[attr-defined]
             comps.resource_manager,
         )
 
     def test_a3_mission_runtime_holds_adapter_forwarded_to_gate(self):
-        comps = ApplicationFactory().get_components()
+        comps = self._components()
         self.assertIs(
             comps.mission_runtime.verification_gate._external_adapter,  # type: ignore[attr-defined]
             comps.external_evidence_adapter,
         )
 
     def test_a4_action_gate_rrm_is_canonical_resource_manager(self):
-        comps = ApplicationFactory().get_components()
+        comps = self._components()
         self.assertIs(
             comps.mission_runtime.action_gate._rrm,  # type: ignore[attr-defined]
             comps.resource_manager,
@@ -169,7 +192,7 @@ class TestProductionWiring(unittest.TestCase):
         The adapter and the ActionGate reference the identical composition-root
         resource_manager instance. No shadow RRM, no copy, no reconstruction.
         """
-        comps = ApplicationFactory().get_components()
+        comps = self._components()
         self.assertIsInstance(comps.resource_manager, RegistryResourceManager)
         self.assertIs(comps.external_evidence_adapter._rrm, comps.resource_manager)  # type: ignore[attr-defined]
         self.assertIs(comps.mission_runtime.action_gate._rrm, comps.resource_manager)  # type: ignore[attr-defined]

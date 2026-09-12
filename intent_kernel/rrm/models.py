@@ -1766,6 +1766,62 @@ class DurableFirstGovernanceRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class FirstGovernanceRestartEvidence:
+    """M32B-1 — immutable read-only view proving a live governed resource is a
+    valid durable restart reconciliation (NOT a new governance event).
+
+    Returned by RRM ONLY when every durable-side condition holds: the observed
+    live identity matches the durable active record AND the durable-loaded
+    first-governance fact (same grid, same generation, compatible status),
+    the fact was loaded from the M32A authority store at initialization (never
+    minted in this process), and the lineage is neither tombstoned nor
+    consumed as a predecessor.
+
+    EVIDENCE ONLY — carries no authority, authorizes nothing, and must never
+    be used to mint lineage, advance generation, or commit durable state.
+    Proposal/decision IDs are exposed for audit observability only; restart
+    recognition MUST NOT require cross-process request-ID equality.
+    """
+    resource_kind: ResourceType
+    resource_id: str
+    governed_registration_id: str
+    generation: int
+    status: str
+    fact_proposal_id: str
+    fact_decision_id: str
+    durable_loaded: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_kind, ResourceType):
+            raise ValueError(
+                "resource_kind must be a canonical ResourceType, "
+                f"got {type(self.resource_kind).__name__}"
+            )
+        if not isinstance(self.resource_id, str) or not self.resource_id.strip():
+            raise ValueError("resource_id must be a non-empty string")
+        if (
+            not isinstance(self.governed_registration_id, str)
+            or not self.governed_registration_id.strip()
+        ):
+            raise ValueError("governed_registration_id must be a non-empty string")
+        if not is_valid_generation(self.generation):
+            raise ValueError(
+                f"generation must be a governed/versioned generation (>= {GENERATION_INITIAL}), got {self.generation}"
+            )
+        if not isinstance(self.status, str) or not self.status.strip():
+            raise ValueError("status must be a non-empty string")
+        if not isinstance(self.fact_proposal_id, str) or not self.fact_proposal_id.strip():
+            raise ValueError("fact_proposal_id must be a non-empty string")
+        if not isinstance(self.fact_decision_id, str) or not self.fact_decision_id.strip():
+            raise ValueError("fact_decision_id must be a non-empty string")
+        if self.durable_loaded is not True:
+            raise ValueError(
+                "durable_loaded must be True: restart evidence is only valid "
+                "for facts loaded from the durable authority store"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class DurableRRMState:
     """M32A — Complete durable RRM authority state snapshot.
 

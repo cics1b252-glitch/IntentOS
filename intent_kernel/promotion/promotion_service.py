@@ -189,6 +189,32 @@ class CanonicalResourcePromotionService:
                 getattr(resource, "governed_registration_id", "") or ""
             )
             if active_grid:
+                restart = self._recognize_restart_reconciliation(
+                    declaration, resource, active_grid
+                )
+                if restart is not None:
+                    # M32B-1 CASE B — valid durable restart reconciliation.
+                    # The declaration is ALREADY SATISFIED BY DURABLE
+                    # AUTHORITY: no mint, no govern_existing call, no
+                    # generation advance, no durable commit, no new fact, no
+                    # consumption, no replacement grid. Outcome reports
+                    # reconciliation, never a new governance event.
+                    entries.append(
+                        BootstrapGovernanceEntry(
+                            resource_kind=declaration.resource_kind,
+                            resource_id=declaration.resource_id,
+                            capability_name=declaration.capability_name,
+                            executor_kind=declaration.executor_kind,
+                            executor_id=declaration.executor_id,
+                            success=True,
+                            outcome="restart_reconciled",
+                            governed_registration_id=(
+                                restart.governed_registration_id
+                            ),
+                            resulting_generation=restart.generation,
+                        )
+                    )
+                    continue
                 entries.append(_failed(declaration, "already_governed"))
                 overall = False
                 continue
@@ -328,3 +354,47 @@ class CanonicalResourcePromotionService:
         if getter is None:
             return None
         return getter(resource_id)
+
+    def _recognize_restart_reconciliation(
+        self, declaration: Any, resource: Any, active_grid: str
+    ) -> Any | None:
+        """M32B-1 — recognize a valid durable restart reconciliation.
+
+        Returns the RRM-issued FirstGovernanceRestartEvidence when the live
+        governed identity is fully explained by durable M32A authority, else
+        None (caller keeps existing fail-closed already_governed behavior).
+
+        READ-ONLY: no discovery, no proposal, no decision, no boundary call,
+        no mint, no commit. Declaration/executor binding compatibility mirrors
+        the canonical binding check (executor_kind must match; executor_id
+        must match when the snapshot carries one). Cross-process
+        proposal/decision equality is never required.
+        """
+        query = getattr(
+            self._rrm, "get_first_governance_restart_evidence", None
+        )
+        if query is None:
+            return None
+        try:
+            evidence = query(
+                declaration.resource_kind,
+                declaration.resource_id,
+                observed_governed_registration_id=active_grid,
+                observed_generation=getattr(resource, "generation", 0),
+                observed_status=getattr(resource, "status", ""),
+            )
+        except Exception:  # noqa: BLE001 — fail closed per declaration
+            return None
+        if evidence is None:
+            return None
+        metadata = getattr(resource, "metadata", None) or {}
+        try:
+            meta_kind = metadata.get("executor_kind")
+            meta_executor = metadata.get("executor_id", None)
+        except AttributeError:
+            return None
+        if meta_kind != declaration.executor_kind:
+            return None
+        if meta_executor is not None and meta_executor != declaration.executor_id:
+            return None
+        return evidence

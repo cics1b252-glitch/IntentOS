@@ -136,6 +136,8 @@ class ProductBridge:
         *,
         factory: ApplicationFactory | None = None,
         data_root: str | Path | None = None,
+        authority_file: Optional[Path] = None,
+        continuity_file: Optional[Path] = None,
     ) -> None:
         self.data_root = Path(
             data_root if data_root is not None else os.environ.get("INTENTOS_DATA_ROOT", ".")
@@ -156,7 +158,12 @@ class ProductBridge:
             builder.with_environment(dict(os.environ))
             factory = ApplicationFactory(builder)
         self.factory = factory
-        self.components = self.factory.get_components()
+        self.authority_file = authority_file
+        self.continuity_file = continuity_file
+        self.components = self.factory.get_components(
+            authority_file=authority_file,
+            continuity_file=continuity_file,
+        )
         self.kernel = self.factory.get_kernel()
         self.iue = self.components.iue
         self.cdm = self.components.cdm

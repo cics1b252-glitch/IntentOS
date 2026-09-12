@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from intent_kernel.application.composition import KernelBuilder
 from intent_kernel.contracts import (
@@ -28,6 +29,8 @@ from intent_kernel.rrm.models import (
     ResourceStatus,
     ResourceType,
 )
+
+from tests.conftest import m32a_isolated_store_root
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.adapter import RRMToCORAdapter
 from product_bridge import ProductBridge
@@ -114,8 +117,10 @@ def _govern_core_app_binding(components, executor_id: str, capability_name: str)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [ResourceStatus.UNAVAILABLE, ResourceStatus.DEGRADED])
-async def test_registered_healthy_binding_cannot_override_rrm(status, tmp_path):
-    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
+async def test_registered_healthy_binding_cannot_override_rrm(status, tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
+    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build(authority_file=authority_file, continuity_file=continuity_file)
     snapshot = components.resource_manager.get_capability("finance.intent")
     update = components.resource_manager.conditional_update_status(
         ConditionalResourceStatusRequest(
@@ -140,8 +145,10 @@ async def test_registered_healthy_binding_cannot_override_rrm(status, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_registry_only_and_rrm_only_resources_are_not_executable(tmp_path):
-    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
+async def test_registry_only_and_rrm_only_resources_are_not_executable(tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
+    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build(authority_file=authority_file, continuity_file=continuity_file)
     authority = components.capability_execution_service.resource_authority
 
     app = SwitchableApp()
@@ -170,8 +177,10 @@ async def test_registry_only_and_rrm_only_resources_are_not_executable(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_binding_health_is_revalidated_immediately_before_dispatch(tmp_path):
-    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
+async def test_binding_health_is_revalidated_immediately_before_dispatch(tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
+    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build(authority_file=authority_file, continuity_file=continuity_file)
     app = SwitchableApp()
     _register_switchable(components, app)
     mission = await _running_mission(components)
@@ -192,8 +201,10 @@ async def test_binding_health_is_revalidated_immediately_before_dispatch(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_stale_registry_binding_is_rejected_before_dispatch(tmp_path):
-    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
+async def test_stale_registry_binding_is_rejected_before_dispatch(tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
+    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build(authority_file=authority_file, continuity_file=continuity_file)
     app = SwitchableApp()
     _register_switchable(components, app)
     mission = await _running_mission(components)
@@ -218,13 +229,15 @@ async def test_stale_registry_binding_is_rejected_before_dispatch(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_canonical_provider_execution_uses_observed_invocation_boundary(tmp_path):
+async def test_canonical_provider_execution_uses_observed_invocation_boundary(tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
     spare = RecordingProvider("spare")
     components = (
         KernelBuilder()
         .with_provider("spare", spare, default=True)
         .with_pkb_path(tmp_path / "pkb")
-        .build()
+        .build(authority_file=authority_file, continuity_file=continuity_file)
     )
     mission = await _running_mission(components)
 
@@ -242,13 +255,15 @@ async def test_canonical_provider_execution_uses_observed_invocation_boundary(tm
 
 
 @pytest.mark.asyncio
-async def test_provider_throw_is_observed_only_after_actual_attempt(tmp_path):
+async def test_provider_throw_is_observed_only_after_actual_attempt(tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
     provider = RecordingProvider("throwing", error=RuntimeError("provider failed"))
     components = (
         KernelBuilder()
         .with_provider("throwing", provider, default=True)
         .with_pkb_path(tmp_path / "pkb")
-        .build()
+        .build(authority_file=authority_file, continuity_file=continuity_file)
     )
     mission = await _running_mission(components)
 
@@ -266,8 +281,10 @@ async def test_provider_throw_is_observed_only_after_actual_attempt(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_provider_backed_core_app_cannot_use_ineligible_default(tmp_path):
-    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
+async def test_provider_backed_core_app_cannot_use_ineligible_default(tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
+    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build(authority_file=authority_file, continuity_file=continuity_file)
     mock = components.provider_manager.get("mock")
     calls = 0
     original = mock.execute
@@ -294,8 +311,10 @@ async def test_provider_backed_core_app_cannot_use_ineligible_default(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_authorization_denial_after_resolution_never_dispatches(tmp_path):
-    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build()
+async def test_authorization_denial_after_resolution_never_dispatches(tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
+    components = KernelBuilder().with_pkb_path(tmp_path / "pkb").build(authority_file=authority_file, continuity_file=continuity_file)
     app = SwitchableApp()
     _register_switchable(components, app)
     mission = await _running_mission(components)
@@ -318,7 +337,9 @@ async def test_authorization_denial_after_resolution_never_dispatches(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_multiple_provider_candidates_are_deterministic_and_not_invoked(tmp_path):
+async def test_multiple_provider_candidates_are_deterministic_and_not_invoked(tmp_path, m32a_isolated_store_root: Path):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
     alpha = RecordingProvider("alpha")
     beta = RecordingProvider("beta")
     components = (
@@ -326,7 +347,7 @@ async def test_multiple_provider_candidates_are_deterministic_and_not_invoked(tm
         .with_provider("alpha", alpha)
         .with_provider("beta", beta)
         .with_pkb_path(tmp_path / "pkb")
-        .build()
+        .build(authority_file=authority_file, continuity_file=continuity_file)
     )
     authority: CanonicalProviderAuthority = components.provider_authority
 
@@ -341,10 +362,16 @@ async def test_multiple_provider_candidates_are_deterministic_and_not_invoked(tm
 
 @pytest.mark.asyncio
 async def test_cor_and_provider_diagnostics_are_projected_from_canonical_rrm(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, m32a_isolated_store_root: Path
 ):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
-    bridge = ProductBridge()
+    bridge = ProductBridge(
+        data_root=tmp_path,
+        authority_file=authority_file,
+        continuity_file=continuity_file,
+    )
 
     assert isinstance(bridge.ecc.registry, RRMToCORAdapter)
     assert bridge.ecc.registry.rrm_service is bridge.components.resource_manager
@@ -377,10 +404,17 @@ async def test_cor_and_provider_diagnostics_are_projected_from_canonical_rrm(
     ],
 )
 async def test_new_novel_domains_do_not_activate_registered_domain_defaults(
-    monkeypatch, tmp_path, message
+    monkeypatch, tmp_path, m32a_isolated_store_root: Path, message
 ):
+    authority_file = m32a_isolated_store_root / "rrm" / "authority.json"
+    continuity_file = m32a_isolated_store_root / "continuity" / "identity.json"
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
-    response = await ProductBridge().dispatch({
+    bridge = ProductBridge(
+        data_root=tmp_path,
+        authority_file=authority_file,
+        continuity_file=continuity_file,
+    )
+    response = await bridge.dispatch({
         "action": "intent",
         "message": message,
         "session_id": "m13-novel",

@@ -140,6 +140,13 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
         # generation advance.
         self._first_governances: Dict[Tuple[ResourceType, str], Tuple[str, str, str, int]] = {}
 
+        # M32B-1: durable provenance of first-governance facts. Keys present in
+        # the image loaded from the M32A authority store at initialization.
+        # Facts minted in this process (PHASE 2 fresh governance) are NEVER
+        # added here, so a same-process second bootstrap_govern still fails
+        # closed while a genuine restart reconciliation is recognizable.
+        self._durable_loaded_fg_keys: Set[Tuple[ResourceType, str]] = set()
+
         # M32A: Durable authority state store
         self._durable_store: Optional[JsonFileRRMStateStore] = durable_store
         self._durable_active: Dict[Tuple[ResourceType, str], Dict[str, Any]] = {}
@@ -243,6 +250,9 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 fg_data["governed_registration_id"],
                 fg_data["resulting_generation"],
             )
+        # M32B-1: snapshot durable provenance. Only facts present in this
+        # loaded image count as durable-loaded for restart recognition.
+        self._durable_loaded_fg_keys = set(self._first_governances.keys())
 
         # Reconcile active governed identities with in-memory resources
         # Preserve exact durable grid/generation/status
@@ -1254,6 +1264,86 @@ class RegistryResourceManager(RRMRegistryPort, ResourceQueryPort, ProjectRegistr
                 governed_registration_id=governed_registration_id,
                 resulting_generation=resulting_generation,
                 reason="",
+            )
+
+    def get_first_governance_restart_evidence(
+        self,
+        resource_kind: ResourceType,
+        resource_id: str,
+        observed_governed_registration_id: str,
+        observed_generation: int,
+        observed_status: Any,
+    ) -> Optional["FirstGovernanceRestartEvidence"]:
+        """M32B-1 — READ-ONLY restart-reconciliation evidence query.
+
+        Returns a FirstGovernanceRestartEvidence ONLY when the observed live
+        identity is fully explained by durable M32A authority:
+
+          - a first-governance fact for (kind, id) was LOADED from the durable
+            store at initialization (never minted in this process);
+          - the durable active record and the fact agree on the observed grid
+            and generation;
+          - observed status equals the durable status and is non-terminal;
+          - the lineage is neither tombstoned nor consumed as a predecessor.
+
+        Returns None otherwise. Performs NO mint, NO mutation, NO commit, and
+        NO authorization. A None result MUST be treated as fail-closed by the
+        caller (existing already_governed behavior).
+        """
+        from intent_kernel.rrm.generation import is_valid_generation
+        from intent_kernel.rrm.models import FirstGovernanceRestartEvidence
+
+        with self._lock:
+            self._check_poisoned()
+
+            key = (resource_kind, resource_id)
+            if key not in self._durable_loaded_fg_keys:
+                return None
+            fact = self._first_governances.get(key)
+            active = self._durable_active.get(key)
+            if fact is None or active is None:
+                return None
+
+            grid = observed_governed_registration_id or ""
+            if not grid:
+                return None
+            if grid != active.get("governed_registration_id"):
+                return None
+            if grid != fact[2]:
+                return None
+
+            gen = observed_generation
+            if not is_valid_generation(gen):
+                return None
+            if gen != active.get("generation"):
+                return None
+            if gen != fact[3]:
+                return None
+
+            status_str = getattr(observed_status, "value", observed_status)
+            status_str = str(status_str or "")
+            if status_str != str(active.get("status") or ""):
+                return None
+            if status_str in (
+                ResourceStatus.ARCHIVED.value,
+                ResourceStatus.UNINSTALLED.value,
+            ):
+                return None
+
+            if (resource_kind, resource_id, grid) in self._tombstones:
+                return None
+            if (resource_kind, resource_id, grid) in self._consumptions:
+                return None
+
+            return FirstGovernanceRestartEvidence(
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                governed_registration_id=grid,
+                generation=gen,
+                status=status_str,
+                fact_proposal_id=fact[0],
+                fact_decision_id=fact[1],
+                durable_loaded=True,
             )
 
     def _get_provider_for_mutation(self, provider_id: str) -> Optional[ProviderResource]:

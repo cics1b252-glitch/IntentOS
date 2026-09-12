@@ -71,6 +71,7 @@ from intent_kernel.router import ModuleRouter
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 from intent_kernel.rrm.service import RegistryResourceManager
 from intent_kernel.rrm.persistence import create_json_file_rrm_state_store
+from intent_kernel.mission import create_json_file_mission_record_store
 from intent_kernel.discovery import CanonicalResourceDiscoveryService
 from intent_kernel.promotion.promotion_service import CanonicalResourcePromotionService
 from intent_kernel.activation.service import CanonicalResourceActivationService
@@ -155,6 +156,7 @@ class ApplicationComponents:
     migration_telemetry: MigrationTelemetry
     bootstrap_mode: str = "canonical"
     legacy_adapters: tuple[str, ...] = LEGACY_ADAPTERS
+    mission_record_store: Any = None
 
 
 class KernelBuilder:
@@ -254,6 +256,8 @@ class KernelBuilder:
             authority_file=authority_file,
             continuity_file=continuity_file,
         )
+        # M32B-1: Durable MissionRecord authority state store
+        mission_record_store = create_json_file_mission_record_store()
         resource_manager = RegistryResourceManager(populate_defaults=False, durable_store=durable_store)
         projection = RuntimeResourceProjection(resource_manager)
         providers.set_resource_projection(projection.project_provider)
@@ -511,6 +515,7 @@ class KernelBuilder:
             resource_promotion_service=resource_promotion_service,
             resource_activation_service=resource_activation_service,
             migration_telemetry=migration_telemetry,
+            mission_record_store=mission_record_store,
         )
 
 

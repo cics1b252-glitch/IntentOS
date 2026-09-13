@@ -106,7 +106,19 @@ class ActionPlanEntry:
 
 @dataclass(frozen=True, slots=True)
 class DurableActionState:
-    """Durable action execution state with expected preconditions."""
+    """Durable action execution state with expected preconditions.
+
+    provider_effect_id carries the opaque provider-supplied effect token
+    (idempotency key / effect ID / transaction ID) when one exists, stored
+    distinctly from the local execution identity. effect_identity_digest is
+    the deterministic digest over that token ("" when absent). Neither field
+    manufactures provider certainty: absent provider identity means external
+    exactly-once remains unprovable. local_execution_identity persists the
+    frozen MODEL E2 dispatch identity once bound ("" until first binding;
+    immutable and recomputation-checked afterwards). verification_proof_digest
+    pins the canonical gate proof that authorized VERIFIED, so only that
+    proof's basis can later authorize action COMPLETED.
+    """
     action_id: str
     node_id: str
     state: ActionState = ActionState.PENDING
@@ -120,6 +132,10 @@ class DurableActionState:
     verification_evidence: Optional[dict[str, Any]] = None
     attempt_count: int = 0
     error_message: Optional[str] = None
+    provider_effect_id: str = ""
+    effect_identity_digest: str = ""
+    local_execution_identity: str = ""
+    verification_proof_digest: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.action_id, str) or not self.action_id.strip():
@@ -131,7 +147,9 @@ class DurableActionState:
         for label in ("expected_resource_id",
                       "expected_governed_registration_id",
                       "expected_executor_kind", "expected_executor_logical_id",
-                      "verification_status"):
+                      "verification_status", "provider_effect_id",
+                      "effect_identity_digest", "local_execution_identity",
+                      "verification_proof_digest"):
             if not isinstance(getattr(self, label), str):
                 raise ValueError(f"{label} must be a string")
         if not isinstance(self.expected_resource_generation, int) or isinstance(

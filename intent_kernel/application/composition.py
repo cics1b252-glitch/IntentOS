@@ -381,6 +381,11 @@ class KernelBuilder:
             resource_authority=CanonicalResourceBindingAuthority(
                 resource_manager, capability_registry
             ),
+            # M32B-2 productive convergence seam: None preserves legacy
+            # behavior. A ProductiveDispatchGuard is injected by M32B-4
+            # attempt binding (or tests); only bound durable attempts then
+            # follow durable dispatch ownership.
+            dispatch_guard=None,
         )
         tool_authorization_gate = ToolAuthorizationGate(constitution_engine)
         mission_service = CanonicalMissionService(
@@ -393,6 +398,9 @@ class KernelBuilder:
             constitution=constitution_engine,
             mission_engine=mission_engine,
             external_evidence_adapter=external_evidence_adapter,
+            # M32B-2 seams: None preserves legacy behavior (see above).
+            dispatch_guard=None,
+            replay_policy=None,
         )
         confirmation_service = CanonicalConfirmationService(
             mission_engine,

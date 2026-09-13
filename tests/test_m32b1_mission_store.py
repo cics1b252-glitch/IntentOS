@@ -198,15 +198,23 @@ def test_t5_durable_revision_mismatch_fails_closed(tmp_path):
 
 
 def test_t6_valid_update_n_to_n_plus_1(tmp_path):
+    # M32B-2 contract: the action set is frozen by the frozen plan, so the
+    # updated action must exist (PENDING) at creation; the update evolves
+    # only its state.
     store = _store(tmp_path)
-    assert store.create(_record(store)).outcome == "committed"
+    assert store.create(_record(
+        store,
+        plan=({"action_id": "a1", "capability": "c", "node_id": "n1",
+               "dependencies": [], "request_semantics_digest": "d"},),
+        action_states={"a1": DurableActionState(
+            action_id="a1", node_id="n1", state=ActionState.PENDING)},
+    )).outcome == "committed"
     import dataclasses
     current = MissionRecord.from_dict(store.load("m1"))
-    updated = dataclasses.replace(
-        current, revision=2, mission_status=MissionStatus.RUNNING,
-        action_states={"a1": DurableActionState(
-            action_id="a1", node_id="n1", state=ActionState.DISPATCHING)},
-    )
+    states = dict(current.action_states)
+    states["a1"] = DurableActionState(
+        action_id="a1", node_id="n1", state=ActionState.DISPATCHING)
+    updated = dataclasses.replace(current, revision=2, action_states=states)
     result = store.commit(1, updated)
     assert result.outcome == "committed"
     assert result.revision == 2

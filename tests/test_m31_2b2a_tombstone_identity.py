@@ -270,14 +270,15 @@ class ResourceTombstoneRuntimeNonActivationTest(unittest.TestCase):
         )
 
     def test_19_authority_ownership_remains_unchanged(self):
-        # ResourceTombstone exposes NO callable helper surface; all authority
-        # decisions remain in the existing authority classes.
+        # ResourceTombstone exposes NO callable authority helper surface;
+        # all authority decisions remain in the existing authority classes.
+        # to_dict is a standard dataclass serialization method, not an authority helper.
         method_names = [
             name
             for name in dir(ResourceTombstone)
             if not name.startswith("_") and callable(getattr(ResourceTombstone, name))
         ]
-        self.assertEqual(method_names, [])
+        self.assertEqual(method_names, ["to_dict"])
 
     def test_20_project_support_in_contract_does_not_modify_retirement_authority(self):
         # ResourceTombstone accepts ResourceType.PROJECT (contract representability

@@ -31,12 +31,14 @@ from intent_kernel.runtime.models import (
 )
 from intent_kernel.runtime.verification import (
     ActionVerificationPort,
+    ActionVerificationProof,
     DeterministicStructuralVerifier,
     InMemoryActionVerificationAdapter,
     MissionCompletionDecision,
     MissionCompletionGate,
     VerificationGate,
     exact_contract_hash,
+    issue_action_verification_proof,
 )
 from intent_kernel.runtime.semantic_verifier import (
     DeterministicRuleVerifier,
@@ -68,9 +70,11 @@ __all__ = [
     "InMemoryActionExecutor",
     "RealActionExecutionProhibitedError",
     "ActionVerificationPort",
+    "ActionVerificationProof",
     "DeterministicStructuralVerifier",
     "InMemoryActionVerificationAdapter",
     "VerificationGate",
+    "issue_action_verification_proof",
     "MissionCompletionDecision",
     "MissionCompletionGate",
     "MissionCheckpointRepositoryPort",

@@ -87,6 +87,200 @@ class MissionCompletionDecision:
         )
 
 
+_ACTION_VERIFICATION_AUTHORITY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ActionVerificationProof:
+    """Gate-issued authority binding one VERIFIED_SUCCESS evaluation.
+
+    Produced ONLY by :func:`issue_action_verification_proof` after the
+    VerificationGate itself evaluated the exact action contract and
+    returned VERIFIED_SUCCESS with gate-sourced evidence. An arbitrary
+    caller can construct this dataclass but can never forge
+    ``authority_complete``: that property additionally requires the
+    module-private authority token, exactly like MissionCompletionDecision.
+
+    Durable consumers (M32B action authority) must still validate binding
+    (mission/action/request digest) and freshness against their own
+    canonical state; this proof carries gate truth, not mission truth.
+    """
+
+    mission_id: str
+    action_id: str
+    request_semantics_digest: str
+    verification_status: str
+    verification_source: str
+    verification_method: str
+    contract_hash: str = ""
+    exact_contract_hash: str = ""
+    rule_set_hash: str = ""
+    external_evidence_required: bool = False
+    external_evidence_contract_hash: str = ""
+    external_observations: tuple = ()
+    verified_at: str = ""
+    _authority_token: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        for label in (
+            "mission_id",
+            "action_id",
+            "request_semantics_digest",
+            "verification_status",
+            "verification_source",
+            "verification_method",
+            "contract_hash",
+            "exact_contract_hash",
+            "rule_set_hash",
+            "external_evidence_contract_hash",
+            "verified_at",
+        ):
+            if not isinstance(getattr(self, label), str):
+                raise ValueError(f"{label} must be a string")
+        if not isinstance(
+            self.external_evidence_required, bool
+        ):
+            raise ValueError("external_evidence_required must be a bool")
+        for obs in self.external_observations:
+            if not isinstance(obs, dict):
+                raise ValueError("external_observations items must be dicts")
+        object.__setattr__(
+            self,
+            "external_observations",
+            tuple(
+                json.loads(
+                    json.dumps(
+                        obs,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                )
+                for obs in self.external_observations
+            ),
+        )
+
+    @property
+    def authority_complete(self) -> bool:
+        """True only for a genuinely gate-issued VERIFIED_SUCCESS proof."""
+        return bool(
+            self.verification_status == "VERIFIED_SUCCESS"
+            and self.verification_source == "VerificationGate"
+            and self._authority_token is _ACTION_VERIFICATION_AUTHORITY_TOKEN
+            and self.mission_id
+            and self.action_id
+            and self.request_semantics_digest
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Public bound fields only; the authority token never serializes."""
+        return {
+            "mission_id": self.mission_id,
+            "action_id": self.action_id,
+            "request_semantics_digest": self.request_semantics_digest,
+            "verification_status": self.verification_status,
+            "verification_source": self.verification_source,
+            "verification_method": self.verification_method,
+            "contract_hash": self.contract_hash,
+            "exact_contract_hash": self.exact_contract_hash,
+            "rule_set_hash": self.rule_set_hash,
+            "external_evidence_required": self.external_evidence_required,
+            "external_evidence_contract_hash": self.external_evidence_contract_hash,
+            "external_observations": [dict(obs) for obs in self.external_observations],
+            "verified_at": self.verified_at,
+        }
+
+    def proof_digest(self) -> str:
+        """Deterministic digest over the bound public fields."""
+        canonical = json.dumps(
+            self.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def issue_action_verification_proof(
+    *,
+    mission_id: str,
+    action_id: str,
+    request_semantics_digest: str,
+    node_id: str,
+    capability: str,
+    status: Any,
+    evidence: Any,
+    verified_at: str,
+) -> ActionVerificationProof:
+    """Mint a gate-issued ActionVerificationProof (fail closed).
+
+    Validates gate-side coherence: status is VERIFIED_SUCCESS, the evidence
+    is gate-sourced with verified=True and a matching VERIFIED_SUCCESS
+    details block bound to the same node/capability. Raises ValueError
+    otherwise — no proof is minted for anything but a genuine gate success.
+    Mission/action/digest binding against durable mission authority is the
+    durable consumer's duty, not this function's.
+    """
+    status_value = getattr(status, "value", status)
+    if status_value != "VERIFIED_SUCCESS":
+        raise ValueError(
+            f"proof requires VERIFIED_SUCCESS, got {status_value!r}"
+        )
+    source = getattr(evidence, "source", None)
+    if source != "VerificationGate":
+        raise ValueError(
+            f"proof requires VerificationGate-sourced evidence, got {source!r}"
+        )
+    if getattr(evidence, "verified", None) is not True:
+        raise ValueError("proof requires evidence.verified is True")
+    details = getattr(evidence, "details", None) or {}
+    if not isinstance(details, dict):
+        raise ValueError("proof requires evidence details mapping")
+    if details.get("verification_status") != "VERIFIED_SUCCESS":
+        raise ValueError("proof requires details.verification_status VERIFIED_SUCCESS")
+    if details.get("node_id") != node_id:
+        raise ValueError("proof node_id does not match evidence details")
+    if details.get("capability") != capability:
+        raise ValueError("proof capability does not match evidence details")
+    for label, value in (
+        ("mission_id", mission_id),
+        ("action_id", action_id),
+        ("request_semantics_digest", request_semantics_digest),
+        ("verified_at", verified_at),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} must be a non-empty string")
+    observations = details.get("external_observations", []) or []
+    if not isinstance(observations, list):
+        raise ValueError("external_observations must be a list")
+    return ActionVerificationProof(
+        mission_id=mission_id,
+        action_id=action_id,
+        request_semantics_digest=request_semantics_digest,
+        verification_status="VERIFIED_SUCCESS",
+        verification_source="VerificationGate",
+        verification_method=str(getattr(evidence, "verification_method", "")),
+        contract_hash=str(details.get("contract_hash") or ""),
+        exact_contract_hash=str(details.get("exact_contract_hash") or ""),
+        rule_set_hash=str(details.get("rule_set_hash") or ""),
+        external_evidence_required=bool(details.get("external_evidence_required", False)),
+        external_evidence_contract_hash=str(
+            details.get("external_evidence_contract_hash") or ""
+        ),
+        external_observations=tuple(
+            dict(obs) for obs in observations if isinstance(obs, dict)
+        ),
+        verified_at=verified_at,
+        _authority_token=_ACTION_VERIFICATION_AUTHORITY_TOKEN,
+    )
+
+
 class ActionVerificationPort(ABC):
     """Abstract port interface for post-execution action verification."""
 

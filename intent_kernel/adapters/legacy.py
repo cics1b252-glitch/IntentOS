@@ -452,7 +452,17 @@ class InMemoryMissionStoreAdapter:
 
 
 class InMemoryIdempotencyStoreAdapter:
-    """Injected non-durable idempotency store for canonical execution."""
+    """Injected non-durable idempotency store for canonical execution.
+
+    ROLE (M32B-2 productive convergence): RESULT CACHE / replay
+    optimization ONLY. This store is NEVER canonical dispatch authority,
+    NEVER proof that an external effect did not happen, and NEVER external
+    exactly-once authority. A cache miss must not override an existing
+    durable action attempt; a cache hit never overrides durable replay
+    posture. Canonical order: durable attempt authority -> posture ->
+    optional cache lookup -> dispatch only if allowed -> durable result ->
+    optional cache publication.
+    """
 
     def __init__(self):
         self._values: dict[tuple[str, str, str], Any] = {}

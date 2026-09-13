@@ -6,7 +6,7 @@ MissionConstraints, resource eligibility, required permissions, user confirmatio
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from intent_kernel.instructions import MissionConstraint
 from intent_kernel.runtime.models import (
@@ -21,9 +21,21 @@ from intent_kernel.runtime.models import (
 class ActionGate:
     """Pre-execution validation gate for Action Contracts."""
 
-    def __init__(self, rrm_service: Optional[Any] = None, constitution: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        rrm_service: Optional[Any] = None,
+        constitution: Optional[Any] = None,
+        replay_policy: Optional[Callable[[str, str], Optional[str]]] = None,
+    ) -> None:
         self._rrm = rrm_service
         self._constitution = constitution
+        # PB1 (M32B-2 productive convergence): the executed-keys set below
+        # is a NON-AUTHORITATIVE tripwire only. It may trigger replay
+        # handling but can never authorize dispatch by itself. Canonical
+        # replay posture comes from the optional replay_policy
+        # ((node_id, idempotency_key) -> ReplayDecision value string);
+        # without one, a known-executed key fails closed as DENY.
+        self._replay_policy = replay_policy
         self._executed_idempotency_keys: set = set()
 
     def mark_idempotency_key_executed(self, key: str) -> None:
@@ -101,11 +113,35 @@ class ActionGate:
                 if env_res and getattr(env_res, "status", "INACTIVE") != "ACTIVE":
                     return ActionGateDecision.WAIT_RESOURCE
 
-        # 6. Idempotency Check
-        # If action was already executed with the same idempotency key, skip or allow safe re-entry
+        # 6. Idempotency / Replay Check
+        # PB1: a previously-executed idempotency key NEVER falls through to
+        # ALLOW. With a replay policy, its durable posture decides; without
+        # one, the known-executed key fails closed as DENY.
         if contract.idempotency_key and self.is_idempotency_key_executed(contract.idempotency_key):
-            # Idempotent action already executed — allow or re-use result
-            pass
+            return self._resolve_replay(node, contract)
 
         # 7. Normal Execution Allowed
         return ActionGateDecision.ALLOW
+
+    def _resolve_replay(
+        self,
+        node: RuntimeNode,
+        contract: ActionContract,
+    ) -> ActionGateDecision:
+        """Map durable replay posture for a known-executed key to a decision."""
+        if self._replay_policy is None:
+            return ActionGateDecision.DENY
+        try:
+            posture = self._replay_policy(
+                str(getattr(node, "node_id", "")),
+                str(contract.idempotency_key or ""),
+            )
+        except Exception:
+            return ActionGateDecision.DENY
+        if posture == "MAY_DISPATCH":
+            return ActionGateDecision.ALLOW
+        if posture == "RECONFIRMATION_REQUIRED":
+            return ActionGateDecision.REQUIRE_CONFIRMATION
+        # DO_NOT_REDISPATCH, AMBIGUOUS_RECONCILIATION_REQUIRED,
+        # ALREADY_COMPLETED, unknown, or None: fail closed, never ALLOW.
+        return ActionGateDecision.DENY

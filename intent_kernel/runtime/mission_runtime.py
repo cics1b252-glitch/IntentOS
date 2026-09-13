@@ -54,6 +54,23 @@ from intent_kernel.runtime.verification import (
 from intent_kernel.time_utils import utc_iso
 
 
+def _durable_result_summary(raw_result: Any) -> Dict[str, Any]:
+    """Minimal JSON-safe handoff-result summary for durable recording.
+
+    Duck-typed (never raises): success flag plus truncated output text.
+    Provider effect tokens are NOT invented here; absence stays absent.
+    """
+    try:
+        success = bool(getattr(raw_result, "success", True))
+    except Exception:
+        success = False
+    try:
+        output = str(getattr(raw_result, "output", raw_result))
+    except Exception:
+        output = "<unrenderable-result>"
+    return {"success": success, "output": output[:2000]}
+
+
 class MissionRuntime:
     """Controlled cognitive execution runtime engine."""
 
@@ -65,10 +82,20 @@ class MissionRuntime:
         constitution: Optional[Any] = None,
         mission_engine: Optional[Any] = None,
         external_evidence_adapter: Optional[Any] = None,
+        dispatch_guard: Optional[Any] = None,
+        replay_policy: Optional[Any] = None,
     ) -> None:
         self.executor = executor or InMemoryActionExecutor()
         self.checkpoint_repo = checkpoint_repo or InMemoryCheckpointRepository()
-        self.action_gate = ActionGate(rrm_service=rrm_service, constitution=constitution)
+        self.action_gate = ActionGate(
+            rrm_service=rrm_service,
+            constitution=constitution,
+            replay_policy=replay_policy,
+        )
+        # M32B-2 productive convergence: optional durable dispatch guard.
+        # None preserves legacy behavior exactly; when present, bound nodes
+        # acquire durable dispatch ownership before any executor handoff.
+        self.dispatch_guard = dispatch_guard
         self.verification_gate = VerificationGate(
             external_adapter=external_evidence_adapter
         )
@@ -397,6 +424,45 @@ class MissionRuntime:
                     await self._sync_lifecycle(instance)
                     return instance
 
+                # M32B-2 productive convergence: durable dispatch ownership
+                # BEFORE any executor handoff. Opt-in (None preserves legacy
+                # behavior exactly). Gate approval above already enforced live
+                # confirmation, so no stale confirmation is consulted here.
+                ownership = None
+                if self.dispatch_guard is not None:
+                    try:
+                        ownership = self.dispatch_guard.acquire_for_node(
+                            instance.mission_id,
+                            node,
+                            requested_by="mission-runtime",
+                            confirmation_required=False,
+                        )
+                    except Exception as exc:
+                        decision = getattr(exc, "decision", "") or ""
+                        node.state = RuntimeNodeState.FAILED
+                        if node.node_id in instance.pending_nodes:
+                            instance.pending_nodes.remove(node.node_id)
+                        instance.failed_nodes.append(node.node_id)
+                        node.error_message = (
+                            "Durable dispatch ownership refused: "
+                            f"{exc}"
+                        )
+                        report = FailureReport(
+                            runtime_id=instance.runtime_id,
+                            mission_id=instance.mission_id,
+                            node_id=node.node_id,
+                            category=FailureCategory.POLICY_BLOCK,
+                            message=node.error_message,
+                            retryable=(
+                                decision
+                                == "AMBIGUOUS_RECONCILIATION_REQUIRED"
+                            ),
+                        )
+                        self._failure_reports.append(report)
+                        await self.save_checkpoint(instance)
+                        await self._sync_lifecycle(instance)
+                        return instance
+
                 # Proceed to Execute
                 node.state = RuntimeNodeState.EXECUTING
                 node.attempt_count += 1
@@ -404,6 +470,36 @@ class MissionRuntime:
                 try:
                     raw_result = await self.executor.execute(contract)
                     node.result = raw_result
+                    if ownership is not None:
+                        try:
+                            self.dispatch_guard.record_result(
+                                ownership,
+                                result_summary=_durable_result_summary(
+                                    raw_result
+                                ),
+                                requested_by="mission-runtime",
+                            )
+                        except Exception as exc:
+                            node.state = RuntimeNodeState.FAILED
+                            node.error_message = (
+                                "Durable result recording failed: "
+                                f"{exc}"
+                            )
+                            if node.node_id in instance.pending_nodes:
+                                instance.pending_nodes.remove(node.node_id)
+                            instance.failed_nodes.append(node.node_id)
+                            report = FailureReport(
+                                runtime_id=instance.runtime_id,
+                                mission_id=instance.mission_id,
+                                node_id=node.node_id,
+                                category=FailureCategory.EXECUTION_FAILURE,
+                                message=node.error_message,
+                                retryable=False,
+                            )
+                            self._failure_reports.append(report)
+                            await self.save_checkpoint(instance)
+                            await self._sync_lifecycle(instance)
+                            return instance
 
                     # Post-execution verification gate
                     verif_status, evidence = await self.verification_gate.evaluate_node(
@@ -441,6 +537,19 @@ class MissionRuntime:
                         self._failure_reports.append(report)
 
                 except Exception as ex:
+                    if ownership is not None:
+                        # Execution certainty lost: persist ambiguity. Never
+                        # returns to PENDING, never redispatches. Failures of
+                        # this best-effort marking are swallowed: the durable
+                        # INTENT record already forbids redispatch by itself.
+                        try:
+                            self.dispatch_guard.record_ambiguity(
+                                ownership,
+                                reason="runtime-handoff-exception",
+                                requested_by="mission-runtime",
+                            )
+                        except Exception:
+                            pass
                     node.state = RuntimeNodeState.FAILED
                     node.error_message = str(ex)
                     if node.node_id in instance.pending_nodes:

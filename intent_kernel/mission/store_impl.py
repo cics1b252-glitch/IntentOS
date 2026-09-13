@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from intent_kernel.mission.mission_record import MissionRecord, detach_json_value
+from intent_kernel.mission.execution_identity import (
+    compute_local_execution_identity,
+)
 from intent_kernel.mission.store import (
     DurableCommitResult,
     MissionRecordStorePort,
@@ -177,6 +180,44 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                 "mission_definition content"
             )
 
+    def _expected_identity(
+        self, data: Dict[str, Any], action_id: str
+    ) -> str:
+        """Recompute the MODEL E2 identity from file content itself.
+
+        Raises when the action has no identifiable plan entry (no request
+        digest): unidentifiable actions cannot carry bound identity.
+        """
+        request_digest = ""
+        for entry in data.get("plan", []):
+            if isinstance(entry, dict) and entry.get("action_id") == action_id:
+                request_digest = entry.get("request_semantics_digest", "")
+                break
+        if not isinstance(request_digest, str) or not request_digest:
+            raise MissionRecordValidationError(
+                f"No identifiable plan entry for action: {action_id}"
+            )
+        action = data.get("action_states", {}).get(action_id, {})
+        return compute_local_execution_identity(
+            data.get("mission_id", ""),
+            action_id,
+            request_digest,
+            action.get("expected_executor_logical_id", ""),
+            action.get("expected_governed_registration_id", ""),
+            action.get("expected_resource_generation", 0),
+        )
+
+    def _require_identity_match(
+        self, data: Dict[str, Any], action_id: str, identity: str
+    ) -> None:
+        """Enforce a bound local_execution_identity against recomputation."""
+        if not identity:
+            return
+        if identity != self._expected_identity(data, action_id):
+            raise MissionRecordValidationError(
+                f"local_execution_identity mismatch for action: {action_id}"
+            )
+
     # --- Load / Create / Commit ---
 
     def exists(self, mission_id: str) -> bool:
@@ -325,6 +366,51 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
             ):
                 raise MissionRecordValidationError(
                     f"Immutable mission identity field changed: {field}"
+                )
+        # Per-action identity: the action set is frozen by the frozen plan,
+        # and each action's node binding plus expected RRM/executor
+        # preconditions are frozen. Evolving execution facts (state, result,
+        # verification, effect digests once bound, error) are governed by
+        # the M32B-2 transition authority, not here.
+        durable_actions = durable_data.get("action_states", {})
+        candidate_actions = candidate.get("action_states", {})
+        if set(candidate_actions) != set(durable_actions):
+            raise MissionRecordValidationError(
+                "Immutable action set changed"
+            )
+        for aid, durable_action in durable_actions.items():
+            candidate_action = candidate_actions.get(aid)
+            if not isinstance(candidate_action, dict):
+                raise MissionRecordValidationError(
+                    f"Immutable action missing: {aid}"
+                )
+            for field in (
+                "node_id",
+                "expected_resource_id",
+                "expected_governed_registration_id",
+                "expected_resource_generation",
+                "expected_executor_kind",
+                "expected_executor_logical_id",
+            ):
+                if candidate_action.get(field) != durable_action.get(field):
+                    raise MissionRecordValidationError(
+                        f"Immutable action identity field changed: "
+                        f"{aid}.{field}"
+                    )
+            # Local execution identity bind-once: unbound ("") may bind to
+            # exactly the recomputed value; bound values are immutable.
+            durable_ident = durable_action.get("local_execution_identity", "") or ""
+            candidate_ident = candidate_action.get(
+                "local_execution_identity", "") or ""
+            if durable_ident:
+                if candidate_ident != durable_ident:
+                    raise MissionRecordValidationError(
+                        f"Immutable action identity field changed: "
+                        f"{aid}.local_execution_identity"
+                    )
+            elif candidate_ident:
+                self._require_identity_match(
+                    durable_data, aid, candidate_ident
                 )
 
     def _atomic_write(self, record: MissionRecord) -> DurableCommitResult:
@@ -488,6 +574,11 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                 ActionState(state["state"])
             except (ValueError, KeyError):
                 raise MissionRecordValidationError(f"Invalid action state: {state.get('state')}")
+            # Bound local execution identity must match recomputation from
+            # this same file (MODEL E2). Unbound ("") actions skip.
+            self._require_identity_match(
+                data, action_id, state.get("local_execution_identity", "") or ""
+            )
 
         # Validate completed_nodes / failed_nodes
         for field in ["completed_nodes", "failed_nodes"]:

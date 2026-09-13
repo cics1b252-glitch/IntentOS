@@ -69,6 +69,7 @@ class CapabilityExecutionService:
         event_publisher: EventPublisher,
         idempotency_store: IdempotencyStore,
         resource_authority: CanonicalResourceBindingAuthority,
+        dispatch_guard: Any = None,
     ):
         self.mission_engine = mission_engine
         self.constitution = constitution
@@ -80,6 +81,13 @@ class CapabilityExecutionService:
         self.event_publisher = event_publisher
         self.idempotency_store = idempotency_store
         self.resource_authority = resource_authority
+        # M32B-2 productive convergence: optional durable dispatch guard
+        # (duck-typed ProductiveDispatchGuard; no mission imports here to
+        # avoid cycles). None preserves legacy behavior exactly. When set
+        # AND the call carries a bound durable_action spec, dispatch follows
+        # durable attempt authority: decide -> cache -> Hd freshness ->
+        # durable intent -> handoff -> durable result -> cache publication.
+        self.dispatch_guard = dispatch_guard
 
     async def execute(
         self,
@@ -91,7 +99,14 @@ class CapabilityExecutionService:
         preferred_kind: ExecutorKind | None = None,
         idempotency_key: str = "",
         confirmed: bool = False,
+        durable_action: Any = None,
     ) -> CapabilityExecutionOutcome:
+        """Execute with optional durable attempt binding.
+
+        durable_action is an optional caller-presented attempt spec (see
+        mission.dispatch_guard.DispatchAttemptSpec; duck-typed here).
+        Without both a guard and a spec, behavior is exactly legacy.
+        """
         mission = await self.mission_engine.get(mission_id)
         if mission is None:
             return self._error(capability, ErrorCode.NOT_FOUND)
@@ -222,19 +237,74 @@ class CapabilityExecutionService:
             )
 
         cache_key = (str(mission.id), capability, idempotency_key)
+        # M32B-2 productive convergence: durable attempt authority governs
+        # before any cache/dispatch step (opt-in via guard + bound spec).
+        guard = self.dispatch_guard
+        use_guard = guard is not None and durable_action is not None
+        bound_posture = ""
+        if use_guard:
+            try:
+                bound_decision = guard.decide(
+                    durable_action,
+                    confirmation_required=(
+                        descriptor.requires_confirmation and not confirmed
+                    ),
+                )
+                bound_posture = str(
+                    getattr(bound_decision, "value", bound_decision)
+                )
+            except Exception as exc:
+                return self._error(
+                    capability,
+                    ErrorCode.CONFLICT,
+                    metadata={
+                        "resource_resolution": resource_decision.to_dict(),
+                        "durable_decision_failed": str(exc),
+                    },
+                )
+            if bound_posture != "MAY_DISPATCH":
+                if bound_posture in ("DO_NOT_REDISPATCH", "ALREADY_COMPLETED"):
+                    cached = await self.idempotency_store.get(cache_key)
+                    if cached is not None:
+                        replay = cached
+                        replay.result.metadata["idempotent_replay"] = True
+                        await self._audit(
+                            mission,
+                            registration,
+                            replay.result,
+                            verdict,
+                            0.0,
+                            idempotency_key,
+                        )
+                        return replay
+                return self._error(
+                    capability,
+                    ErrorCode.CONFLICT,
+                    metadata={
+                        "resource_resolution": resource_decision.to_dict(),
+                        "durable_replay_posture": bound_posture,
+                        "duplicate_dispatch_prevented": True,
+                    },
+                )
         cached = await self.idempotency_store.get(cache_key)
         if cached is not None:
-            replay = cached
-            replay.result.metadata["idempotent_replay"] = True
-            await self._audit(
-                mission,
-                registration,
-                replay.result,
-                verdict,
-                0.0,
-                idempotency_key,
-            )
-            return replay
+            if use_guard:
+                # Durable authority wins over a stale/foreign cache entry:
+                # MAY_DISPATCH with a cache hit proceeds to a fresh governed
+                # dispatch and overwrites the cache afterwards.
+                pass
+            else:
+                replay = cached
+                replay.result.metadata["idempotent_replay"] = True
+                await self._audit(
+                    mission,
+                    registration,
+                    replay.result,
+                    verdict,
+                    0.0,
+                    idempotency_key,
+                )
+                return replay
 
         # M31.3B-1A Hd: on cache MISS only, perform a second canonical freshness
         # observation immediately before dispatch. idempotency_store.get is an await
@@ -258,13 +328,49 @@ class CapabilityExecutionService:
             )
 
         started = perf_counter()
-        result = await self._dispatch(
-            mission,
-            registration,
-            payload or {},
-            context or {},
-            execution_preconditions=resource_decision.execution_preconditions,
-        )
+        # Durable intent BEFORE any external handoff (guarded calls only).
+        # Failure here means ZERO DISPATCH.
+        ownership = None
+        if use_guard:
+            try:
+                ownership = guard.acquire(
+                    durable_action,
+                    requested_by="capability-execution-service",
+                    confirmation_required=(
+                        descriptor.requires_confirmation and not confirmed
+                    ),
+                )
+            except Exception as exc:
+                return self._error(
+                    capability,
+                    ErrorCode.CONFLICT,
+                    metadata={
+                        "resource_resolution": resource_decision.to_dict(),
+                        "durable_intent_failed": str(exc),
+                    },
+                )
+        try:
+            result = await self._dispatch(
+                mission,
+                registration,
+                payload or {},
+                context or {},
+                execution_preconditions=resource_decision.execution_preconditions,
+            )
+        except Exception:
+            if use_guard and ownership is not None:
+                # Certainty lost: persist ambiguity. Never returns to
+                # PENDING, never redispatches. Secondary failures are
+                # swallowed: the durable INTENT already forbids redispatch.
+                try:
+                    guard.record_ambiguity(
+                        ownership,
+                        reason="execution-handoff-exception",
+                        requested_by="capability-execution-service",
+                    )
+                except Exception:
+                    pass
+            raise
         duration_ms = (perf_counter() - started) * 1000
         event_ids = await self._propose_agent_knowledge(
             mission,
@@ -303,6 +409,26 @@ class CapabilityExecutionService:
             duration_ms,
             idempotency_key,
         )
+        if use_guard and ownership is not None:
+            # Durable result authority BEFORE cache publication: the cache
+            # must never outrun durable truth. Recording failure fails
+            # closed (the durable INTENT still forbids redispatch).
+            try:
+                guard.record_result(
+                    ownership,
+                    result_summary=_durable_capability_summary(result),
+                    provider_effect_id="",
+                    requested_by="capability-execution-service",
+                )
+            except Exception as exc:
+                return self._error(
+                    capability,
+                    ErrorCode.CONFLICT,
+                    metadata={
+                        "resource_resolution": resource_decision.to_dict(),
+                        "durable_result_failed": str(exc),
+                    },
+                )
         if idempotency_key:
             await self.idempotency_store.save(cache_key, outcome)
         return outcome
@@ -585,3 +711,29 @@ class CapabilityExecutionService:
                 metadata=dict(metadata or {}),
             )
         )
+
+
+def _durable_capability_summary(result: Any) -> dict[str, Any]:
+    """Minimal JSON-safe handoff-result summary for durable recording.
+
+    Duck-typed (never raises). Provider effect tokens are NOT invented
+    here; absence stays absent.
+    """
+    try:
+        success = bool(getattr(result, "success", True))
+    except Exception:
+        success = False
+    try:
+        output = str(getattr(result, "output", result))
+    except Exception:
+        output = "<unrenderable-result>"
+    try:
+        error_code = getattr(result, "error_code", None)
+        error_code = str(error_code) if error_code is not None else ""
+    except Exception:
+        error_code = ""
+    return {
+        "success": success,
+        "output": output[:2000],
+        "error_code": error_code,
+    }

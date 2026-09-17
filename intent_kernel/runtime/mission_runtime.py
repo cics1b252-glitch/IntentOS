@@ -52,6 +52,7 @@ from intent_kernel.runtime.verification import (
     exact_contract_hash,
 )
 from intent_kernel.time_utils import utc_iso
+from intent_kernel.mission.store import MissionRecordValidationError
 
 
 def _durable_result_summary(raw_result: Any) -> Dict[str, Any]:
@@ -84,6 +85,7 @@ class MissionRuntime:
         external_evidence_adapter: Optional[Any] = None,
         dispatch_guard: Optional[Any] = None,
         replay_policy: Optional[Any] = None,
+        mission_record_store: Any = None,
     ) -> None:
         self.executor = executor or InMemoryActionExecutor()
         self.checkpoint_repo = checkpoint_repo or InMemoryCheckpointRepository()
@@ -92,10 +94,8 @@ class MissionRuntime:
             constitution=constitution,
             replay_policy=replay_policy,
         )
-        # M32B-2 productive convergence: optional durable dispatch guard.
-        # None preserves legacy behavior exactly; when present, bound nodes
-        # acquire durable dispatch ownership before any executor handoff.
         self.dispatch_guard = dispatch_guard
+        self._mission_record_store = mission_record_store
         self.verification_gate = VerificationGate(
             external_adapter=external_evidence_adapter
         )
@@ -358,12 +358,46 @@ class MissionRuntime:
 
                 # Check ActionGate
                 conf_req = self._get_pending_confirmation_for_node(instance.mission_id, contract.action_id)
+                # Derive durable confirmation requirement from the durable state.
+                # B3-F01: UNKNOWN AUTHORITY STATE != NO AUTHORITY REQUIREMENT.
+                # Store failures must FAIL CLOSED; absence of a configured
+                # store preserves legacy/B4 boundary behavior.
+                _durable_confirmation_required = False
+                if self._mission_record_store is not None:
+                    _loaded = self._mission_record_store.load(instance.mission_id)
+                    if _loaded is None:
+                        raise MissionRecordValidationError(
+                            f"Durable mission load returned None: "
+                            f"{instance.mission_id}"
+                        )
+                    _action_data = (
+                        _loaded.get("action_states", {}).get(
+                            contract.action_id, {}
+                        )
+                    )
+                    if not _action_data:
+                        raise MissionRecordValidationError(
+                            f"Durable action not found: "
+                            f"{instance.mission_id}/{contract.action_id}"
+                        )
+                    _confirmation_required = _action_data.get(
+                        "confirmation_required", False
+                    )
+                    if type(_confirmation_required) is not bool:
+                        raise MissionRecordValidationError(
+                            f"Action {contract.action_id}: confirmation_required "
+                            f"must be bool, got {type(_confirmation_required).__name__}"
+                        )
+                    _durable_confirmation_required = _confirmation_required
+                if conf_req and conf_req.confirmation_basis_digest:
+                    _durable_confirmation_required = True
                 gate_decision = await self.action_gate.evaluate(
                     node=node,
                     contract=contract,
                     mission_constraints=mission_constraints,
                     execution_policy=instance.execution_policy,
                     confirmation=conf_req,
+                    durable_confirmation_required=_durable_confirmation_required,
                 )
 
                 if gate_decision == ActionGateDecision.DENY:
@@ -392,6 +426,15 @@ class MissionRuntime:
 
                     # Generate confirmation request if not already present
                     if not conf_req:
+                        confirmation_basis_digest = ""
+                        if self._mission_record_store is not None:
+                            try:
+                                loaded = self._mission_record_store.load(instance.mission_id)
+                                if loaded is not None:
+                                    action_data = loaded.get("action_states", {}).get(contract.action_id, {})
+                                    confirmation_basis_digest = action_data.get("confirmation_basis_digest", "")
+                            except Exception:
+                                pass
                         conf_req = ExecutionConfirmationRequest(
                             mission_id=instance.mission_id,
                             action_id=contract.action_id,
@@ -400,6 +443,7 @@ class MissionRuntime:
                             reversibility=contract.reversibility,
                             risk_level=contract.risk_level,
                             runtime_id=instance.runtime_id,
+                            confirmation_basis_digest=confirmation_basis_digest,
                         )
                         self._confirmations[conf_req.confirmation_id] = conf_req
 

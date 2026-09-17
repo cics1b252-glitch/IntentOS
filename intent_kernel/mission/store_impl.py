@@ -16,9 +16,12 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from intent_kernel.mission.mission_record import MissionRecord, detach_json_value
+from intent_kernel.mission.mission_record import MissionRecord, ActionState, detach_json_value
 from intent_kernel.mission.execution_identity import (
     compute_local_execution_identity,
+)
+from intent_kernel.mission.transitions import (
+    is_legal_action_transition,
 )
 from intent_kernel.mission.store import (
     DurableCommitResult,
@@ -282,7 +285,11 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
 
             return self._atomic_write(record)
 
-    def commit(self, expected_revision: int, record: MissionRecord) -> DurableCommitResult:
+    def commit(
+        self,
+        expected_revision: int,
+        record: MissionRecord,
+    ) -> DurableCommitResult:
         """Atomically commit a MissionRecord update with durable anchoring.
 
         Loads the CURRENT durable record immediately before commit and
@@ -291,13 +298,37 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
         identity unchanged (mission/installation/runtime/digest/definition/
         plan/created_at). Detects sequential/restart stale writers. No
         silent retry, no last-writer-wins, no mutation before durability.
+
+        Ordinary commit cannot mutate confirmation fields — use
+        transition_confirmation() for canonical MissionActionAuthority
+        transitions.
         """
+        return self._do_commit(expected_revision, record, False)
+
+    def transition_confirmation(
+        self,
+        expected_revision: int,
+        record: MissionRecord,
+    ) -> DurableCommitResult:
+        """Canonical confirmation-state transition.
+
+        Only MissionActionAuthority may call this. Allows confirmation
+        field changes in the candidate while still enforcing all other
+        immutability and revision guards.
+        """
+        return self._do_commit(expected_revision, record, True)
+
+    def _do_commit(
+        self,
+        expected_revision: int,
+        record: MissionRecord,
+        allow_confirmation: bool,
+    ) -> DurableCommitResult:
         with self._lock:
             self._check_poisoned()
 
             if not isinstance(record, MissionRecord):
                 raise MissionRecordValidationError("Invalid candidate state type")
-            # Validate candidate (structure, enums, digest, installation).
             self._validate_candidate_state(record)
 
             mission_file = self._mission_file(record.mission_id)
@@ -332,7 +363,9 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                     reason=f"Expected candidate revision {expected_revision + 1}, "
                     f"got {record.revision}",
                 )
-            self._require_immutable_identity(record, durable_data)
+            self._require_immutable_identity(record, durable_data, allow_confirmation)
+            if allow_confirmation:
+                self._validate_transition(record, durable_data)
 
             return self._atomic_write(record)
 
@@ -349,7 +382,8 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
     )
 
     def _require_immutable_identity(
-        self, record: MissionRecord, durable_data: Dict[str, Any]
+        self, record: MissionRecord, durable_data: Dict[str, Any],
+        allow_confirmation: bool = False,
     ) -> None:
         """Reject candidates that change mission meaning under the same ID."""
         candidate = record.to_dict()
@@ -358,8 +392,6 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                 raise MissionRecordValidationError(
                     f"Immutable mission identity field changed: {field}"
                 )
-        # mission_definition and plan content are frozen by the contract:
-        # compare canonical forms, not object identity.
         for field in ("mission_definition", "plan"):
             if detach_json_value(candidate.get(field)) != detach_json_value(
                 durable_data.get(field)
@@ -367,11 +399,6 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                 raise MissionRecordValidationError(
                     f"Immutable mission identity field changed: {field}"
                 )
-        # Per-action identity: the action set is frozen by the frozen plan,
-        # and each action's node binding plus expected RRM/executor
-        # preconditions are frozen. Evolving execution facts (state, result,
-        # verification, effect digests once bound, error) are governed by
-        # the M32B-2 transition authority, not here.
         durable_actions = durable_data.get("action_states", {})
         candidate_actions = candidate.get("action_states", {})
         if set(candidate_actions) != set(durable_actions):
@@ -397,8 +424,6 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                         f"Immutable action identity field changed: "
                         f"{aid}.{field}"
                     )
-            # Local execution identity bind-once: unbound ("") may bind to
-            # exactly the recomputed value; bound values are immutable.
             durable_ident = durable_action.get("local_execution_identity", "") or ""
             candidate_ident = candidate_action.get(
                 "local_execution_identity", "") or ""
@@ -412,6 +437,68 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                 self._require_identity_match(
                     durable_data, aid, candidate_ident
                 )
+            # M32B-3: confirmation fields are security-sensitive and
+            # may ONLY be modified through transition_confirmation(),
+            # which is the sole canonical mechanism held by
+            # MissionActionAuthority. Ordinary commit() always
+            # rejects confirmation field changes.
+            if not allow_confirmation:
+                for confirm_field in (
+                    "confirmation_required",
+                    "confirmation_basis_digest",
+                ):
+                    if candidate_action.get(confirm_field) != durable_action.get(confirm_field):
+                        raise MissionRecordValidationError(
+                            f"Confirmation field {aid}.{confirm_field} "
+                            "may only be modified through "
+                            "transition_confirmation()"
+                        )
+
+    def _validate_transition(
+        self, candidate: MissionRecord, durable_data: Dict[str, Any],
+    ) -> None:
+        """Enforce legitimate confirmation transition contract.
+
+        Called only by transition_confirmation(). Validates that:
+        - confirmation_required=True has a non-empty basis digest;
+        - confirmation_required=False has an empty basis digest;
+        - each action's state transition is legal per ACTION_TRANSITIONS.
+        """
+        candidate_actions = candidate.to_dict().get("action_states", {})
+        durable_actions = durable_data.get("action_states", {})
+        for aid, candidate_action in candidate_actions.items():
+            durable_action = durable_actions.get(aid)
+            if durable_action is None:
+                continue
+            # Confirmation field consistency
+            confirm_required = candidate_action.get("confirmation_required")
+            confirm_basis = candidate_action.get("confirmation_basis_digest", "")
+            if confirm_required is True and (not confirm_basis or not isinstance(confirm_basis, str)):
+                raise MissionRecordValidationError(
+                    f"Action {aid}: confirmation_required=True requires "
+                    "a non-empty confirmation_basis_digest"
+                )
+            if confirm_required is False and confirm_basis:
+                raise MissionRecordValidationError(
+                    f"Action {aid}: confirmation_required=False must have "
+                    "an empty confirmation_basis_digest"
+                )
+            # State transition legality
+            candidate_state = candidate_action.get("state")
+            durable_state = durable_action.get("state")
+            if durable_state and candidate_state and durable_state != candidate_state:
+                try:
+                    dur_state_enum = ActionState(durable_state)
+                    cand_state_enum = ActionState(candidate_state)
+                except (ValueError, KeyError):
+                    raise MissionRecordValidationError(
+                        f"Action {aid}: invalid state value"
+                    )
+                if not is_legal_action_transition(dur_state_enum, cand_state_enum):
+                    raise MissionRecordValidationError(
+                        f"Action {aid}: illegal state transition "
+                        f"{durable_state} -> {candidate_state}"
+                    )
 
     def _atomic_write(self, record: MissionRecord) -> DurableCommitResult:
         """Atomic file replacement: temp file → flush → fsync → os.replace.
@@ -579,6 +666,25 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
             self._require_identity_match(
                 data, action_id, state.get("local_execution_identity", "") or ""
             )
+            # M32B-3 hardening: validate security-significant
+            # confirmation fields in candidate state.
+            if "confirmation_required" in state:
+                if not isinstance(state["confirmation_required"], bool):
+                    raise MissionRecordValidationError(
+                        f"Action state {action_id}: confirmation_required must be bool"
+                    )
+            if "confirmation_basis_digest" in state:
+                if not isinstance(state["confirmation_basis_digest"], str):
+                    raise MissionRecordValidationError(
+                        f"Action state {action_id}: confirmation_basis_digest must be str"
+                    )
+            if state.get("confirmation_required") is True:
+                basis = state.get("confirmation_basis_digest", "")
+                if not basis or not isinstance(basis, str):
+                    raise MissionRecordValidationError(
+                        f"Action state {action_id}: confirmation_required=True "
+                        "requires non-empty confirmation_basis_digest"
+                    )
 
         # Validate completed_nodes / failed_nodes
         for field in ["completed_nodes", "failed_nodes"]:

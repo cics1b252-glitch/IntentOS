@@ -1,4 +1,4 @@
-"""Action Gate — RFC-0015 (STUDIO 10.2).
+"""Action Gate - RFC-0015 (STUDIO 10.2).
 
 Evaluates action contracts prior to execution against Constitution, ExecutionPolicy,
 MissionConstraints, resource eligibility, required permissions, user confirmation, and idempotency.
@@ -29,12 +29,6 @@ class ActionGate:
     ) -> None:
         self._rrm = rrm_service
         self._constitution = constitution
-        # PB1 (M32B-2 productive convergence): the executed-keys set below
-        # is a NON-AUTHORITATIVE tripwire only. It may trigger replay
-        # handling but can never authorize dispatch by itself. Canonical
-        # replay posture comes from the optional replay_policy
-        # ((node_id, idempotency_key) -> ReplayDecision value string);
-        # without one, a known-executed key fails closed as DENY.
         self._replay_policy = replay_policy
         self._executed_idempotency_keys: set = set()
 
@@ -54,11 +48,12 @@ class ActionGate:
         mission_constraints: Optional[List[MissionConstraint]] = None,
         execution_policy: Optional[Dict[str, Any]] = None,
         confirmation: Optional[ExecutionConfirmationRequest] = None,
+        *,
+        durable_confirmation_required: bool = False,
     ) -> ActionGateDecision:
         """Evaluate an action against the strict precedence hierarchy."""
 
-        # 1. Constitution / Safety Check — fail-closed: missing/malformed/unexpected = DENY
-        # H1.1-closure: no constitution → DENY (never skip constitutional enforcement)
+        # 1. Constitution / Safety Check - fail-closed
         if self._constitution is None:
             return ActionGateDecision.DENY
         if hasattr(self._constitution, "evaluate_action"):
@@ -87,11 +82,14 @@ class ActionGate:
                     return ActionGateDecision.DENY
 
         # 4. User Confirmation Requirement
-        # Actions requiring confirmation: explicit flag, or EXTERNAL_IRREVERSIBLE / EXTERNAL_REVERSIBLE side effects
         requires_user_approval = (
             contract.confirmation_required
             or contract.side_effect_level in (SideEffectLevel.EXTERNAL_IRREVERSIBLE, SideEffectLevel.EXTERNAL_REVERSIBLE)
         )
+
+        # M32B-3 durable confirmation requirement
+        if durable_confirmation_required:
+            requires_user_approval = True
 
         if requires_user_approval:
             if confirmation is None or confirmation.approved is None:
@@ -101,22 +99,16 @@ class ActionGate:
 
         # 5. Resource Eligibility Revalidation (via RRM)
         if self._rrm:
-            # Check agent eligibility — fail-closed: missing eligibility = not eligible
             if hasattr(self._rrm, "get_agent"):
                 agent_res = self._rrm.get_agent(node.agent_id)
                 if agent_res and not getattr(agent_res, "is_eligible", False):
                     return ActionGateDecision.WAIT_RESOURCE
-
-            # Check environment eligibility — fail-closed: missing status = not active
             if hasattr(self._rrm, "get_environment"):
                 env_res = self._rrm.get_environment(node.environment_id)
                 if env_res and getattr(env_res, "status", "INACTIVE") != "ACTIVE":
                     return ActionGateDecision.WAIT_RESOURCE
 
         # 6. Idempotency / Replay Check
-        # PB1: a previously-executed idempotency key NEVER falls through to
-        # ALLOW. With a replay policy, its durable posture decides; without
-        # one, the known-executed key fails closed as DENY.
         if contract.idempotency_key and self.is_idempotency_key_executed(contract.idempotency_key):
             return self._resolve_replay(node, contract)
 
@@ -142,6 +134,4 @@ class ActionGate:
             return ActionGateDecision.ALLOW
         if posture == "RECONFIRMATION_REQUIRED":
             return ActionGateDecision.REQUIRE_CONFIRMATION
-        # DO_NOT_REDISPATCH, AMBIGUOUS_RECONCILIATION_REQUIRED,
-        # ALREADY_COMPLETED, unknown, or None: fail closed, never ALLOW.
         return ActionGateDecision.DENY

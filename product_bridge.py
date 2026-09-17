@@ -1264,6 +1264,7 @@ Estratégia completa registrada no histórico para execução."""
                 "required_permissions": list(permission),
             },
             ttl_seconds=300,
+            confirmation_basis_digest=pending.confirmation_basis_digest,
         )
         return {
             "confirmation_id": bound.confirmation_id,

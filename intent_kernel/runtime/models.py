@@ -154,6 +154,7 @@ class ExecutionConfirmationRequest:
     confirmation_token: str = ""
     session_id: str = ""
     project_id: str = "GLOBAL"
+    confirmation_basis_digest: str = ""
     provenance: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

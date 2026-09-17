@@ -401,6 +401,7 @@ class KernelBuilder:
             # M32B-2 seams: None preserves legacy behavior (see above).
             dispatch_guard=None,
             replay_policy=None,
+            mission_record_store=mission_record_store,
         )
         confirmation_service = CanonicalConfirmationService(
             mission_engine,

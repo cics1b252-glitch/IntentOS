@@ -118,6 +118,13 @@ class DurableActionState:
     immutable and recomputation-checked afterwards). verification_proof_digest
     pins the canonical gate proof that authorized VERIFIED, so only that
     proof's basis can later authorize action COMPLETED.
+
+    confirmation_required identifies that a durable confirmation
+    *requirement* exists for this action. confirmation_basis_digest
+    identifies the requirement (not an approval token): it binds the
+    requirement to the request semantics and must be re-validated after
+    restart. Raw confirmation tokens, session IDs, or approval
+    capability are never persisted here — they remain in-memory only.
     """
     action_id: str
     node_id: str
@@ -136,6 +143,8 @@ class DurableActionState:
     effect_identity_digest: str = ""
     local_execution_identity: str = ""
     verification_proof_digest: str = ""
+    confirmation_required: bool = False
+    confirmation_basis_digest: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.action_id, str) or not self.action_id.strip():
@@ -152,6 +161,19 @@ class DurableActionState:
                       "verification_proof_digest"):
             if not isinstance(getattr(self, label), str):
                 raise ValueError(f"{label} must be a string")
+        if not isinstance(self.confirmation_basis_digest, str):
+            raise ValueError("confirmation_basis_digest must be a string")
+        if not isinstance(self.confirmation_required, bool):
+            raise ValueError("confirmation_required must be a bool")
+        # M32B-3 hardening: fail-closed when confirmation is
+        # required but basis digest is empty or missing.
+        if self.confirmation_required and (
+            not self.confirmation_basis_digest
+        ):
+            raise ValueError(
+                "confirmation_required=True requires a non-empty "
+                "confirmation_basis_digest"
+            )
         if not isinstance(self.expected_resource_generation, int) or isinstance(
             self.expected_resource_generation, bool
         ):

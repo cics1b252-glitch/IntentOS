@@ -51,6 +51,18 @@ class MissionRecordStorePort(ABC):
 
         Requires the durable record to exist at expected_revision and the
         candidate at expected_revision + 1 with immutable identity intact.
+        Ordinary commit cannot mutate confirmation fields.
+        """
+        ...
+
+    @abstractmethod
+    def transition_confirmation(
+        self, expected_revision: int, record: MissionRecord
+    ) -> "DurableCommitResult":
+        """Canonical confirmation-state transition.
+
+        Only callable by MissionActionAuthority. Allows confirmation
+        field changes while enforcing all other immutability guards.
         """
         ...
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
 from intent_kernel.mission.execution_identity import (
     compute_local_execution_identity,
@@ -81,6 +81,7 @@ class ActionTransitionEvidence:
     verification_evidence: Optional[Dict[str, Any]] = None
     verification_proof: Optional[ActionVerificationProof] = None
     completion_basis: Optional[ActionVerificationProof] = None
+    confirmation_basis_digest: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.requested_by, str) or not self.requested_by.strip():
@@ -140,11 +141,46 @@ class RestartPostureView:
     fresh_verification_required: bool
 
 
-class MissionActionAuthority:
-    """Narrow durable action-state authority over a MissionRecord store."""
+@runtime_checkable
+class ConfirmationAuthority(Protocol):
+    """Canonical confirmation authority for M32B-3.
 
-    def __init__(self, store: MissionRecordStorePort) -> None:
+    Validates that a fresh canonical confirmation exists for the
+    exact expected mission, action, and confirmation basis digest.
+    Returns True only when the confirmation is CONFIRMED, not
+    consumed/invalidated/expired/rejected, and its bound basis
+    matches the expected digest.
+    """
+
+    def validate_confirmation(
+        self,
+        *,
+        mission_id: str,
+        action_id: str,
+        confirmation_basis_digest: str,
+    ) -> bool: ...
+
+
+class MissionActionAuthority:
+    """Narrow durable action-state authority over a MissionRecord store.
+
+    M32B-3: confirmation_service is an optional canonical confirmation
+    authority that produces fresh transient confirmation authority.
+    It is NOT a durable storage of approval; it validates fresh
+    confirmation requests through the canonical path. When set, the
+    RECONFIRMATION_REQUIRED -> AUTHORIZED transition requires fresh
+    confirmation validated by this service. Without it, the
+    transition is rejected: a matching deterministic digest alone
+    MUST NOT authorize an action.
+    """
+
+    def __init__(
+        self,
+        store: MissionRecordStorePort,
+        confirmation_service: ConfirmationAuthority | None = None,
+    ) -> None:
         self._store = store
+        self._confirmation_service = confirmation_service
 
     # -- internal load helpers (no mutation) -------------------------------
 
@@ -322,9 +358,93 @@ class MissionActionAuthority:
             )
         require_legal_action_transition(current, target_action_state)
 
+        # M32B-3: durable confirmation state validation
+        # (fail-closed for security-significant fields).
+        durable_confirmation_required = bool(
+            action.get("confirmation_required", False)
+        )
+        durable_confirmation_basis = action.get(
+            "confirmation_basis_digest", ""
+        )
+        # Fail-closed: confirmation_required=True with empty or
+        # missing confirmation_basis_digest is malformed current-
+        # schema state and must not be interpreted as confirmation-
+        # required=False merely because the field is empty.
+        if durable_confirmation_required and (
+            not durable_confirmation_basis
+            or not isinstance(durable_confirmation_basis, str)
+        ):
+            raise ActionTransitionError(
+                "Malformed durable confirmation state: "
+                "confirmation_required=True requires a non-empty "
+                "confirmation_basis_digest"
+            )
+
         candidate = detach_json_value(data)
         updated = dict(action)
         updated["state"] = target_action_state.value
+
+        # M32B-3: RECONFIRMATION_REQUIRED -> AUTHORIZED requires
+        # fresh canonical confirmation produced through the
+        # canonical confirmation service. A matching deterministic
+        # digest alone MUST NOT authorize. The canonical
+        # confirmation service must validate the fresh confirmation
+        # request and produce transient authority.
+        if current is ActionState.RECONFIRMATION_REQUIRED and target_action_state is ActionState.AUTHORIZED:
+            if not durable_confirmation_required:
+                raise ActionTransitionError(
+                    "RECONFIRMATION_REQUIRED -> AUTHORIZED requires a "
+                    "durable confirmation requirement"
+                )
+            # Fail-closed: empty confirmation basis is rejected.
+            if not evidence.confirmation_basis_digest:
+                raise ActionTransitionError(
+                    "RECONFIRMATION_REQUIRED -> AUTHORIZED requires "
+                    "fresh confirmation basis digest in evidence"
+                )
+            # Verify digest matches the durable confirmation basis.
+            if durable_confirmation_basis != evidence.confirmation_basis_digest:
+                raise ActionTransitionError(
+                    "Confirmation basis digest mismatch: request "
+                    "semantics changed, fresh confirmation required"
+                )
+            # Require fresh canonical confirmation from the
+            # confirmation service. The digest alone is insufficient.
+            if self._confirmation_service is not None:
+                fresh_confirmed = self._confirmation_service.validate_confirmation(
+                    mission_id=mission_id,
+                    action_id=action_id,
+                    confirmation_basis_digest=evidence.confirmation_basis_digest,
+                )
+                if not fresh_confirmed:
+                    raise ActionTransitionError(
+                        "RECONFIRMATION_REQUIRED -> AUTHORIZED requires "
+                        "fresh canonical confirmation from the "
+                        "confirmation service"
+                    )
+            else:
+                # Without a confirmation service, reject the
+                # transition: digest alone cannot authorize.
+                raise ActionTransitionError(
+                    "RECONFIRMATION_REQUIRED -> AUTHORIZED requires "
+                    "a canonical confirmation service to validate "
+                    "fresh confirmation"
+                )
+            # Authorization granted only after fresh canonical
+            # confirmation. Clear confirmation requirement fields.
+            updated["confirmation_required"] = False
+            updated["confirmation_basis_digest"] = ""
+
+        # M32B-3: PENDING -> AUTHORIZED is blocked when
+        # durable confirmation_required=True (restart invalidation).
+        # Only RECONFIRMATION_REQUIRED -> AUTHORIZED with fresh
+        # confirmation is allowed.
+        if current is ActionState.PENDING and target_action_state is ActionState.AUTHORIZED:
+            if durable_confirmation_required:
+                raise ActionTransitionError(
+                    "PENDING -> AUTHORIZED blocked: durable confirmation "
+                    "required; fresh confirmation needed"
+                )
 
         # MODEL E2 identity stamp/verify: bind once from durable content,
         # then immutable. Post-dispatch effect binding never redefines it.
@@ -430,7 +550,9 @@ class MissionActionAuthority:
                 f"Invalid transition candidate: {exc}"
             ) from exc
 
-        outcome = self._store.commit(expected_mission_revision, candidate_record)
+        outcome = self._store.transition_confirmation(
+            expected_mission_revision, candidate_record,
+        )
         if outcome.outcome != "committed":
             raise ActionTransitionError(
                 f"Durable action commit failed: {outcome.outcome} "
@@ -464,10 +586,25 @@ class MissionActionAuthority:
         caller-presented execution identity, which must match the
         durable-derived identity or the call fails closed). Performs no
         dispatch, mutates nothing, consults no RRM, gate, or registry.
+
+        M32B-3 restart invalidation: the durable confirmation_required
+        field on the action takes precedence over caller-presented state.
+        After restart, old in-memory confirmation approval is never
+        reused; a durable confirmation requirement forces
+        RECONFIRMATION_REQUIRED for pre-dispatch states.
         """
         data = self._load_data(mission_id)
         action = self._action(data, action_id)
         state = self._parse_state(action.get("state"), action_id)
+        # Durable confirmation requirement: the action itself records
+        # that confirmation is needed. After restart, this persists and
+        # invalidates any stale in-memory approval.
+        durable_confirmation_required = bool(
+            action.get("confirmation_required", False)
+        )
+        effective_confirmation_required = (
+            durable_confirmation_required or confirmation_required
+        )
 
         if expected_execution_identity is not None:
             current_identity = self.execution_identity_for(mission_id, action_id)
@@ -478,9 +615,11 @@ class MissionActionAuthority:
                 )
 
         if state is ActionState.PENDING:
+            if effective_confirmation_required:
+                return ReplayDecision.RECONFIRMATION_REQUIRED
             return ReplayDecision.MAY_DISPATCH
         if state is ActionState.AUTHORIZED:
-            if confirmation_required:
+            if effective_confirmation_required:
                 return ReplayDecision.RECONFIRMATION_REQUIRED
             return ReplayDecision.MAY_DISPATCH
         if state is ActionState.RECONFIRMATION_REQUIRED:

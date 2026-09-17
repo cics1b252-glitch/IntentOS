@@ -107,12 +107,17 @@ class CanonicalConfirmationService:
         confirmation_token: str = "",
         authorization: dict[str, Any] | None = None,
         ttl_seconds: float | None = None,
+        confirmation_basis_digest: str = "",
     ) -> ExecutionConfirmationRequest:
         """Bind scope, token, expiry and the exact authorization snapshot to a requirement.
 
         ``authorization`` must be the serialized ``ToolCandidate``/``ToolResource``
         used at planning time so the resumed Mission revalidates the *same*
         binding identity (Movement 13 guarantee) instead of inheriting a replacement.
+
+        ``confirmation_basis_digest`` identifies the durable confirmation
+        requirement identity. It is stored in provenance for later
+        validation and must match the durable state when consumed.
         """
         conf = self._runtime.get_confirmation(confirmation_id)
         if conf is None or conf.mission_id != mission_id or conf.action_id != action_id:
@@ -130,6 +135,8 @@ class CanonicalConfirmationService:
         provenance = dict(conf.provenance)
         provenance["authorization"] = dict(authorization or {})
         provenance["bound_at"] = utc_iso()
+        if confirmation_basis_digest:
+            provenance["confirmation_basis_digest"] = confirmation_basis_digest
         conf.provenance = provenance
         ttl = ttl_seconds if ttl_seconds is not None else self._confirmation_ttl_seconds
         if ttl is not None:
@@ -145,6 +152,37 @@ class CanonicalConfirmationService:
     def pending_for_mission(self, mission_id: str) -> ExecutionConfirmationRequest | None:
         """Resolve the active WAITING_CONFIRMATION requirement for a Mission."""
         return self._runtime.get_pending_confirmation(mission_id)
+
+    def validate_confirmation(
+        self,
+        *,
+        mission_id: str,
+        action_id: str,
+        confirmation_basis_digest: str,
+    ) -> bool:
+        """Validate that a fresh canonical confirmation exists for the
+        exact expected mission, action, and confirmation basis.
+
+        Returns True only when:
+        - a CONFIRMED requirement exists for the mission/action;
+        - it has not been consumed, invalidated, expired, or rejected;
+        - its bound confirmation basis matches the expected digest.
+
+        This method never mutates confirmation state. It is a read-only
+        validation gate for durable action authorization.
+        """
+        conf = self._runtime.get_pending_confirmation(mission_id)
+        if conf is None:
+            return False
+        if conf.action_id != action_id:
+            return False
+        if conf.state is not ConfirmationState.CONFIRMED:
+            return False
+        provenance = conf.provenance or {}
+        basis = provenance.get("confirmation_basis_digest", "")
+        if basis != confirmation_basis_digest:
+            return False
+        return True
 
     # -------------------------------------------------------------- submission
 

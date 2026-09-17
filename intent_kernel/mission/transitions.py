@@ -8,8 +8,11 @@ Deliberate M32B-2 boundaries (documented, not accidental):
 - VERIFIED -> FAILED has NO edge. No explicit canonical semantics were
   found permitting a verified action to fail afterwards; rejected fail
   closed. A future movement may add it only with an explicit contract.
-- RECONFIRMATION_REQUIRED has NO exits in M32B-2. Re-authorization after
-  fresh confirmation is owned by M32B-3.
+- RECONFIRMATION_REQUIRED has exits owned by M32B-3:
+  RECONFIRMATION_REQUIRED -> AUTHORIZED via fresh confirmation;
+  RECONFIRMATION_REQUIRED -> FAILED.
+  Old approval never survives restart; fresh confirmation must
+  pass through the canonical confirmation authority path.
 - AMBIGUOUS_EFFECT has NO exits in M32B-2. No automatic (and no manual)
   dispatch/completion transition exists yet; reconciliation flows belong to
   future movements. Ambiguity is preserved, never guessed away.
@@ -69,7 +72,10 @@ ACTION_TRANSITIONS: Dict[ActionState, FrozenSet[ActionState]] = {
     ActionState.VERIFIED: frozenset({
         ActionState.COMPLETED,
     }),
-    ActionState.RECONFIRMATION_REQUIRED: frozenset(),
+    ActionState.RECONFIRMATION_REQUIRED: frozenset({
+        ActionState.AUTHORIZED,
+        ActionState.FAILED,
+    }),
     ActionState.AMBIGUOUS_EFFECT: frozenset(),
     ActionState.COMPLETED: frozenset(),
     ActionState.FAILED: frozenset(),
@@ -137,7 +143,10 @@ RESTART_POSTURES: Dict[ActionState, RestartPosture] = {
         fresh_verification_required=False,
     ),
     ActionState.RECONFIRMATION_REQUIRED: RestartPosture(
-        safe_automatic_next_step="fresh confirmation flow (M32B-3 contract)",
+        safe_automatic_next_step=(
+            "fresh confirmation required before re-authorization; "
+            "old approval never survives restart"
+        ),
         auto_redispatch_allowed=False,
         reconciliation_required=False,
         fresh_verification_required=False,

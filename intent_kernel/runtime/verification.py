@@ -87,6 +87,8 @@ class MissionCompletionDecision:
         )
 
 
+_INERT_AUTHORITY_TOKEN = object()
+
 _ACTION_VERIFICATION_AUTHORITY_TOKEN = object()
 
 
@@ -96,10 +98,12 @@ class ActionVerificationProof:
 
     Produced ONLY by :func:`issue_action_verification_proof` after the
     VerificationGate itself evaluated the exact action contract and
-    returned VERIFIED_SUCCESS with gate-sourced evidence. An arbitrary
-    caller can construct this dataclass but can never forge
-    ``authority_complete``: that property additionally requires the
-    module-private authority token, exactly like MissionCompletionDecision.
+    returned VERIFIED_SUCCESS with gate-sourced evidence. Direct
+    construction is inert: authority_complete is False because the
+    default _authority_token is _INERT_AUTHORITY_TOKEN, not the
+    module-private issuance token. Only the canonical issuance path
+    after genuine VerificationGate success may produce
+    authority_complete=True.
 
     Durable consumers (M32B action authority) must still validate binding
     (mission/action/request digest) and freshness against their own
@@ -120,7 +124,7 @@ class ActionVerificationProof:
     external_observations: tuple = ()
     verified_at: str = ""
     _authority_token: object | None = field(
-        default=None,
+        default=_INERT_AUTHORITY_TOKEN,
         repr=False,
         compare=False,
     )
@@ -164,6 +168,9 @@ class ActionVerificationProof:
                 for obs in self.external_observations
             ),
         )
+        # Always reset to inert: issue_action_verification_proof uses
+        # object.__setattr__ after construction to set the issuance token.
+        object.__setattr__(self, "_authority_token", _INERT_AUTHORITY_TOKEN)
 
     @property
     def authority_complete(self) -> bool:
@@ -259,7 +266,7 @@ def issue_action_verification_proof(
     observations = details.get("external_observations", []) or []
     if not isinstance(observations, list):
         raise ValueError("external_observations must be a list")
-    return ActionVerificationProof(
+    result = ActionVerificationProof(
         mission_id=mission_id,
         action_id=action_id,
         request_semantics_digest=request_semantics_digest,
@@ -277,8 +284,9 @@ def issue_action_verification_proof(
             dict(obs) for obs in observations if isinstance(obs, dict)
         ),
         verified_at=verified_at,
-        _authority_token=_ACTION_VERIFICATION_AUTHORITY_TOKEN,
     )
+    object.__setattr__(result, "_authority_token", _ACTION_VERIFICATION_AUTHORITY_TOKEN)
+    return result
 
 
 class ActionVerificationPort(ABC):

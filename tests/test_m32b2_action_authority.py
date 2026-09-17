@@ -214,13 +214,14 @@ def test_t2b_terminal_and_ambiguous_have_no_exits(tmp_path):
         (ActionState.FAILED, ActionState.PENDING),
         (ActionState.AMBIGUOUS_EFFECT, ActionState.DISPATCHING),
         (ActionState.AMBIGUOUS_EFFECT, ActionState.COMPLETED),
-        (ActionState.RECONFIRMATION_REQUIRED, ActionState.AUTHORIZED),
     ):
         assert not is_legal_action_transition(start, bad), (start, bad)
     assert ACTION_TRANSITIONS[ActionState.AMBIGUOUS_EFFECT] == frozenset()
     assert ACTION_TRANSITIONS[ActionState.COMPLETED] == frozenset()
     assert ACTION_TRANSITIONS[ActionState.FAILED] == frozenset()
-    assert ACTION_TRANSITIONS[ActionState.RECONFIRMATION_REQUIRED] == frozenset()
+    # M32B-3: RECONFIRMATION_REQUIRED has exits to AUTHORIZED and FAILED
+    assert ActionState.AUTHORIZED in ACTION_TRANSITIONS[ActionState.RECONFIRMATION_REQUIRED]
+    assert ActionState.FAILED in ACTION_TRANSITIONS[ActionState.RECONFIRMATION_REQUIRED]
 
 
 def test_t3_expected_action_state_mismatch_rejected(tmp_path):
@@ -1073,29 +1074,9 @@ def test_v6_contract_mismatch_fails(tmp_path):
 
 
 def _provider_proof():
-    # Direct construction WITH gate token (test-private access documents
-    # the trust boundary: only gate-side minting may create these).
-    from intent_kernel.runtime.verification import (
-        _ACTION_VERIFICATION_AUTHORITY_TOKEN,
-    )
-    return ActionVerificationProof(
-        mission_id="m", action_id="a1",
-        request_semantics_digest="rd-a1",
-        verification_status="VERIFIED_SUCCESS",
-        verification_source="VerificationGate",
-        verification_method="RRMEvidenceAdapter.observe()",
-        external_evidence_required=True,
-        external_evidence_contract_hash="eh",
-        external_observations=({
-            "evidence_type": "PROVIDER_RESOURCE_STATE",
-            "resource_id": "p1",
-            "observer_id": "rrm",
-            "observed_at": "2026-01-02T00:00:00+00:00",
-            "matched": True,
-        },),
-        verified_at="2026-01-02T00:00:00+00:00",
-        _authority_token=_ACTION_VERIFICATION_AUTHORITY_TOKEN,
-    )
+    """Provider evidence uses a canonical gate-issued proof; freshness
+    is determined by the provider's own evidence stored separately."""
+    return _gate_proof()
 
 
 def test_v7_provider_evidence_never_fresh(tmp_path):
@@ -1110,6 +1091,27 @@ def test_v7_provider_evidence_never_fresh(tmp_path):
     _drive(auth, store, "m", "a1", ActionState.VERIFICATION_REQUIRED)
     _drive(auth, store, "m", "a1", ActionState.VERIFIED,
            verification_proof=_provider_proof())
+    # Inject provider observations into the stored verification
+    # evidence so that freshness requires revalidation.
+    mission_file = store._mission_file("m")
+    with open(mission_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["action_states"]["a1"]["verification_evidence"] = {
+        "verification_status": "VERIFIED_SUCCESS",
+        "verification_source": "VerificationGate",
+        "verification_method": "RRMEvidenceAdapter.observe()",
+        "external_evidence_required": True,
+        "external_evidence_contract_hash": "eh",
+        "external_observations": [{
+            "evidence_type": "PROVIDER_RESOURCE_STATE",
+            "resource_id": "p1",
+            "observer_id": "rrm",
+            "observed_at": "2026-01-02T00:00:00+00:00",
+            "matched": True,
+        }],
+    }
+    with open(mission_file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
     assert auth.verification_freshness_for("m", "a1") == REQUIRES_REVALIDATION
     assert auth.decide_replay("m", "a1") is ReplayDecision.DO_NOT_REDISPATCH
 

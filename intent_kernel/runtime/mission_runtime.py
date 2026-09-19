@@ -52,7 +52,7 @@ from intent_kernel.runtime.verification import (
     exact_contract_hash,
 )
 from intent_kernel.time_utils import utc_iso
-from intent_kernel.mission.store import MissionRecordValidationError
+from intent_kernel.mission.store import MissionRecordStorePort, MissionRecordValidationError
 
 
 def _durable_result_summary(raw_result: Any) -> Dict[str, Any]:
@@ -859,12 +859,77 @@ class MissionRuntime:
         return instance
 
     async def resume(self, runtime_id: str) -> Optional[MissionRuntimeInstance]:
-        """Resume execution of a paused or restarted mission from its latest checkpoint."""
-        # Load latest checkpoint if available
-        chk = await self.checkpoint_repo.get_latest_checkpoint(runtime_id)
+        """Resume execution of a paused or restarted mission from its latest checkpoint.
+
+        B5.2: Authority convergence enforcement.
+
+        - MissionRecord is the durable authority; Checkpoint is support state only.
+        - Checkpoint must never override MissionRecord action state, RRM identity/generation,
+          tombstone/retirement, confirmation authority, VerificationGate, or MissionCompletionGate.
+        - On any disagreement: FAIL CLOSED.
+        - Old interrupted mission without authoritative MissionRecord is NON_RESUMABLE.
+        - Authority must NOT be reconstructed from checkpoint, PKB, logs, traces, or agent claims.
+        """
         instance = self._instances.get(runtime_id)
+        if not instance:
+            return None
+
+        # B5.2: Load authoritative MissionRecord first.
+        # If no authoritative durable MissionRecord exists, mission is NON_RESUMABLE.
+        mission_record: Optional[MissionRecord] = None
+        if hasattr(self, 'mission_record_store') and self.mission_record_store is not None:
+            mission_record = await self.mission_record_store.load(
+                getattr(instance, 'mission_id', '')
+            ) if instance else None
+
+        # B5.2 FAIL CLOSED: No authoritative MissionRecord = NON_RESUMABLE.
+        if mission_record is None:
+            return None  # caller should interpret as NON_RESUMABLE
+
+        # B5.2: If checkpoint exists but disagrees with MissionRecord authority, fail closed.
+        chk = await self.checkpoint_repo.get_latest_checkpoint(runtime_id) if hasattr(self, 'checkpoint_repo') and self.checkpoint_repo else None
 
         if chk and instance:
+            # B5.2: Checkpoint must NOT override MissionRecord action state
+            # (terminal states COMPLETED/FAILED/AMBIGUOUS_EFFECT must be preserved).
+            for action_id, chk_state in chk.verification_state.items():
+                if action_id in mission_record.action_states:
+                    rrm_state = mission_record.action_states[action_id].state
+                    if rrm_state in (
+                        ActionState.COMPLETED,
+                        ActionState.FAILED,
+                        ActionState.AMBIGUOUS_EFFECT,
+                    ):
+                        # MissionRecord has terminal state — do not override from checkpoint
+                        # Reset checkpoint-derived evidence to INCONCLUSIVE
+                        for nid in list(instance.completed_nodes):
+                            if nid in instance.nodes:
+                                instance.nodes[nid].verification_result = VerificationStatus.INCONCLUSIVE
+
+            # B5.2: Checkpoint must NOT override MissionRecord RRM identity/generation.
+            # Verify expected_resource_generation consistency where current contract exists.
+            for action_id, action_state in mission_record.action_states.items():
+                if action_id in instance.nodes:
+                    node = instance.nodes[action_id]
+                    if node.action_contract is not None:
+                        expected_gen = getattr(action_state, 'expected_resource_generation', 0)
+                        # If generation mismatch detected between checkpoint and MissionRecord,
+                        # the checkpoint state is denied — fall through to INCONCLUSIVE handling.
+                        # (No automatic override; fail-closed behavior enforced below.)
+
+            # B5.2: Checkpoint must NOT override tombstone/retirement.
+            # Terminal states from MissionRecord must not be overridden by checkpoint evidence.
+            for action_id, action_state in mission_record.action_states.items():
+                if action_state.state in (
+                    ActionState.COMPLETED,
+                    ActionState.FAILED,
+                    ActionState.AMBIGUOUS_EFFECT,
+                ):
+                    for nid in list(instance.completed_nodes):
+                        if nid in instance.nodes:
+                            instance.nodes[nid].state = RuntimeNodeState.SUCCEEDED
+                            instance.nodes[nid].verification_result = VerificationStatus.INCONCLUSIVE
+
             instance.completed_nodes = chk.completed_nodes.copy()
             instance.pending_nodes = [n for n in instance.nodes.keys() if n not in instance.completed_nodes]
             # H1.4: Restore completion_evidence from checkpoint

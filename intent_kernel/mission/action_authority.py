@@ -539,36 +539,81 @@ class MissionActionAuthority:
                     "the proof that authorized current VERIFIED state"
                 )
 
-        candidate["action_states"] = dict(candidate.get("action_states", {}))
-        candidate["action_states"][action_id] = updated
-        candidate["revision"] = durable_revision + 1
-        candidate["updated_at"] = utc_iso()
-        try:
-            candidate_record = MissionRecord.from_dict(candidate)
-        except (ValueError, KeyError, TypeError) as exc:
-            raise ActionTransitionError(
-                f"Invalid transition candidate: {exc}"
-            ) from exc
-
-        outcome = self._store.transition_confirmation(
-            expected_mission_revision, candidate_record,
+        # Determine if this transition involves confirmation field changes.
+        # Only these three transitions modify confirmation fields:
+        # - PENDING -> RECONFIRMATION_REQUIRED (sets confirmation_required=True + basis)
+        # - RECONFIRMATION_REQUIRED -> AUTHORIZED (clears both)
+        # - RECONFIRMATION_REQUIRED -> FAILED (clears both)
+        is_confirmation_transition = (
+            (current is ActionState.PENDING and target_action_state is ActionState.RECONFIRMATION_REQUIRED)
+            or (current is ActionState.RECONFIRMATION_REQUIRED and target_action_state is ActionState.AUTHORIZED)
+            or (current is ActionState.RECONFIRMATION_REQUIRED and target_action_state is ActionState.FAILED)
         )
-        if outcome.outcome != "committed":
-            raise ActionTransitionError(
-                f"Durable action commit failed: {outcome.outcome} "
-                f"(rev={outcome.revision}): {outcome.reason}"
+
+        if is_confirmation_transition:
+            # Confirmation transition: use transition_confirmation for confirmation fields.
+            new_confirmation_required = updated.get("confirmation_required", False)
+            new_confirmation_basis_digest = updated.get("confirmation_basis_digest", "")
+
+            outcome = self._store.transition_confirmation(
+                mission_id,
+                action_id,
+                expected_mission_revision,
+                expected_action_state,
+                target_action_state,
+                new_confirmation_required,
+                new_confirmation_basis_digest,
             )
+            if outcome.outcome != "committed":
+                raise ActionTransitionError(
+                    f"Durable action commit failed: {outcome.outcome} "
+                    f"(rev={outcome.revision}): {outcome.reason}"
+                )
 
-        # Return the reloaded committed record: proof of durability, detached.
-        reloaded = self._load_data(mission_id)
-        return TransitionResult(
-            mission_id=mission_id,
-            action_id=action_id,
-            previous_state=current,
-            new_state=target_action_state,
-            mission_revision=durable_revision + 1,
-            record=MissionRecord.from_dict(reloaded),
-        )
+            # Return the reloaded committed record: proof of durability, detached.
+            reloaded = self._load_data(mission_id)
+            return TransitionResult(
+                mission_id=mission_id,
+                action_id=action_id,
+                previous_state=current,
+                new_state=target_action_state,
+                mission_revision=durable_revision + 1,
+                record=MissionRecord.from_dict(reloaded),
+            )
+        else:
+            # Non-confirmation transition: use ordinary commit.
+            # The updated dict already contains all field changes (including
+            # local_execution_identity, provider_effect_id, result, etc.).
+            # Confirmation fields are unchanged, so ordinary commit accepts it.
+            candidate = detach_json_value(data)
+            candidate["action_states"] = dict(candidate.get("action_states", {}))
+            candidate["action_states"][action_id] = updated
+            candidate["revision"] = durable_revision + 1
+            candidate["updated_at"] = utc_iso()
+            try:
+                candidate_record = MissionRecord.from_dict(candidate)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ActionTransitionError(
+                    f"Invalid transition candidate: {exc}"
+                ) from exc
+
+            outcome = self._store.commit(expected_mission_revision, candidate_record)
+            if outcome.outcome != "committed":
+                raise ActionTransitionError(
+                    f"Durable action commit failed: {outcome.outcome} "
+                    f"(rev={outcome.revision}): {outcome.reason}"
+                )
+
+            # Return the reloaded committed record: proof of durability, detached.
+            reloaded = self._load_data(mission_id)
+            return TransitionResult(
+                mission_id=mission_id,
+                action_id=action_id,
+                previous_state=current,
+                new_state=target_action_state,
+                mission_revision=durable_revision + 1,
+                record=MissionRecord.from_dict(reloaded),
+            )
 
     # -- replay decision (read-only) ------------------------------------------
 

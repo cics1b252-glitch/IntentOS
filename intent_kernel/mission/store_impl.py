@@ -307,16 +307,178 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
 
     def transition_confirmation(
         self,
+        mission_id: str,
+        action_id: str,
         expected_revision: int,
-        record: MissionRecord,
+        expected_action_state: ActionState,
+        target_action_state: ActionState,
+        confirmation_required: bool,
+        confirmation_basis_digest: str,
     ) -> DurableCommitResult:
         """Canonical confirmation-state transition.
 
-        Only MissionActionAuthority may call this. Allows confirmation
-        field changes in the candidate while still enforcing all other
-        immutability and revision guards.
+        Only MissionActionAuthority may call this. The store loads the
+        authoritative durable state, verifies the action state transition
+        is legal, applies the specific confirmation field changes, and commits.
+        The caller does not supply a full candidate record or arbitrary field updates.
         """
-        return self._do_commit(expected_revision, record, True)
+        with self._lock:
+            self._check_poisoned()
+
+            mission_file = self._mission_file(mission_id)
+            if not mission_file.exists():
+                return DurableCommitResult(
+                    outcome="not_found",
+                    revision=0,
+                    reason=f"No durable mission to update: {mission_id}",
+                )
+
+            try:
+                with open(mission_file, "r", encoding="utf-8") as f:
+                    durable_data = json.load(f)
+            except (json.JSONDecodeError, OSError) as exc:
+                raise MissionRecordValidationError(
+                    f"Cannot anchor commit: durable mission unreadable: {exc}"
+                ) from exc
+            self._validate_loaded_state(durable_data)
+
+            durable_revision = durable_data.get("revision")
+            if durable_revision != expected_revision:
+                return DurableCommitResult(
+                    outcome="revision_mismatch",
+                    revision=durable_revision,
+                    reason=f"Durable revision is {durable_revision}, "
+                    f"writer expected {expected_revision}",
+                )
+
+            # Verify action exists
+            durable_actions = durable_data.get("action_states", {})
+            if action_id not in durable_actions:
+                return DurableCommitResult(
+                    outcome="validation_failed",
+                    revision=durable_revision,
+                    reason=f"Action not found: {action_id}",
+                )
+
+            durable_action = durable_actions[action_id]
+            durable_state = durable_action.get("state")
+
+            # Verify current state matches expected
+            if durable_state != expected_action_state.value:
+                return DurableCommitResult(
+                    outcome="validation_failed",
+                    revision=durable_revision,
+                    reason=f"Durable action state is {durable_state}, caller expected {expected_action_state.value}",
+                )
+
+            # Verify transition is legal
+            if not is_legal_action_transition(expected_action_state, target_action_state):
+                return DurableCommitResult(
+                    outcome="validation_failed",
+                    revision=durable_revision,
+                    reason=f"Illegal action transition: {expected_action_state.value} -> {target_action_state.value}",
+                )
+
+            # Enforce transition-specific confirmation field semantics
+            self._validate_confirmation_transition(
+                expected_action_state, target_action_state,
+                durable_action, confirmation_required, confirmation_basis_digest
+            )
+
+            # Build candidate record with the transition applied
+            candidate_data = dict(durable_data)
+            candidate_data["revision"] = expected_revision + 1
+            candidate_data["updated_at"] = utc_iso()
+
+            # Apply state and confirmation field changes to the specific action
+            candidate_actions = dict(candidate_data["action_states"])
+            candidate_action = dict(durable_action)
+            candidate_action["state"] = target_action_state.value
+            candidate_action["confirmation_required"] = confirmation_required
+            candidate_action["confirmation_basis_digest"] = confirmation_basis_digest
+            candidate_actions[action_id] = candidate_action
+            candidate_data["action_states"] = candidate_actions
+
+            try:
+                candidate_record = MissionRecord.from_dict(candidate_data)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise MissionRecordValidationError(
+                    f"Invalid transition candidate: {exc}"
+                ) from exc
+
+            self._validate_candidate_state(candidate_record)
+            self._require_immutable_identity(candidate_record, durable_data, True)
+            self._validate_transition(candidate_record, durable_data)
+
+            return self._atomic_write(candidate_record)
+
+    def _validate_confirmation_transition(
+        self,
+        current_state: ActionState,
+        target_state: ActionState,
+        durable_action: Dict[str, Any],
+        confirmation_required: bool,
+        confirmation_basis_digest: str,
+    ) -> None:
+        """Enforce exact confirmation field semantics per transition.
+
+        For each confirmation-related transition, verify the exact required
+        before/after values. For all other transitions, confirmation fields
+        must remain unchanged.
+        """
+        durable_confirmation_required = bool(durable_action.get("confirmation_required", False))
+        durable_confirmation_basis = durable_action.get("confirmation_basis_digest", "")
+
+        # PENDING -> RECONFIRMATION_REQUIRED: must SET confirmation_required=True and non-empty basis
+        if (current_state is ActionState.PENDING and target_state is ActionState.RECONFIRMATION_REQUIRED):
+            if confirmation_required is not True:
+                raise MissionRecordValidationError(
+                    f"PENDING -> RECONFIRMATION_REQUIRED requires confirmation_required=True, "
+                    f"got {confirmation_required}"
+                )
+            if not confirmation_basis_digest or not isinstance(confirmation_basis_digest, str):
+                raise MissionRecordValidationError(
+                    "PENDING -> RECONFIRMATION_REQUIRED requires a non-empty confirmation_basis_digest"
+                )
+
+        # RECONFIRMATION_REQUIRED -> AUTHORIZED: must CLEAR both fields
+        elif (current_state is ActionState.RECONFIRMATION_REQUIRED and target_state is ActionState.AUTHORIZED):
+            if confirmation_required is not False:
+                raise MissionRecordValidationError(
+                    f"RECONFIRMATION_REQUIRED -> AUTHORIZED requires confirmation_required=False, "
+                    f"got {confirmation_required}"
+                )
+            if confirmation_basis_digest != "":
+                raise MissionRecordValidationError(
+                    "RECONFIRMATION_REQUIRED -> AUTHORIZED requires empty confirmation_basis_digest"
+                )
+
+        # RECONFIRMATION_REQUIRED -> FAILED: must CLEAR both fields (action failed, no confirmation needed)
+        elif (current_state is ActionState.RECONFIRMATION_REQUIRED and target_state is ActionState.FAILED):
+            if confirmation_required is not False:
+                raise MissionRecordValidationError(
+                    f"RECONFIRMATION_REQUIRED -> FAILED requires confirmation_required=False, "
+                    f"got {confirmation_required}"
+                )
+            if confirmation_basis_digest != "":
+                raise MissionRecordValidationError(
+                    "RECONFIRMATION_REQUIRED -> FAILED requires empty confirmation_basis_digest"
+                )
+
+        # All other transitions: confirmation fields must remain UNCHANGED
+        else:
+            if confirmation_required != durable_confirmation_required:
+                raise MissionRecordValidationError(
+                    f"Transition {current_state.value} -> {target_state.value} must not change "
+                    f"confirmation_required (durable: {durable_confirmation_required}, "
+                    f"requested: {confirmation_required})"
+                )
+            if confirmation_basis_digest != durable_confirmation_basis:
+                raise MissionRecordValidationError(
+                    f"Transition {current_state.value} -> {target_state.value} must not change "
+                    f"confirmation_basis_digest (durable: '{durable_confirmation_basis}', "
+                    f"requested: '{confirmation_basis_digest}')"
+                )
 
     def _do_commit(
         self,

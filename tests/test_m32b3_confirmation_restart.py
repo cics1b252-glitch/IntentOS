@@ -1239,9 +1239,8 @@ def test_legitimate_transition_confirmation_succeeds(tmp_path: Path):
     mission_file.write_text(json.dumps(data))
 
     loaded = store.load("m-legit")
-    loaded["revision"] = 3
-    candidate = MissionRecord.from_dict(loaded)
-    result = store.transition_confirmation(2, candidate)
+    # New API: mission_id, action_id, expected_revision, expected_action_state, target_action_state, confirmation_required, confirmation_basis_digest
+    result = store.transition_confirmation("m-legit", "action-1", 2, ActionState.PENDING, ActionState.AUTHORIZED, True, "legit-basis")
     assert result.outcome == "committed"
 
 
@@ -1258,12 +1257,9 @@ def test_stale_revision_transition_confirmation_fails(tmp_path: Path):
     mission_file.write_text(json.dumps(data))
 
     loaded = store.load("m-stale")
-    loaded["revision"] = 3
-    loaded["action_states"]["action-1"]["confirmation_required"] = True
-    loaded["action_states"]["action-1"]["confirmation_basis_digest"] = "legit-basis"
-    candidate = MissionRecord.from_dict(loaded)
+    # New API: mission_id, action_id, expected_revision, expected_action_state, target_action_state, confirmation_required, confirmation_basis_digest
     # Pass wrong expected_revision (1 instead of 2) -> returns revision_mismatch
-    result = store.transition_confirmation(1, candidate)
+    result = store.transition_confirmation("m-stale", "action-1", 1, ActionState.PENDING, ActionState.AUTHORIZED, True, "legit-basis")
     assert result.outcome == "revision_mismatch"
 
 
@@ -1282,9 +1278,13 @@ def test_failed_transition_leaves_record_unchanged(tmp_path: Path):
     mission_file.write_text(json.dumps(data))
 
     loaded = store.load("m-failed")
-    candidate = MissionRecord.from_dict(loaded)
+    # New API: mission_id, action_id, expected_revision, expected_action_state, target_action_state, action_field_updates
+    # Use wrong expected_revision (999) -> returns revision_mismatch
     try:
-        store.transition_confirmation(999, candidate)
+        store.transition_confirmation(
+            "m-failed", "action-1", 999, ActionState.PENDING, ActionState.AUTHORIZED,
+            {"confirmation_required": True, "confirmation_basis_digest": "legit-basis"}
+        )
     except Exception:
         pass
 
@@ -1310,3 +1310,291 @@ def test_commit_cannot_clear_requirement_via_action_states(tmp_path: Path) -> No
     candidate = MissionRecord.from_dict(loaded)
     with pytest.raises(MissionRecordValidationError):
         store.commit(2, candidate)
+
+
+# ---------------------------------------------------------------------------
+# B3-F04 Permanent Adversarial Regressions
+# ---------------------------------------------------------------------------
+
+def _setup_store_with_action(tmp_path: Path, mission_id: str, action_id: str, state: ActionState, confirmation_required: bool = False, confirmation_basis_digest: str = "") -> "JsonFileMissionRecordStore":
+    """Helper to create a store with a specific action state."""
+    record = _make_mission_record(mission_id, action_id, state=state, confirmation_required=confirmation_required, confirmation_basis_digest=confirmation_basis_digest)
+    return _store_record(tmp_path, record)
+
+
+# B3-F04: Confirmation fields cannot be mutated via transition_confirmation() on unrelated transitions
+def test_f04_pending_to_failed_cannot_set_confirmation_required(tmp_path: Path) -> None:
+    """PENDING -> FAILED must not allow setting confirmation_required."""
+    from intent_kernel.mission.store import MissionRecordValidationError
+
+    store = _setup_store_with_action(tmp_path, "m-f04-1", "a1", ActionState.PENDING)
+    with pytest.raises(MissionRecordValidationError):
+        store.transition_confirmation("m-f04-1", "a1", 1, ActionState.PENDING, ActionState.FAILED, True, "basis")
+
+
+def test_f04_pending_to_failed_cannot_set_confirmation_basis(tmp_path: Path) -> None:
+    """PENDING -> FAILED must not allow setting confirmation_basis_digest."""
+    from intent_kernel.mission.store import MissionRecordValidationError
+
+    store = _setup_store_with_action(tmp_path, "m-f04-2", "a1", ActionState.PENDING)
+    with pytest.raises(MissionRecordValidationError):
+        store.transition_confirmation("m-f04-2", "a1", 1, ActionState.PENDING, ActionState.FAILED, False, "basis")
+
+
+# B3-F04: Invalid confirmation field combinations are rejected
+def test_f04_confirmation_required_true_empty_basis_rejected(tmp_path: Path) -> None:
+    """confirmation_required=True with empty basis must be rejected on PENDING -> RECONFIRMATION_REQUIRED."""
+    from intent_kernel.mission.store import MissionRecordValidationError
+
+    store = _setup_store_with_action(tmp_path, "m-f04-3", "a1", ActionState.PENDING)
+    with pytest.raises(MissionRecordValidationError):
+        store.transition_confirmation("m-f04-3", "a1", 1, ActionState.PENDING, ActionState.RECONFIRMATION_REQUIRED, True, "")
+
+
+def test_f04_confirmation_required_false_nonempty_basis_rejected(tmp_path: Path) -> None:
+    """confirmation_required=False with non-empty basis must be rejected on RECONFIRMATION_REQUIRED -> AUTHORIZED."""
+    from intent_kernel.mission.store import MissionRecordValidationError
+
+    store = _setup_store_with_action(tmp_path, "m-f04-4", "a1", ActionState.RECONFIRMATION_REQUIRED, True, "valid-basis")
+    with pytest.raises(MissionRecordValidationError):
+        store.transition_confirmation("m-f04-4", "a1", 1, ActionState.RECONFIRMATION_REQUIRED, ActionState.AUTHORIZED, False, "non-empty")
+
+
+# B3-F04: Arbitrary basis substitution is rejected
+def test_f04_basis_substitution_rejected_on_reconfirmation_to_authorized(tmp_path: Path) -> None:
+    """Arbitrary basis substitution must be rejected on RECONFIRMATION_REQUIRED -> AUTHORIZED."""
+    from intent_kernel.mission.store import MissionRecordValidationError
+
+    store = _setup_store_with_action(tmp_path, "m-f04-5", "a1", ActionState.RECONFIRMATION_REQUIRED, True, "original-basis")
+    with pytest.raises(MissionRecordValidationError):
+        store.transition_confirmation("m-f04-5", "a1", 1, ActionState.RECONFIRMATION_REQUIRED, ActionState.AUTHORIZED, False, "attacker-basis")
+
+
+# B3-F04: Unknown/future field fails closed at every supported boundary
+def test_f04_unknown_field_rejected(tmp_path: Path) -> None:
+    """An unknown DurableActionState field fails closed through the real
+    construction/deserialization/mutation boundaries, and the durable
+    record cannot carry or accept it."""
+    from intent_kernel.mission.mission_record import DurableActionState
+
+    # Boundary 1: typed construction rejects the unknown field.
+    with pytest.raises(TypeError):
+        DurableActionState(
+            action_id="a1",
+            node_id="n1",
+            state=ActionState.PENDING,
+            future_authority_field="attacker-controlled",
+        )
+
+    # Boundary 2: deserialization of a stored dict rejects it.
+    with pytest.raises(TypeError):
+        DurableActionState.from_dict(
+            {
+                "action_id": "a1",
+                "node_id": "n1",
+                "state": "PENDING",
+                "future_authority_field": "attacker-controlled",
+            }
+        )
+
+    # Boundary 3: the public mutation API rejects an unknown field smuggled
+    # as an extra keyword, and the durable record stays unchanged.
+    store = _setup_store_with_action(
+        tmp_path, "m-f04-uf", "a1", ActionState.PENDING
+    )
+    before = store.load("m-f04-uf")
+    with pytest.raises(TypeError):
+        store.transition_confirmation(
+            "m-f04-uf", "a1", 1,
+            ActionState.PENDING, ActionState.RECONFIRMATION_REQUIRED,
+            True, "basis",
+            future_authority_field="attacker-controlled",
+        )
+    after = store.load("m-f04-uf")
+    assert after["revision"] == before["revision"]
+    assert after["action_states"]["a1"].get("future_authority_field") is None
+
+    # Boundary 4: a full-record candidate carrying the unknown field cannot
+    # even be reconstructed from durable content (fail closed at from_dict).
+    tampered = dict(before)
+    tampered_actions = {
+        k: dict(v) for k, v in before["action_states"].items()
+    }
+    tampered_actions["a1"]["future_authority_field"] = "attacker-controlled"
+    tampered["action_states"] = tampered_actions
+    with pytest.raises(TypeError):
+        MissionRecord.from_dict(tampered)
+
+
+# B3-F04: non-confirmation action fields are not reachable through
+# transition_confirmation(); each attempt is executable-rejected and the
+# durable record provably remains unchanged.
+@pytest.mark.parametrize("protected_field", [
+    "provider_effect_id",
+    "effect_identity_digest",
+    "verification_proof_digest",
+    "verification_status",
+    "verification_evidence",
+    "result",
+    "local_execution_identity",
+])
+def test_f04_protected_field_not_mutable_via_transition_confirmation(
+    tmp_path: Path, protected_field: str,
+) -> None:
+    """Attempt to mutate a protected action field through the privileged
+    confirmation-transition API: rejected as TypeError (no such parameter),
+    and the durable field is provably unchanged."""
+    store = _setup_store_with_action(
+        tmp_path, "m-f04-pf", "a1", ActionState.PENDING
+    )
+    before = store.load("m-f04-pf")
+
+    # Attack 1: smuggle the protected field as an extra keyword argument.
+    with pytest.raises(TypeError):
+        store.transition_confirmation(
+            "m-f04-pf", "a1", 1,
+            ActionState.PENDING, ActionState.RECONFIRMATION_REQUIRED,
+            True, "valid-basis",
+            **{protected_field: "attacker-value"},
+        )
+    after = store.load("m-f04-pf")
+    assert after["revision"] == before["revision"]
+    assert after["action_states"]["a1"].get(protected_field) != "attacker-value"
+    assert after == before
+
+    # Attack 2: legacy F03 generic-dict form (field updates as positional)
+    # is no longer accepted by the narrowed signature.
+    with pytest.raises(TypeError):
+        store.transition_confirmation(
+            "m-f04-pf", "a1", 1,
+            ActionState.PENDING, ActionState.RECONFIRMATION_REQUIRED,
+            {protected_field: "attacker-value"},
+        )
+    after2 = store.load("m-f04-pf")
+    assert after2["revision"] == before["revision"]
+    assert after2["action_states"]["a1"].get(protected_field) != "attacker-value"
+    assert after2 == before
+
+    # Control: even the SUCCESSFUL legitimate confirmation path must not
+    # touch the protected field — the store derives everything else from
+    # the durable record itself.
+    result = store.transition_confirmation(
+        "m-f04-pf", "a1", 1,
+        ActionState.PENDING, ActionState.RECONFIRMATION_REQUIRED,
+        True, "valid-basis",
+    )
+    assert result.outcome == "committed"
+    after3 = store.load("m-f04-pf")
+    assert after3["action_states"]["a1"].get(protected_field) in (
+        None, "", {}, [],
+    ) or after3["action_states"]["a1"].get(protected_field) == before[
+        "action_states"]["a1"].get(protected_field)
+    assert after3["action_states"]["a1"].get(protected_field) != "attacker-value"
+
+
+# B3-F04: Ordinary commit() must reject confirmation field mutations
+def test_f04_ordinary_commit_cannot_mutate_confirmation_required(tmp_path: Path) -> None:
+    """Ordinary commit() must reject attempts to change confirmation_required."""
+    from intent_kernel.mission.store import MissionRecordValidationError
+
+    store = _setup_store_with_action(tmp_path, "m-f04-6", "a1", ActionState.PENDING, False)
+    mission_file = tmp_path / "missions" / "m-f04-6.json"
+    data = json.loads(mission_file.read_text())
+    data["revision"] = 2
+    mission_file.write_text(json.dumps(data))
+
+    loaded = store.load("m-f04-6")
+    loaded["revision"] = 3
+    loaded["action_states"]["a1"]["confirmation_required"] = True
+    loaded["action_states"]["a1"]["confirmation_basis_digest"] = "basis-for-test"
+    candidate = MissionRecord.from_dict(loaded)
+    with pytest.raises(MissionRecordValidationError):
+        store.commit(2, candidate)
+
+
+def test_f04_ordinary_commit_cannot_mutate_confirmation_basis(tmp_path: Path) -> None:
+    """Ordinary commit() must reject attempts to change confirmation_basis_digest."""
+    from intent_kernel.mission.store import MissionRecordValidationError
+
+    store = _setup_store_with_action(tmp_path, "m-f04-7", "a1", ActionState.PENDING, False)
+    mission_file = tmp_path / "missions" / "m-f04-7.json"
+    data = json.loads(mission_file.read_text())
+    data["revision"] = 2
+    mission_file.write_text(json.dumps(data))
+
+    loaded = store.load("m-f04-7")
+    loaded["revision"] = 3
+    loaded["action_states"]["a1"]["confirmation_basis_digest"] = "new-basis"
+    candidate = MissionRecord.from_dict(loaded)
+    with pytest.raises(MissionRecordValidationError):
+        store.commit(2, candidate)
+
+
+# B3-F04: Removed caller authority flag cannot be used
+def test_f04_caller_authority_flag_absent_from_commit(tmp_path: Path) -> None:
+    """The caller-selected confirmation_authority flag is behaviorally
+    rejected by the public commit API, and the durable confirmation
+    requirement provably survives the attempt."""
+    import inspect
+    from intent_kernel.mission.store_impl import JsonFileMissionRecordStore
+
+    # Supplementary shape evidence.
+    sig = inspect.signature(JsonFileMissionRecordStore.commit)
+    assert "confirmation_authority" not in sig.parameters
+
+    # Behavioral proof: a caller tries to self-assert confirmation authority
+    # to clear a durable confirmation requirement through ordinary commit.
+    store = _setup_store_with_action(
+        tmp_path, "m-f04-flag", "a1",
+        state=ActionState.RECONFIRMATION_REQUIRED,
+        confirmation_required=True,
+        confirmation_basis_digest="original-basis",
+    )
+    loaded = store.load("m-f04-flag")
+    loaded["revision"] = 2
+    loaded["action_states"]["a1"]["confirmation_required"] = False
+    loaded["action_states"]["a1"]["confirmation_basis_digest"] = ""
+    candidate = MissionRecord.from_dict(loaded)
+    with pytest.raises(TypeError):
+        store.commit(1, candidate, confirmation_authority=True)
+
+    # Even without the flag, the same candidate is DENIED: the public
+    # ordinary-commit surface cannot clear the durable requirement.
+    from intent_kernel.mission.store import MissionRecordValidationError
+    with pytest.raises(MissionRecordValidationError):
+        store.commit(1, candidate)
+
+    # Durable confirmation state is provably unchanged after both attempts.
+    after = store.load("m-f04-flag")
+    assert after["revision"] == 1
+    assert after["action_states"]["a1"]["state"] == "RECONFIRMATION_REQUIRED"
+    assert after["action_states"]["a1"]["confirmation_required"] is True
+    assert after["action_states"]["a1"]["confirmation_basis_digest"] == "original-basis"
+
+
+# Positive controls: legitimate confirmation transitions must work
+def test_f04_positive_pending_to_reconfirmation_required(tmp_path: Path) -> None:
+    """PENDING -> RECONFIRMATION_REQUIRED with valid basis must succeed."""
+    store = _setup_store_with_action(tmp_path, "m-f04-pos-1", "a1", ActionState.PENDING)
+    result = store.transition_confirmation("m-f04-pos-1", "a1", 1, ActionState.PENDING, ActionState.RECONFIRMATION_REQUIRED, True, "valid-basis")
+    assert result.outcome == "committed"
+
+
+def test_f04_positive_reconfirmation_to_authorized(tmp_path: Path) -> None:
+    """RECONFIRMATION_REQUIRED -> AUTHORIZED with clearing must succeed."""
+    store = _setup_store_with_action(tmp_path, "m-f04-pos-2", "a1", ActionState.RECONFIRMATION_REQUIRED, True, "valid-basis")
+    result = store.transition_confirmation("m-f04-pos-2", "a1", 1, ActionState.RECONFIRMATION_REQUIRED, ActionState.AUTHORIZED, False, "")
+    assert result.outcome == "committed"
+    loaded = store.load("m-f04-pos-2")
+    assert loaded["action_states"]["a1"]["confirmation_required"] is False
+    assert loaded["action_states"]["a1"]["confirmation_basis_digest"] == ""
+
+
+def test_f04_positive_reconfirmation_to_failed(tmp_path: Path) -> None:
+    """RECONFIRMATION_REQUIRED -> FAILED with clearing must succeed."""
+    store = _setup_store_with_action(tmp_path, "m-f04-pos-3", "a1", ActionState.RECONFIRMATION_REQUIRED, True, "valid-basis")
+    result = store.transition_confirmation("m-f04-pos-3", "a1", 1, ActionState.RECONFIRMATION_REQUIRED, ActionState.FAILED, False, "")
+    assert result.outcome == "committed"
+    loaded = store.load("m-f04-pos-3")
+    assert loaded["action_states"]["a1"]["confirmation_required"] is False
+    assert loaded["action_states"]["a1"]["confirmation_basis_digest"] == ""

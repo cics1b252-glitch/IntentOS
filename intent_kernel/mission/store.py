@@ -57,12 +57,21 @@ class MissionRecordStorePort(ABC):
 
     @abstractmethod
     def transition_confirmation(
-        self, expected_revision: int, record: MissionRecord
+        self,
+        mission_id: str,
+        action_id: str,
+        expected_revision: int,
+        expected_action_state: ActionState,
+        target_action_state: ActionState,
+        confirmation_required: bool,
+        confirmation_basis_digest: str,
     ) -> "DurableCommitResult":
         """Canonical confirmation-state transition.
 
-        Only callable by MissionActionAuthority. Allows confirmation
-        field changes while enforcing all other immutability guards.
+        Only callable by MissionActionAuthority. The store loads the
+        authoritative durable state, verifies the action state transition
+        is legal, applies the specific confirmation field changes, and
+        commits. The caller does not supply a full candidate record.
         """
         ...
 

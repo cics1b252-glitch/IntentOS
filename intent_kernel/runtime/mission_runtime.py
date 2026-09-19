@@ -159,6 +159,7 @@ class MissionRuntime:
         )
         self.dispatch_guard = dispatch_guard
         self._mission_record_store = mission_record_store
+        self.resource_manager = rrm_service
         self.verification_gate = VerificationGate(
             external_adapter=external_evidence_adapter
         )
@@ -543,84 +544,135 @@ class MissionRuntime:
                 # Critical: REPLAY DECISION must not become permission to use stale state.
                 # CURRENT RRM validation must occur before productive handoff.
                 _rebind_result = None
+                _rebind_durable = None
                 if self._mission_record_store is not None and self.resource_manager is not None:
                     try:
                         durable_data = self._mission_record_store.load(instance.mission_id)
                         if durable_data is not None:
-                            action_data = durable_data.get("action_states", {}).get(node.action_id, {})
+                            action_data = durable_data.get("action_states", {}).get(contract.action_id, {})
                             if action_data:
                                 dur_grid = action_data.get("expected_governed_registration_id", "")
                                 dur_gen = action_data.get("expected_resource_generation", 0)
                                 dur_logical = action_data.get("expected_executor_logical_id", "")
-                                # Resolve current canonical governor for this resource
                                 curr = None
                                 if dur_grid:
-                                    try:
-                                        curr = self.resource_manager.rrm.get_provider(dur_grid)
-                                    except Exception:
+                                    # Resolve the current canonical governor by its
+                                    # governed registration id across resource kinds
+                                    # (RRM has no direct by-registration lookup).
+                                    for _list in (
+                                        self.resource_manager.list_providers,
+                                        self.resource_manager.list_agents,
+                                        self.resource_manager.list_capabilities,
+                                    ):
                                         try:
-                                            curr = self.resource_manager.rrm.get_agent(dur_grid)
+                                            for _res in _list():
+                                                if getattr(_res, "governed_registration_id", "") == dur_grid:
+                                                    curr = _res
+                                                    break
                                         except Exception:
-                                            curr = None
-                                grid_match = (curr is not None and dur_grid and
-                                              getattr(curr, "governed_registration_id", None) == dur_grid) if curr else False
-                                gen_match = (curr is not None and isinstance(dur_gen, int) and
-                                              isinstance(getattr(curr, "generation", None), int) and
-                                              getattr(curr, "generation", None) == dur_gen) if dur_gen != 0 else True
-                                logical_match = (curr is not None and dur_logical and
-                                                 getattr(curr, "agent_id", None) == dur_logical) if dur_logical else True
+                                            continue
+                                        if curr is not None:
+                                            break
+                                if dur_grid:
+                                    # Durable action carries an RRM governor binding:
+                                    # the current canonical governor MUST resolve and
+                                    # match exactly; otherwise fail closed.
+                                    grid_match = (
+                                        curr is not None
+                                        and getattr(curr, "governed_registration_id", None) == dur_grid
+                                    )
+                                    gen_match = (
+                                        curr is not None
+                                        and isinstance(dur_gen, int)
+                                        and getattr(curr, "generation", None) == dur_gen
+                                    )
+                                else:
+                                    # No RRM constraint in durable action (legacy path).
+                                    grid_match = True
+                                    gen_match = True
+                                logical_match = True
+                                if dur_logical and curr is not None:
+                                    _curr_agent = getattr(curr, "agent_id", None)
+                                    if _curr_agent is not None:
+                                        logical_match = _curr_agent == dur_logical
                                 eligible = bool(getattr(curr, "is_eligible", True)) if curr else True
                                 tomb = str(getattr(curr, "status", "") or "").lower().find("tombstone") >= 0 if curr else False
                                 retired = str(getattr(curr, "status", "") or "").lower().find("retired") >= 0 if curr else False
                                 if (logical_match or (dur_logical and not eligible)) and grid_match and gen_match and eligible and not tomb and not retired:
-                                    _rebind_result = curr  # revalidated current object
+                                    _rebind_result = curr if curr is not None else True
+                                    if dur_grid or dur_gen:
+                                        _rebind_durable = (dur_grid, dur_gen, dur_logical)
                                 else:
-                                    _rebind_result = None  # fail closed
+                                    _rebind_result = None
                             else:
                                 _rebind_result = None
                     except Exception:
                         _rebind_result = None
 
-                # CRITICAL ORDERING: rebind result must not become permission to use stale state.
-                # If rebind yields None, guard acquire is skipped (fail closed).
-                if _rebind_result is None and self.dispatch_guard is not None:
-                    # Fail closed: no durable revalidated executor, skip productive dispatch
-                    ownership = None
-                elif self.dispatch_guard is not None and _rebind_result is not None:
-                    # Only acquire guard ownership if rebind succeeded (current valid executor)
-                    try:
-                        ownership = self.dispatch_guard.acquire_for_node(
-                            instance.mission_id,
-                            node,
-                            requested_by="mission-runtime",
-                            confirmation_required=False,
-                        )
-                    except Exception as exc:
-                        decision = getattr(exc, "decision", "") or ""
-                        node.state = RuntimeNodeState.FAILED
-                        if node.node_id in instance.pending_nodes:
-                            instance.pending_nodes.remove(node.node_id)
-                        instance.failed_nodes.append(node.node_id)
-                        node.error_message = (
-                            "Durable dispatch ownership refused: " f"{exc}"
-                        )
-                        report = FailureReport(
-                            runtime_id=instance.runtime_id,
-                            mission_id=instance.mission_id,
-                            node_id=node.node_id,
-                            category=FailureCategory.POLICY_BLOCK,
-                            message=node.error_message,
-                            retryable=(decision == "AMBIGUOUS_RECONCILIATION_REQUIRED"),
-                        )
-                        self._failure_reports.append(report)
-                        await self.save_checkpoint(instance)
-                        await self._sync_lifecycle(instance)
+                # ONE effective acquisition path: all productive handoffs go through
+                # the dispatch guard. Three cases:
+                # (1) _rebind_result is not None -> durable rebind succeeded;
+                #     acquire with the verified durable registration fields when
+                #     the durable action carries them (empty-field runtime-node
+                #     spec would otherwise mismatch the durable authority).
+                # (2) _rebind_result is None AND _mission_record_store is None
+                #     -> legacy/nonproductive path, normal guard acquisition
+                # (3) _rebind_result is None AND _mission_record_store is not None
+                #     -> rebind failed, fail closed (ownership=None)
+                ownership = None
+                if self.dispatch_guard is not None:
+                    can_acquire = _rebind_result is not None or self._mission_record_store is None
+                    if can_acquire:
+                        try:
+                            if _rebind_durable is not None:
+                                from intent_kernel.mission.dispatch_guard import (
+                                    DispatchAttemptSpec,
+                                    spec_for_runtime_node,
+                                )
+                                base = spec_for_runtime_node(instance.mission_id, node)
+                                spec = DispatchAttemptSpec(
+                                    mission_id=base.mission_id,
+                                    action_id=base.action_id,
+                                    request_semantics_digest=base.request_semantics_digest,
+                                    executor_logical_id=base.executor_logical_id,
+                                    expected_governed_registration_id=_rebind_durable[0],
+                                    expected_resource_generation=_rebind_durable[1],
+                                )
+                                ownership = self.dispatch_guard.acquire(
+                                    spec,
+                                    requested_by="mission-runtime",
+                                    confirmation_required=False,
+                                )
+                            else:
+                                ownership = self.dispatch_guard.acquire_for_node(
+                                    instance.mission_id,
+                                    node,
+                                    requested_by="mission-runtime",
+                                    confirmation_required=False,
+                                )
+                        except Exception as exc:
+                            decision = getattr(exc, "decision", "") or ""
+                            node.state = RuntimeNodeState.FAILED
+                            if node.node_id in instance.pending_nodes:
+                                instance.pending_nodes.remove(node.node_id)
+                            instance.failed_nodes.append(node.node_id)
+                            node.error_message = (
+                                "Durable dispatch ownership refused: " f"{exc}"
+                            )
+                            report = FailureReport(
+                                runtime_id=instance.runtime_id,
+                                mission_id=instance.mission_id,
+                                node_id=node.node_id,
+                                category=FailureCategory.POLICY_BLOCK,
+                                message=node.error_message,
+                                retryable=(decision == "AMBIGUOUS_RECONCILIATION_REQUIRED"),
+                            )
+                            self._failure_reports.append(report)
+                            await self.save_checkpoint(instance)
+                            await self._sync_lifecycle(instance)
+                            return instance
+                    else:
                         return instance
-# NOTE: The ONE effective acquisition path is the elif block above.
-                # This section is intentionally empty — removing the unconditional
-                # acquire_for_node() that previously defeated fail-closed ownership.
-                # Falling through without acquiring ownership means productive
-                # dispatch is skipped (fail-closed).
 
                 # Proceed to Execute
                 node.state = RuntimeNodeState.EXECUTING

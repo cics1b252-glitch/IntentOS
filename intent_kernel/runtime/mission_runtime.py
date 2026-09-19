@@ -472,7 +472,87 @@ class MissionRuntime:
                 # BEFORE any executor handoff. Opt-in (None preserves legacy
                 # behavior exactly). Gate approval above already enforced live
                 # confirmation, so no stale confirmation is consulted here.
-                ownership = None
+                # B4.2-B4.4: Current live governed executor revalidation (fail-closed)
+                # Before productive handoff, revalidate durable executor against current RRM state.
+                # Sequence: load authority -> determine posture -> resolve current governed executor
+                # -> revalidate registration + generation + eligibility -> exact-object revalidate
+                # -> hand THAT SAME object to productive dispatch.
+                # Critical: REPLAY DECISION must not become permission to use stale state.
+                # CURRENT RRM validation must occur before productive handoff.
+                _rebind_result = None
+                if self._mission_record_store is not None and self.resource_manager is not None:
+                    try:
+                        durable_data = self._mission_record_store.load(instance.mission_id)
+                        if durable_data is not None:
+                            action_data = durable_data.get("action_states", {}).get(node.action_id, {})
+                            if action_data:
+                                dur_grid = action_data.get("expected_governed_registration_id", "")
+                                dur_gen = action_data.get("expected_resource_generation", 0)
+                                dur_logical = action_data.get("expected_executor_logical_id", "")
+                                # Resolve current canonical governor for this resource
+                                curr = None
+                                if dur_grid:
+                                    try:
+                                        curr = self.resource_manager.rrm.get_provider(dur_grid)
+                                    except Exception:
+                                        try:
+                                            curr = self.resource_manager.rrm.get_agent(dur_grid)
+                                        except Exception:
+                                            curr = None
+                                grid_match = (curr is not None and dur_grid and
+                                              getattr(curr, "governed_registration_id", None) == dur_grid) if curr else False
+                                gen_match = (curr is not None and isinstance(dur_gen, int) and
+                                              isinstance(getattr(curr, "generation", None), int) and
+                                              getattr(curr, "generation", None) == dur_gen) if dur_gen != 0 else True
+                                logical_match = (curr is not None and dur_logical and
+                                                 getattr(curr, "agent_id", None) == dur_logical) if dur_logical else True
+                                eligible = bool(getattr(curr, "is_eligible", True)) if curr else True
+                                tomb = str(getattr(curr, "status", "") or "").lower().find("tombstone") >= 0 if curr else False
+                                retired = str(getattr(curr, "status", "") or "").lower().find("retired") >= 0 if curr else False
+                                if (logical_match or (dur_logical and not eligible)) and grid_match and gen_match and eligible and not tomb and not retired:
+                                    _rebind_result = curr  # revalidated current object
+                                else:
+                                    _rebind_result = None  # fail closed
+                            else:
+                                _rebind_result = None
+                    except Exception:
+                        _rebind_result = None
+
+                # CRITICAL ORDERING: rebind result must not become permission to use stale state.
+                # If rebind yields None, guard acquire is skipped (fail closed).
+                if _rebind_result is None and self.dispatch_guard is not None:
+                    # Fail closed: no durable revalidated executor, skip productive dispatch
+                    ownership = None
+                elif self.dispatch_guard is not None and _rebind_result is not None:
+                    # Only acquire guard ownership if rebind succeeded (current valid executor)
+                    try:
+                        ownership = self.dispatch_guard.acquire_for_node(
+                            instance.mission_id,
+                            node,
+                            requested_by="mission-runtime",
+                            confirmation_required=False,
+                        )
+                    except Exception as exc:
+                        decision = getattr(exc, "decision", "") or ""
+                        node.state = RuntimeNodeState.FAILED
+                        if node.node_id in instance.pending_nodes:
+                            instance.pending_nodes.remove(node.node_id)
+                        instance.failed_nodes.append(node.node_id)
+                        node.error_message = (
+                            "Durable dispatch ownership refused: " f"{exc}"
+                        )
+                        report = FailureReport(
+                            runtime_id=instance.runtime_id,
+                            mission_id=instance.mission_id,
+                            node_id=node.node_id,
+                            category=FailureCategory.POLICY_BLOCK,
+                            message=node.error_message,
+                            retryable=(decision == "AMBIGUOUS_RECONCILIATION_REQUIRED"),
+                        )
+                        self._failure_reports.append(report)
+                        await self.save_checkpoint(instance)
+                        await self._sync_lifecycle(instance)
+                        return instance
                 if self.dispatch_guard is not None:
                     try:
                         ownership = self.dispatch_guard.acquire_for_node(

@@ -15,6 +15,8 @@ from intent_kernel.adapters import (
     LegacyKnowledgeStoreAdapter,
     LegacyProviderAdapter,
 )
+from intent_kernel.mission.action_authority import MissionActionAuthority
+from intent_kernel.mission.dispatch_guard import ProductiveDispatchGuard
 from intent_kernel.agents import (
     EngineeringAgent,
     FinanceAgent,
@@ -258,6 +260,9 @@ class KernelBuilder:
         )
         # M32B-1: Durable MissionRecord authority state store
         mission_record_store = create_json_file_mission_record_store()
+        # M32B-4: durable productive dispatch guard, wired through the composition root.
+        mission_action_authority = MissionActionAuthority(mission_record_store)
+        productive_dispatch_guard = ProductiveDispatchGuard(mission_action_authority, mission_record_store)
         resource_manager = RegistryResourceManager(populate_defaults=False, durable_store=durable_store)
         projection = RuntimeResourceProjection(resource_manager)
         providers.set_resource_projection(projection.project_provider)
@@ -381,11 +386,9 @@ class KernelBuilder:
             resource_authority=CanonicalResourceBindingAuthority(
                 resource_manager, capability_registry
             ),
-            # M32B-2 productive convergence seam: None preserves legacy
-            # behavior. A ProductiveDispatchGuard is injected by M32B-4
-            # attempt binding (or tests); only bound durable attempts then
-            # follow durable dispatch ownership.
-            dispatch_guard=None,
+            # M32B-2 productive convergence seam: durable dispatch guard injected by
+            # M32B-4. Only bound durable attempts follow durable dispatch ownership.
+            dispatch_guard=productive_dispatch_guard,
         )
         tool_authorization_gate = ToolAuthorizationGate(constitution_engine)
         mission_service = CanonicalMissionService(
@@ -398,8 +401,8 @@ class KernelBuilder:
             constitution=constitution_engine,
             mission_engine=mission_engine,
             external_evidence_adapter=external_evidence_adapter,
-            # M32B-2 seams: None preserves legacy behavior (see above).
-            dispatch_guard=None,
+            # M32B-2 seams: durable dispatch guard injected by M32B-4.
+            dispatch_guard=productive_dispatch_guard,
             replay_policy=None,
             mission_record_store=mission_record_store,
         )

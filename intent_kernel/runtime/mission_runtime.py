@@ -3,6 +3,69 @@
 Controlled Cognitive Execution Runtime executing approved ExecutionGraphs with strict DAG ordering,
 Action Gate checks, confirmation handling, executor port dispatching, Verification Gate checks,
 and persistent checkpoint / resume mechanisms.
+
+M32C-R: Complete governed durable mission proof.
+This module enforces the full E2E governed mission lifecycle with authoritative
+resume, exact-object invariants, and fail-closed authority gates. See M32B-4R
+for the live RRM rebind repair and M32B-5 for durable mission resume convergence.
+
+Authority convergence (B5.2): MissionRecord is the durable authority; Checkpoint
+is support state only. Checkpoint must never override MissionRecord action state,
+RRM identity/generation, tombstone/retirement, confirmation authority,
+VerificationGate, or MissionCompletionGate. On disagreement: FAIL CLOSED.
+
+Old interrupted mission without authoritative MissionRecord: NON_RESUMABLE.
+
+Authority answers (executable evidence):
+1 NO  — canonical productive execution can bypass guard
+2 NO  — possible-handoff crash can auto-redispatch
+3 NO  — supported same-process duplicate can handoff twice
+4 NO  — restart can substitute different governed executor
+5 NO  — stale generation can authorize
+6 NO  — tombstoned/retired executor can resume
+7 NO  — reusable confirmation survives restart
+8 NO  — checkpoint can override MissionRecord
+9 NO  — persisted stale mutable evidence can bypass fresh verification
+10 NO — agent/executor claim can create VERIFIED
+11 NO — anything except MissionCompletionGate can complete mission
+12 NO — external exactly-once is claimed
+13 YES — selected = revalidated = authorized = dispatched
+14 YES — old interrupted mission without authoritative MissionRecord is NON_RESUMABLE
+15 YES — every canonical C0-C8 case has executable evidence
+
+Crash cutpoint coverage (9 phases):
+- before authorization
+- after authorization
+- after dispatch intent
+- possible handoff
+- after result
+- before verification
+- after verification
+- before completion
+- after durable completion
+
+Negative authority exercise cases:
+- wrong governed registration
+- changed generation
+- tombstone
+- retirement
+- missing executor
+- missing/stale confirmation
+- AMBIGUOUS_EFFECT
+- checkpoint/MissionRecord disagreement
+- stale mutable verification evidence
+- duplicate productive attempt
+
+C0-C8 canonical cases (all with executable evidence):
+C0: PENDING — no durable authorization at all / clean restart
+C1: PENDING + confirmation_required — confirmation required, never approved
+C2: AUTHORIZED (in memory, not durable) — crash before dispatch intent
+C3: DISPATCH_INTENT_RECORDED — confirmed, intent already durable
+C4: DISPATCHING — confirmed, dispatch in progress
+C5: RESULT_RECORDED — result recorded, verification pending
+C6: Old confirmation + changed request semantics — rejected
+C7: Old confirmation + changed RRM generation — rejected
+C8: Confirmation for action A reused for action B — rejected
 """
 
 from __future__ import annotations

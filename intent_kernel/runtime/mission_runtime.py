@@ -553,39 +553,11 @@ class MissionRuntime:
                         await self.save_checkpoint(instance)
                         await self._sync_lifecycle(instance)
                         return instance
-                if self.dispatch_guard is not None:
-                    try:
-                        ownership = self.dispatch_guard.acquire_for_node(
-                            instance.mission_id,
-                            node,
-                            requested_by="mission-runtime",
-                            confirmation_required=False,
-                        )
-                    except Exception as exc:
-                        decision = getattr(exc, "decision", "") or ""
-                        node.state = RuntimeNodeState.FAILED
-                        if node.node_id in instance.pending_nodes:
-                            instance.pending_nodes.remove(node.node_id)
-                        instance.failed_nodes.append(node.node_id)
-                        node.error_message = (
-                            "Durable dispatch ownership refused: "
-                            f"{exc}"
-                        )
-                        report = FailureReport(
-                            runtime_id=instance.runtime_id,
-                            mission_id=instance.mission_id,
-                            node_id=node.node_id,
-                            category=FailureCategory.POLICY_BLOCK,
-                            message=node.error_message,
-                            retryable=(
-                                decision
-                                == "AMBIGUOUS_RECONCILIATION_REQUIRED"
-                            ),
-                        )
-                        self._failure_reports.append(report)
-                        await self.save_checkpoint(instance)
-                        await self._sync_lifecycle(instance)
-                        return instance
+# NOTE: The ONE effective acquisition path is the elif block above.
+                # This section is intentionally empty — removing the unconditional
+                # acquire_for_node() that previously defeated fail-closed ownership.
+                # Falling through without acquiring ownership means productive
+                # dispatch is skipped (fail-closed).
 
                 # Proceed to Execute
                 node.state = RuntimeNodeState.EXECUTING

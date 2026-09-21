@@ -261,6 +261,10 @@ class KernelBuilder:
         # M32B-1: Durable MissionRecord authority state store
         mission_record_store = create_json_file_mission_record_store()
         # M32B-4: durable productive dispatch guard, wired through the composition root.
+        # G8: per-mission MissionRecords are anchored by
+        # MissionRuntime.create_instance (one record per mission_id, before
+        # productive execution); the composition root must NOT share a
+        # single kernel-level record across missions.
         mission_action_authority = MissionActionAuthority(mission_record_store)
         productive_dispatch_guard = ProductiveDispatchGuard(mission_action_authority, mission_record_store)
         resource_manager = RegistryResourceManager(populate_defaults=False, durable_store=durable_store)
@@ -412,6 +416,13 @@ class KernelBuilder:
             tool_authorization_gate=tool_authorization_gate,
             confirmation_ttl_seconds=300,
         )
+        # G7: attach the canonical confirmation service to the durable
+        # action authority. Post-construction direct assignment is required:
+        # the service needs the runtime, which needs the guard, which needs
+        # the authority — constructor injection would be circular. No public
+        # setter exists on purpose (T36 pins the authority's public method
+        # set); the composition root is the single allowed attach site.
+        mission_action_authority._confirmation_service = confirmation_service
         resource_discovery_service = CanonicalResourceDiscoveryService(
             rrm=resource_manager,
         )

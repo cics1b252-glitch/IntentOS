@@ -170,17 +170,22 @@ class CanonicalConfirmationService:
 
         This method never mutates confirmation state. It is a read-only
         validation gate for durable action authorization.
+
+        G7: approval moves a requirement out of the WAITING state observed
+        by get_pending_confirmation, so a live approval is found through
+        the CONFIRMED-state lookup. Consumed, expired, rejected,
+        invalidated, or missing requirements are never valid; a requirement
+        approved before a restart is in-memory only and therefore never
+        resurrects after one.
         """
-        conf = self._runtime.get_pending_confirmation(mission_id)
+        conf = self._runtime.get_confirmed_confirmation(mission_id, action_id)
         if conf is None:
             return False
-        if conf.action_id != action_id:
-            return False
-        if conf.state is not ConfirmationState.CONFIRMED:
+        if conf.expires_at and utc_iso() > conf.expires_at:
             return False
         provenance = conf.provenance or {}
         basis = provenance.get("confirmation_basis_digest", "")
-        if basis != confirmation_basis_digest:
+        if not basis or basis != confirmation_basis_digest:
             return False
         return True
 
@@ -308,6 +313,9 @@ class CanonicalConfirmationService:
         # authorization or user confirmation must never override a current DENY.
         decision, _snapshot = await self.recheck_authorization(conf)
         if decision is not None and decision is not ToolAuthorizationDecisionState.ALLOW:
+            # G7: mirror the expired path — the requirement itself becomes
+            # STALE so a later validate_confirmation can never accept it.
+            conf.state = ConfirmationState.STALE
             return ConfirmationOutcome(
                 ConfirmationState.STALE,
                 False,

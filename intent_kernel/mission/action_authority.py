@@ -182,6 +182,13 @@ class MissionActionAuthority:
         self._store = store
         self._confirmation_service = confirmation_service
 
+    # NOTE (G7): no public setter is provided on purpose. The T36
+    # authority-surface guard pins the exact public method set of this
+    # class; the composition root attaches the confirmation service via
+    # direct assignment (see composition.build) because constructor
+    # injection is impossible there (service needs runtime needs guard
+    # needs this authority).
+
     # -- internal load helpers (no mutation) -------------------------------
 
     def _load_data(self, mission_id: str) -> Dict[str, Any]:

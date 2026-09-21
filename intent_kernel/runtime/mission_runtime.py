@@ -923,6 +923,25 @@ class MissionRuntime:
                 return conf
         return None
 
+    def get_confirmed_confirmation(
+        self, mission_id: str, action_id: str
+    ) -> Optional[ExecutionConfirmationRequest]:
+        """Return the CONFIRMED requirement for a mission/action, if any.
+
+        G7: confirmation approval moves a requirement out of the WAITING
+        state that get_pending_confirmation observes, so validating a live
+        approval requires this CONFIRMED-state lookup. Consumed, expired,
+        rejected, invalidated, or missing requirements are never returned.
+        """
+        for conf in self._confirmations.values():
+            if (
+                conf.mission_id == mission_id
+                and conf.action_id == action_id
+                and conf.state is ConfirmationState.CONFIRMED
+            ):
+                return conf
+        return None
+
     def cancel_instance(self, mission_id: str) -> None:
         """Cancel runtime instances of a Mission (used by canonical rejection)."""
         for instance in self._instances.values():

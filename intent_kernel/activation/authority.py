@@ -201,16 +201,20 @@ class CanonicalResourceActivationAuthority:
             detail="Resource is a template" if resource.is_template else "",
         ))
 
+        # G9: RRM snapshots expose plain str fields (not Enums); normalize
+        # both representations instead of calling .value unconditionally.
+        origin_value = getattr(resource.resource_origin, "value", resource.resource_origin)
+        status_value = getattr(resource.status, "value", resource.status)
         results.append(_PrerequisiteResult(
             name="origin_not_template",
-            satisfied=resource.resource_origin.value != "template",
-            detail="Resource origin is TEMPLATE" if resource.resource_origin.value == "template" else "",
+            satisfied=origin_value != "template",
+            detail="Resource origin is TEMPLATE" if origin_value == "template" else "",
         ))
 
         results.append(_PrerequisiteResult(
             name="status_active",
-            satisfied=resource.status.value == "active",
-            detail=f"Resource status is {resource.status.value}" if resource.status.value != "active" else "",
+            satisfied=status_value == "active",
+            detail=f"Resource status is {status_value}" if status_value != "active" else "",
         ))
 
         # Resource-kind-specific prerequisites validated via evidence
@@ -346,12 +350,17 @@ class CanonicalResourceActivationAuthority:
                     AgentInstallationState.AVAILABLE,
                 )
                 if resource.installation_state not in valid_states:
+                    # G9: snapshots expose plain str; normalize for the detail.
+                    install_value = getattr(
+                        resource.installation_state, "value",
+                        resource.installation_state,
+                    )
                     results.append(_PrerequisiteResult(
                         name="agent_governed_identity",
                         satisfied=False,
                         detail=(
                             f"Evidence {agent_evidence.evidence_id} exists but "
-                            f"installation_state={resource.installation_state.value}"
+                            f"installation_state={install_value}"
                         ),
                     ))
                 else:

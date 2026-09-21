@@ -190,7 +190,8 @@ class ActivationApplicationBoundary:
                 reason="resource_is_template",
             )
 
-        if resource.resource_origin.value == "template":
+        # G9: RRM snapshots expose plain str fields (not Enums); normalize.
+        if getattr(resource.resource_origin, "value", resource.resource_origin) == "template":
             return ResourceActivationResult(
                 success=False, request_id=decision.request_id,
                 decision_id=decision_id, resource_id=decision.resource_id,
@@ -335,10 +336,12 @@ class ActivationApplicationBoundary:
         """Re-validate structural invariants at application time."""
         if resource.is_template:
             return _RevalidationResult(False, "not_template", "Resource became template")
-        if resource.resource_origin.value == "template":
+        # G9: RRM snapshots expose plain str fields (not Enums); normalize.
+        if getattr(resource.resource_origin, "value", resource.resource_origin) == "template":
             return _RevalidationResult(False, "origin_not_template", "Resource origin is TEMPLATE")
         if resource.status != ResourceStatus.ACTIVE:
-            return _RevalidationResult(False, "status_active", f"Status is {resource.status.value}")
+            status_value = getattr(resource.status, "value", resource.status)
+            return _RevalidationResult(False, "status_active", f"Status is {status_value}")
 
         return _RevalidationResult(True, "all_pre_activation_prerequisites_satisfied")
 
@@ -389,7 +392,12 @@ class ActivationApplicationBoundary:
         elif resource_type == ResourceType.AGENT:
             if resource.is_enabled:
                 fields.append("is_enabled")
-            fields.append(f"installation_state={resource.installation_state.value}")
+            # G9: snapshots expose plain str; normalize instead of .value.
+            install_value = getattr(
+                resource.installation_state, "value",
+                resource.installation_state,
+            )
+            fields.append(f"installation_state={install_value}")
         elif resource_type == ResourceType.EXECUTION_ENVIRONMENT:
             if resource.is_discovered:
                 fields.append("is_discovered")

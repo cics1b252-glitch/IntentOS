@@ -454,10 +454,15 @@ class CanonicalActivationEvidenceAuthority:
             AgentInstallationState.AVAILABLE,
         )
         if resource.installation_state not in valid_states:
+            # G9: snapshots expose plain str; normalize instead of .value.
+            install_value = getattr(
+                resource.installation_state, "value",
+                resource.installation_state,
+            )
             return EvidenceValidationResult(
                 valid=False,
                 evidence_id=evidence.evidence_id,
-                reason=f"agent_installation_state_invalid: {resource.installation_state.value}",
+                reason=f"agent_installation_state_invalid: {install_value}",
             )
         return EvidenceValidationResult(
             valid=True,

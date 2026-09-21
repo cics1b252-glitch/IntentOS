@@ -717,9 +717,16 @@ def test_t36_no_productive_executor_rebind():
     public = {name for name, member in inspect.getmembers(
         MissionActionAuthority, predicate=inspect.isfunction)
         if not name.startswith("_")}
+    # M33.2B explicit, reviewed surface growth: grant_delegation and
+    # revoke_delegation are the ONLY delegation mutation paths, confined
+    # to durable MissionRecord transitions validated against a live
+    # authorized parent. They grant no RRM, registry, discovery,
+    # rebind, or dispatch powers (asserted below); enforcement stays
+    # with the guard + rebind, which this test does not exempt.
     assert public == {"transition_action", "decide_replay",
                       "execution_identity_for", "restart_posture_for",
-                      "verification_freshness_for"}
+                      "verification_freshness_for",
+                      "grant_delegation", "revoke_delegation"}
     # No productive binding constructs: no registry/discovery imports,
     # no rebind/lookup/registration calls, no re-registration references.
     source = open(aa.__file__).read()

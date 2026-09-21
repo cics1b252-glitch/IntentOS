@@ -287,6 +287,7 @@ class ProductiveDispatchGuard:
                 decision="",
             )
         self._verify_spec_against_durable(spec, data)
+        self._verify_delegation(spec, data)
         try:
             decision = self._authority.decide_replay(
                 spec.mission_id,
@@ -489,6 +490,39 @@ class ProductiveDispatchGuard:
                     f"Presented {label} does not match durable authority",
                     decision="",
                 )
+
+    @staticmethod
+    def _verify_delegation(
+        spec: DispatchAttemptSpec, data: Dict[str, Any]
+    ) -> None:
+        """Delegated actions additionally prove their derivation at handoff.
+
+        M33.2B: when the durable action carries a delegation grant, the
+        presenter must be the bound delegate and the full pure proof
+        (chain walk, subset re-proof, liveness, expiry, depth) must hold.
+        Actions without a grant pass through untouched. This is a
+        conjunct inside acquire(): it never replaces spec verification,
+        replay posture, or the durable pre-handoff commits.
+        """
+        actions = data.get("action_states", {})
+        action = actions.get(spec.action_id)
+        if not isinstance(action, dict):
+            return
+        if not (action.get("delegation_id") or ""):
+            return
+        from intent_kernel.mission.delegation import verify_grant_dispatch
+
+        ok, reason, _chain = verify_grant_dispatch(
+            data,
+            spec.action_id,
+            presenter_executor_id=spec.executor_logical_id,
+            now_iso=utc_iso(),
+        )
+        if not ok:
+            raise DispatchGuardError(
+                f"Delegation refused at handoff: {reason}",
+                decision="",
+            )
 
     @staticmethod
     def _current_state(data: Dict[str, Any], action_id: str) -> ActionState:

@@ -174,6 +174,19 @@ class MissionActionAuthority:
     MUST NOT authorize an action.
     """
 
+    #: Action states from which a delegation may be derived (M33.2B).
+    #: The parent authority must be live: authorized and operating, never
+    #: history. PENDING never authorized anything; RECONFIRMATION_REQUIRED
+    #: awaits fresh confirmation (deriving from it would launder
+    #: unconfirmed authority); post-dispatch states (RESULT_RECORDED and
+    #: beyond) are spent history, not current authority; FAILED /
+    #: AMBIGUOUS_EFFECT / COMPLETED are terminally closed.
+    _DELEGATION_PARENT_LIVE_STATES = frozenset({
+        ActionState.AUTHORIZED,
+        ActionState.DISPATCH_INTENT_RECORDED,
+        ActionState.DISPATCHING,
+    })
+
     def __init__(
         self,
         store: MissionRecordStorePort,
@@ -622,6 +635,381 @@ class MissionActionAuthority:
                 record=MissionRecord.from_dict(reloaded),
             )
 
+    # -- governed delegation (M33.2B) -----------------------------------------
+
+    def grant_delegation(
+        self,
+        mission_id: str,
+        child_action_id: str,
+        expected_mission_revision: int,
+        *,
+        parent_action_id: str,
+        delegate_agent_id: str,
+        delegate_governed_registration_id: str = "",
+        allowed_capabilities: Any = (),
+        allowed_resources: Any = (),
+        allowed_targets: Any = (),
+        max_risk_level: str = "",
+        max_timeout_seconds: float = 0.0,
+        require_verification: Optional[bool] = None,
+        max_side_effect: str = "",
+        expires_at: str = "",
+    ) -> TransitionResult:
+        """Derive a non-escalating delegation grant for one action.
+
+        AUTHORITY(CHILD) ⊆ AUTHORITY(PARENT): every narrowed dimension is
+        proven mechanically before anything is persisted. Delegation is
+        mission-scoped (parent and child live in the same record;
+        cross-mission delegation is structurally rejected) and derived
+        only from a live-authorized parent action — planners, capability
+        registrations, agent identity, memory, or presented approval
+        artifacts can never create it. The delegation identity is minted
+        here, never caller-supplied. Direct record injection cannot
+        create usable delegation authority: ordinary commit() rejects
+        delegation field changes, and enforcement re-proves the
+        derivation at every handoff.
+        """
+        from intent_kernel.mission import delegation as _delegation
+
+        if not isinstance(mission_id, str) or not mission_id.strip():
+            raise ActionTransitionError("mission_id must be a non-empty string")
+        if not isinstance(child_action_id, str) or not child_action_id.strip():
+            raise ActionTransitionError("child_action_id must be a non-empty string")
+        if not isinstance(parent_action_id, str) or not parent_action_id.strip():
+            raise ActionTransitionError("parent_action_id must be a non-empty string")
+        if child_action_id == parent_action_id:
+            raise ActionTransitionError(
+                "delegation parent and child must be distinct actions"
+            )
+        if not isinstance(delegate_agent_id, str) or not delegate_agent_id.strip():
+            raise ActionTransitionError(
+                "delegate_agent_id must be a non-empty governed agent id "
+                "(V1 delegates to governed agents only)"
+            )
+        if not isinstance(delegate_governed_registration_id, str) or not (
+            delegate_governed_registration_id or ""
+        ).strip():
+            raise ActionTransitionError(
+                "delegate_governed_registration_id must be non-empty: V1 "
+                "delegates to governed agents only, and the delegate "
+                "registration is pinned at creation for handoff revalidation"
+            )
+
+        data = self._load_data(mission_id)
+        durable_revision = data.get("revision")
+        if durable_revision != expected_mission_revision:
+            raise ActionTransitionError(
+                f"Durable mission revision is {durable_revision}, "
+                f"caller expected {expected_mission_revision}"
+            )
+        action_states = data.get("action_states", {})
+        child = action_states.get(child_action_id)
+        if not isinstance(child, dict):
+            raise ActionTransitionError(
+                f"No durable child action: {child_action_id}"
+            )
+        if (child.get("delegation_id") or "") != "":
+            raise ActionTransitionError(
+                f"Action already carries a delegation grant: {child_action_id} "
+                "(one grant per action; revoke-then-regrant is not permitted)"
+            )
+        parent = action_states.get(parent_action_id)
+        if not isinstance(parent, dict):
+            raise ActionTransitionError(
+                f"No durable parent action: {parent_action_id} "
+                "(unknown parents fail closed)"
+            )
+        parent_state = self._parse_state(parent.get("state"), parent_action_id)
+        if parent_state not in self._DELEGATION_PARENT_LIVE_STATES:
+            raise ActionTransitionError(
+                f"Parent action is not live-authorized: {parent_action_id} "
+                f"is {parent_state.value}"
+            )
+
+        now_iso = utc_iso()
+        # Stillborn grants (already expired at creation) are rejected:
+        # authority is never manufactured already-dead.
+        if (expires_at or "") != "" and (expires_at or "") <= now_iso:
+            raise ActionTransitionError(
+                "Delegation expires_at is already past: stillborn grants "
+                "fail closed"
+            )
+        # Nested edge: the parent grant itself must be currently valid.
+        # Root edge (parent carries no grant): the parent action is the root.
+        parent_grant = None
+        parent_chain: list = []
+        parent_grant_id = str(parent.get("delegation_id") or "")
+        if parent_grant_id:
+            ok, reason, parent_chain = _delegation.verify_grant_dispatch(
+                data,
+                parent_action_id,
+                presenter_executor_id=None,
+                now_iso=now_iso,
+            )
+            if not ok:
+                raise ActionTransitionError(
+                    f"Parent delegation is not currently valid: {reason}"
+                )
+            parent_grant = _delegation.grant_view(parent)
+            if parent_grant is None:
+                raise ActionTransitionError("Parent grant unreadable")
+            if str(parent_grant.get("delegation_id") or "") != parent_grant_id:
+                raise ActionTransitionError("Parent grant identity mismatch")
+            if len(parent_chain) + 1 > _delegation.MAX_DELEGATION_DEPTH:
+                raise ActionTransitionError(
+                    "Delegation nesting depth overflow: the new grant "
+                    "would exceed the bound"
+                )
+        # Ceiling inheritance is resolved here, at creation: empty means
+        # "inherit parent effective" on nested edges (root edges must be
+        # explicit — enforced by the edge proof). Stored grants are
+        # therefore always explicit; handoff re-proof needs no resolution.
+        if not isinstance(max_timeout_seconds, (int, float)) or isinstance(
+            max_timeout_seconds, bool
+        ):
+            raise ActionTransitionError("max_timeout_seconds must be numeric")
+        if require_verification is not None and not isinstance(
+            require_verification, bool
+        ):
+            raise ActionTransitionError(
+                "require_verification must be a bool or None"
+            )
+        if parent_grant is not None:
+            effective = _delegation.resolve_effective_ceilings(parent_chain)
+            if effective is None:
+                raise ActionTransitionError(
+                    "Parent ceilings are malformed; cannot derive"
+                )
+            if not max_risk_level:
+                max_risk_level = str(effective.get("max_risk_level", "") or "")
+            if not max_timeout_seconds or max_timeout_seconds <= 0:
+                filled_timeout = effective.get("max_timeout_seconds", 0)
+                max_timeout_seconds = filled_timeout
+            if require_verification is None:
+                require_verification = effective.get("require_verification", None)
+            if not max_side_effect:
+                max_side_effect = str(effective.get("max_side_effect", "") or "")
+
+        # Delegator identity is DERIVED from the parent durable binding,
+        # never caller-supplied: the holder of the parent authority.
+        delegator_grid = str(
+            parent.get("expected_governed_registration_id", "") or ""
+        )
+        delegator_agent = str(
+            parent.get("expected_executor_logical_id", "") or ""
+        )
+        # Root snapshot pins the original ceiling against chain splicing.
+        if parent_grant is None:
+            root_mission_id = mission_id
+            root_action_id = parent_action_id
+            root_grid = delegator_grid
+            try:
+                root_gen = int(parent.get("expected_resource_generation", 0) or 0)
+            except (TypeError, ValueError):
+                raise ActionTransitionError(
+                    "Parent resource generation is malformed"
+                )
+        else:
+            root_mission_id = str(
+                parent_grant.get("delegation_root_mission_id", "") or ""
+            )
+            root_action_id = str(
+                parent_grant.get("delegation_root_action_id", "") or ""
+            )
+            root_grid = str(
+                parent_grant.get("delegation_root_governed_registration_id", "")
+                or ""
+            )
+            try:
+                root_gen = int(
+                    parent_grant.get("delegation_root_generation", 0) or 0
+                )
+            except (TypeError, ValueError):
+                raise ActionTransitionError("Parent root generation is malformed")
+            if not root_mission_id or not root_action_id:
+                raise ActionTransitionError("Parent root reference is malformed")
+
+        grant = {
+            "delegation_id": _delegation.mint_delegation_id(),
+            "delegation_parent_mission_id": mission_id,
+            "delegation_parent_action_id": parent_action_id,
+            "delegation_parent_delegation_id": parent_grant_id,
+            "delegation_root_mission_id": root_mission_id,
+            "delegation_root_action_id": root_action_id,
+            "delegation_root_governed_registration_id": root_grid,
+            "delegation_root_generation": root_gen,
+            "delegation_delegator_grid": delegator_grid,
+            "delegation_delegator_agent_id": delegator_agent,
+            "delegation_delegate_agent_id": delegate_agent_id,
+            "delegation_delegate_grid": str(
+                delegate_governed_registration_id or ""
+            ),
+            "delegation_allowed_capabilities": list(allowed_capabilities or ()),
+            "delegation_allowed_resources": [
+                dict(r) if isinstance(r, dict) else r
+                for r in (allowed_resources or ())
+            ],
+            "delegation_allowed_targets": list(allowed_targets or ()),
+            "delegation_max_risk_level": str(max_risk_level or ""),
+            "delegation_max_timeout_seconds": max_timeout_seconds,
+            "delegation_require_verification": require_verification,
+            "delegation_max_side_effect": str(max_side_effect or ""),
+            "delegation_created_at": now_iso,
+            "delegation_expires_at": str(expires_at or ""),
+            "delegation_state": "ACTIVE",
+            "delegation_revoked_at": "",
+            "delegation_revoke_reason": "",
+        }
+        # Shape validation first (fail fast on malformed proposals),
+        # then normalize to the canonical JSON-safe grant mapping.
+        try:
+            grant = _delegation.DelegationGrant.from_dict(grant).to_dict()
+        except _delegation.DelegationError as exc:
+            raise ActionTransitionError(
+                f"Malformed delegation proposal: {exc}"
+            ) from exc
+
+        # Prove child ⊆ parent against the effective parent view.
+        parent_view = _delegation.resolve_parent_view(
+            parent, self._plan_capability(data, parent_action_id), parent_grant
+        )
+        if parent_grant is not None:
+            # Nested edge: resolve inherit-empty ceilings against the
+            # parent effective values so the stored grant is always
+            # explicit (handoff re-proof needs no resolution).
+            effective = _delegation.resolve_effective_ceilings(parent_chain)
+            if effective is None:
+                raise ActionTransitionError(
+                    "Parent ceilings are malformed; cannot derive"
+                )
+            filled = dict(grant)
+            if not filled["delegation_max_risk_level"]:
+                filled["delegation_max_risk_level"] = str(
+                    effective.get("max_risk_level", "") or ""
+                )
+            if (
+                not filled["delegation_max_timeout_seconds"]
+                or filled["delegation_max_timeout_seconds"] <= 0
+            ):
+                filled["delegation_max_timeout_seconds"] = effective.get(
+                    "max_timeout_seconds", 0
+                )
+            if filled["delegation_require_verification"] is None:
+                filled["delegation_require_verification"] = effective.get(
+                    "require_verification", None
+                )
+            if not filled["delegation_max_side_effect"]:
+                filled["delegation_max_side_effect"] = str(
+                    effective.get("max_side_effect", "") or ""
+                )
+            try:
+                grant = _delegation.DelegationGrant.from_dict(filled).to_dict()
+            except _delegation.DelegationError as exc:
+                raise ActionTransitionError(
+                    f"Malformed derived delegation: {exc}"
+                ) from exc
+        child_view = {
+            "capability": self._plan_capability(data, child_action_id) or None,
+            "resource_id": str(child.get("expected_resource_id", "") or ""),
+            "grid": str(child.get("expected_governed_registration_id", "") or ""),
+            "generation": child.get("expected_resource_generation", 0),
+            "target": str(child.get("expected_resource_id", "") or ""),
+        }
+        try:
+            child_view["generation"] = int(child_view["generation"] or 0)
+        except (TypeError, ValueError):
+            raise ActionTransitionError("Child resource generation is malformed")
+        proved, reason = _delegation.prove_edge(grant, child_view, parent_view)
+        if not proved:
+            raise ActionTransitionError(
+                f"Delegation would escalate authority: {reason}"
+            )
+
+        outcome = self._store.transition_delegation_grant(
+            mission_id, child_action_id, expected_mission_revision, grant
+        )
+        if outcome.outcome != "committed":
+            raise ActionTransitionError(
+                f"Durable delegation commit failed: {outcome.outcome} "
+                f"(rev={outcome.revision}): {outcome.reason}"
+            )
+        reloaded = self._load_data(mission_id)
+        current = self._parse_state(
+            reloaded.get("action_states", {}).get(child_action_id, {}).get("state"),
+            child_action_id,
+        )
+        return TransitionResult(
+            mission_id=mission_id,
+            action_id=child_action_id,
+            previous_state=current,
+            new_state=current,
+            mission_revision=durable_revision + 1,
+            record=MissionRecord.from_dict(reloaded),
+        )
+
+    def revoke_delegation(
+        self,
+        mission_id: str,
+        action_id: str,
+        expected_mission_revision: int,
+        reason: str = "",
+    ) -> TransitionResult:
+        """Revoke a delegation grant (ACTIVE -> REVOKED, terminal).
+
+        Already-revoked grants return an idempotent result with no state
+        change and no revision bump: retries can never recreate authority
+        and history is preserved. Actions without a grant are rejected.
+        """
+        data = self._load_data(mission_id)
+        durable_revision = data.get("revision")
+        if durable_revision != expected_mission_revision:
+            raise ActionTransitionError(
+                f"Durable mission revision is {durable_revision}, "
+                f"caller expected {expected_mission_revision}"
+            )
+        action = self._action(data, action_id)
+        if not (action.get("delegation_id") or ""):
+            raise ActionTransitionError(
+                f"Action carries no delegation grant: {action_id}"
+            )
+        current = self._parse_state(action.get("state"), action_id)
+        outcome = self._store.transition_delegation_revoke(
+            mission_id, action_id, expected_mission_revision, str(reason or "")
+        )
+        if outcome.outcome == "already_revoked":
+            return TransitionResult(
+                mission_id=mission_id,
+                action_id=action_id,
+                previous_state=current,
+                new_state=current,
+                mission_revision=durable_revision,
+                record=MissionRecord.from_dict(data),
+            )
+        if outcome.outcome != "committed":
+            raise ActionTransitionError(
+                f"Durable revocation commit failed: {outcome.outcome} "
+                f"(rev={outcome.revision}): {outcome.reason}"
+            )
+        reloaded = self._load_data(mission_id)
+        return TransitionResult(
+            mission_id=mission_id,
+            action_id=action_id,
+            previous_state=current,
+            new_state=current,
+            mission_revision=durable_revision + 1,
+            record=MissionRecord.from_dict(reloaded),
+        )
+
+    def _plan_capability(self, data: Dict[str, Any], action_id: str) -> str:
+        """Plan capability for one action (tolerant; "" when absent)."""
+        try:
+            for entry in data.get("plan", []) or ():
+                if isinstance(entry, dict) and entry.get("action_id") == action_id:
+                    return str(entry.get("capability", "") or "")
+        except (TypeError, AttributeError):
+            pass
+        return ""
+
     # -- replay decision (read-only) ------------------------------------------
 
     def decide_replay(
@@ -665,6 +1053,20 @@ class MissionActionAuthority:
                     "Presented execution identity does not match durable "
                     "authority (stale or mismatched intent)"
                 )
+
+        # M33.2B: a revoked, expired, or otherwise invalid delegation
+        # can never dispatch, regardless of action state. Direct callers
+        # of decide_replay get the same verdict as the guard path.
+        if (action.get("delegation_id") or "") != "":
+            from intent_kernel.mission import delegation as _delegation
+            _ok, _reason, _chain = _delegation.verify_grant_dispatch(
+                data,
+                action_id,
+                presenter_executor_id=None,
+                now_iso=utc_iso(),
+            )
+            if not _ok:
+                return ReplayDecision.DO_NOT_REDISPATCH
 
         if state is ActionState.PENDING:
             if effective_confirmation_required:

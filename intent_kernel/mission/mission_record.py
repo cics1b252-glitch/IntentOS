@@ -145,6 +145,36 @@ class DurableActionState:
     verification_proof_digest: str = ""
     confirmation_required: bool = False
     confirmation_basis_digest: str = ""
+    # M33.2B governed delegation: flat grant fields. Empty delegation_id
+    # means "no delegation on this action" and every other delegation
+    # field must then be at its default (partial grants fail closed).
+    # A non-empty delegation_id carries a complete grant validated at
+    # creation by MissionActionAuthority; ordinary commit() rejects any
+    # delegation field change (see store _require_immutable_identity).
+    delegation_id: str = ""
+    delegation_parent_mission_id: str = ""
+    delegation_parent_action_id: str = ""
+    delegation_parent_delegation_id: str = ""
+    delegation_root_mission_id: str = ""
+    delegation_root_action_id: str = ""
+    delegation_root_governed_registration_id: str = ""
+    delegation_root_generation: int = 0
+    delegation_delegator_grid: str = ""
+    delegation_delegator_agent_id: str = ""
+    delegation_delegate_agent_id: str = ""
+    delegation_delegate_grid: str = ""
+    delegation_allowed_capabilities: tuple = ()
+    delegation_allowed_resources: tuple = ()
+    delegation_allowed_targets: tuple = ()
+    delegation_max_risk_level: str = ""
+    delegation_max_timeout_seconds: float = 0.0
+    delegation_require_verification: Optional[bool] = None
+    delegation_max_side_effect: str = ""
+    delegation_created_at: str = ""
+    delegation_expires_at: str = ""
+    delegation_state: str = "NONE"
+    delegation_revoked_at: str = ""
+    delegation_revoke_reason: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.action_id, str) or not self.action_id.strip():
@@ -153,6 +183,7 @@ class DurableActionState:
             raise ValueError("node_id must be a non-empty string")
         if not isinstance(self.state, ActionState):
             raise ValueError("state must be an ActionState")
+        self._validate_delegation_fields()
         for label in ("expected_resource_id",
                       "expected_governed_registration_id",
                       "expected_executor_kind", "expected_executor_logical_id",
@@ -196,6 +227,160 @@ class DurableActionState:
                 self, "verification_evidence",
                 detach_json_value(self.verification_evidence),
             )
+        self._validate_delegation_fields()
+
+    def _validate_delegation_fields(self) -> None:
+        """M33.2B: delegation grant shape + all-or-nothing rule.
+
+        Empty delegation_id means "no delegation": every grant field must
+        then be at its default, so partial/forged grants fail closed at
+        construction. A set delegation_id requires a complete grant:
+        valid state, non-empty parent/delegate/capability identity, and
+        well-typed scope/ceiling/lifetime fields. Subset semantics
+        (child ⊆ parent) are proven by MissionActionAuthority at grant
+        creation and re-proven at handoff — not here.
+        """
+        gid = self.delegation_id
+        if not isinstance(gid, str):
+            raise ValueError("delegation_id must be a string")
+        str_fields = (
+            "delegation_parent_mission_id",
+            "delegation_parent_action_id",
+            "delegation_parent_delegation_id",
+            "delegation_root_mission_id",
+            "delegation_root_action_id",
+            "delegation_root_governed_registration_id",
+            "delegation_delegator_grid",
+            "delegation_delegator_agent_id",
+            "delegation_delegate_agent_id",
+            "delegation_delegate_grid",
+            "delegation_max_risk_level",
+            "delegation_max_side_effect",
+            "delegation_created_at",
+            "delegation_expires_at",
+            "delegation_state",
+            "delegation_revoked_at",
+            "delegation_revoke_reason",
+        )
+        for label in str_fields:
+            if not isinstance(getattr(self, label), str):
+                raise ValueError(f"{label} must be a string")
+        if not isinstance(self.delegation_root_generation, int) or isinstance(
+            self.delegation_root_generation, bool
+        ):
+            raise ValueError("delegation_root_generation must be an int")
+        if not isinstance(self.delegation_max_timeout_seconds, (int, float)) or isinstance(
+            self.delegation_max_timeout_seconds, bool
+        ):
+            raise ValueError("delegation_max_timeout_seconds must be numeric")
+        if self.delegation_require_verification is not None and not isinstance(
+            self.delegation_require_verification, bool
+        ):
+            raise ValueError("delegation_require_verification must be a bool or None")
+        # Normalize sequence fields (JSON round-trips tuples to lists).
+        caps = self.delegation_allowed_capabilities or ()
+        if not isinstance(caps, (tuple, list)) or not all(
+            isinstance(c, str) for c in caps
+        ):
+            raise ValueError("delegation_allowed_capabilities must be strings")
+        object.__setattr__(self, "delegation_allowed_capabilities", tuple(caps))
+        targets = self.delegation_allowed_targets or ()
+        if not isinstance(targets, (tuple, list)) or not all(
+            isinstance(t, str) for t in targets
+        ):
+            raise ValueError("delegation_allowed_targets must be strings")
+        object.__setattr__(self, "delegation_allowed_targets", tuple(targets))
+        resources = self.delegation_allowed_resources or ()
+        if not isinstance(resources, (tuple, list)):
+            raise ValueError("delegation_allowed_resources must be a sequence")
+        normalized = []
+        for item in resources:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    "delegation_allowed_resources items must be mappings"
+                )
+            for key in ("resource_id", "governed_registration_id", "generation"):
+                if key not in item:
+                    raise ValueError(
+                        "delegation_allowed_resources items must carry "
+                        "resource_id, governed_registration_id, generation"
+                    )
+            if not isinstance(item["resource_id"], str) or not item["resource_id"].strip():
+                raise ValueError("delegated resource_id must be non-empty")
+            if not isinstance(item["governed_registration_id"], str):
+                raise ValueError("delegated governed_registration_id must be a string")
+            if not isinstance(item["generation"], int) or isinstance(item["generation"], bool):
+                raise ValueError("delegated generation must be an int")
+            normalized.append({
+                "resource_id": item["resource_id"],
+                "governed_registration_id": item["governed_registration_id"],
+                "generation": item["generation"],
+            })
+        object.__setattr__(self, "delegation_allowed_resources", tuple(normalized))
+        if self.delegation_state not in ("NONE", "ACTIVE", "REVOKED"):
+            raise ValueError(
+                f"delegation_state must be NONE, ACTIVE, or REVOKED, "
+                f"got {self.delegation_state!r}"
+            )
+        if gid == "":
+            # No delegation: every grant field must be at its default.
+            if (
+                self.delegation_parent_mission_id
+                or self.delegation_parent_action_id
+                or self.delegation_parent_delegation_id
+                or self.delegation_root_mission_id
+                or self.delegation_root_action_id
+                or self.delegation_root_governed_registration_id
+                or self.delegation_root_generation != 0
+                or self.delegation_delegator_grid
+                or self.delegation_delegator_agent_id
+                or self.delegation_delegate_agent_id
+                or self.delegation_delegate_grid
+                or self.delegation_allowed_capabilities
+                or self.delegation_allowed_resources
+                or self.delegation_allowed_targets
+                or self.delegation_max_risk_level
+                or self.delegation_max_timeout_seconds not in (0, 0.0)
+                or self.delegation_require_verification is not None
+                or self.delegation_max_side_effect
+                or self.delegation_created_at
+                or self.delegation_expires_at
+                or self.delegation_state != "NONE"
+                or self.delegation_revoked_at
+                or self.delegation_revoke_reason
+            ):
+                raise ValueError(
+                    "delegation fields set without delegation_id "
+                    "(partial grants fail closed)"
+                )
+        else:
+            # Complete grant required.
+            for label in (
+                "delegation_parent_mission_id",
+                "delegation_parent_action_id",
+                "delegation_root_mission_id",
+                "delegation_root_action_id",
+                "delegation_delegator_grid",
+                "delegation_delegate_agent_id",
+            ):
+                if not getattr(self, label).strip():
+                    raise ValueError(
+                        f"{label} must be non-empty when delegation_id is set"
+                    )
+            if not self.delegation_allowed_capabilities:
+                raise ValueError(
+                    "delegation_allowed_capabilities must be non-empty "
+                    "when delegation_id is set"
+                )
+            if self.delegation_state not in ("ACTIVE", "REVOKED"):
+                raise ValueError(
+                    "delegation_state must be ACTIVE or REVOKED "
+                    "when delegation_id is set"
+                )
+            if self.delegation_state == "REVOKED" and not self.delegation_revoked_at:
+                raise ValueError(
+                    "delegation_revoked_at must be set when state is REVOKED"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

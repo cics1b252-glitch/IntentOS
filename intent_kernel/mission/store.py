@@ -76,6 +76,44 @@ class MissionRecordStorePort(ABC):
         ...
 
     @abstractmethod
+    def transition_delegation_grant(
+        self,
+        mission_id: str,
+        action_id: str,
+        expected_revision: int,
+        grant: dict,
+    ) -> "DurableCommitResult":
+        """Canonical delegation-grant attachment (M33.2B).
+
+        Only callable by MissionActionAuthority. The store loads the
+        authoritative durable state, verifies the action carries no
+        grant yet, validates the grant shape, applies the delegation
+        fields (and rebinds the confirmation basis when the action
+        requires confirmation), and commits revision N -> N+1. The
+        caller does not supply a full candidate record. The grant is a
+        plain JSON-safe mapping; see mission.delegation for the schema.
+        """
+        ...
+
+    @abstractmethod
+    def transition_delegation_revoke(
+        self,
+        mission_id: str,
+        action_id: str,
+        expected_revision: int,
+        reason: str = "",
+    ) -> "DurableCommitResult":
+        """Canonical delegation revocation (M33.2B).
+
+        Only callable by MissionActionAuthority. Transitions a grant
+        from ACTIVE to REVOKED, stamping revoked_at/reason. Already
+        revoked grants return an explicit already_revoked outcome with
+        no state change and no revision bump. History is preserved:
+        revocation never deletes the grant.
+        """
+        ...
+
+    @abstractmethod
     def exists(self, mission_id: str) -> bool:
         """Check if a canonical mission file exists (no content read)."""
         ...

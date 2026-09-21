@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from intent_kernel.mission.mission_record import MissionRecord, ActionState, detach_json_value
+from intent_kernel.mission.delegation import confirmation_basis_for_grant
 from intent_kernel.mission.execution_identity import (
     compute_local_execution_identity,
 )
@@ -409,6 +410,11 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
             self._validate_candidate_state(candidate_record)
             self._require_immutable_identity(candidate_record, durable_data, True)
             self._validate_transition(candidate_record, durable_data)
+            # M33.2B §8: a confirmation bound on a delegated action must
+            # carry the canonical delegation-bound digest.
+            self._require_delegation_confirmation_basis(
+                candidate_record.to_dict(), action_id
+            )
 
             return self._atomic_write(candidate_record)
 
@@ -479,6 +485,338 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                     f"confirmation_basis_digest (durable: '{durable_confirmation_basis}', "
                     f"requested: '{confirmation_basis_digest}')"
                 )
+
+    # --- Delegation transitions (M33.2B) ---
+
+    #: Delegation fields protected from ordinary commit(); only the
+    #: canonical delegation transitions below may mutate them — the same
+    #: hardening pattern as confirmation fields (M32B-3).
+    _DELEGATION_PROTECTED_FIELDS = (
+        "delegation_id",
+        "delegation_parent_mission_id",
+        "delegation_parent_action_id",
+        "delegation_parent_delegation_id",
+        "delegation_root_mission_id",
+        "delegation_root_action_id",
+        "delegation_root_governed_registration_id",
+        "delegation_root_generation",
+        "delegation_delegator_grid",
+        "delegation_delegator_agent_id",
+        "delegation_delegate_agent_id",
+        "delegation_delegate_grid",
+        "delegation_allowed_capabilities",
+        "delegation_allowed_resources",
+        "delegation_allowed_targets",
+        "delegation_max_risk_level",
+        "delegation_max_timeout_seconds",
+        "delegation_require_verification",
+        "delegation_max_side_effect",
+        "delegation_created_at",
+        "delegation_expires_at",
+        "delegation_state",
+        "delegation_revoked_at",
+        "delegation_revoke_reason",
+    )
+
+    def transition_delegation_grant(
+        self,
+        mission_id: str,
+        action_id: str,
+        expected_revision: int,
+        grant: Dict[str, Any],
+    ) -> DurableCommitResult:
+        """Attach a delegation grant to one action (M33.2B).
+
+        Only MissionActionAuthority may call this. The store loads the
+        authoritative durable state, verifies the action carries no grant
+        yet, validates the grant shape, applies the delegation fields (and
+        rebinds the confirmation basis to the canonical delegated digest
+        when the action requires confirmation), and commits revision
+        N -> N+1. The caller does not supply a full candidate record.
+        """
+        with self._lock:
+            self._check_poisoned()
+
+            if not isinstance(grant, dict) or not grant.get("delegation_id"):
+                raise MissionRecordValidationError(
+                    "Delegation grant must be a mapping with delegation_id"
+                )
+            try:
+                with open(self._mission_file(mission_id), "r", encoding="utf-8") as f:
+                    durable_data = json.load(f)
+            except FileNotFoundError:
+                return DurableCommitResult(
+                    outcome="not_found",
+                    revision=0,
+                    reason=f"No durable mission to update: {mission_id}",
+                )
+            except (json.JSONDecodeError, OSError) as exc:
+                raise MissionRecordValidationError(
+                    f"Cannot anchor commit: durable mission unreadable: {exc}"
+                ) from exc
+            self._validate_loaded_state(durable_data)
+
+            durable_revision = durable_data.get("revision")
+            if durable_revision != expected_revision:
+                return DurableCommitResult(
+                    outcome="revision_mismatch",
+                    revision=durable_revision,
+                    reason=f"Durable revision is {durable_revision}, "
+                    f"writer expected {expected_revision}",
+                )
+
+            durable_actions = durable_data.get("action_states", {})
+            if action_id not in durable_actions:
+                return DurableCommitResult(
+                    outcome="validation_failed",
+                    revision=durable_revision,
+                    reason=f"Action not found: {action_id}",
+                )
+            durable_action = durable_actions[action_id]
+            if (durable_action.get("delegation_id") or "") != "":
+                return DurableCommitResult(
+                    outcome="validation_failed",
+                    revision=durable_revision,
+                    reason=f"Action already carries a delegation grant: {action_id}",
+                )
+
+            candidate_data = dict(durable_data)
+            candidate_data["revision"] = expected_revision + 1
+            candidate_data["updated_at"] = utc_iso()
+            candidate_actions = dict(candidate_data["action_states"])
+            candidate_action = dict(durable_action)
+            for key, value in grant.items():
+                if key in self._DELEGATION_PROTECTED_FIELDS:
+                    candidate_action[key] = detach_json_value(value)
+            candidate_action["delegation_state"] = "ACTIVE"
+            # M33.2B §8: granting rebinds an outstanding confirmation
+            # requirement to the delegated semantics. Approvals issued
+            # before the grant (bound to non-delegated semantics) can
+            # never satisfy the new basis.
+            if candidate_action.get("confirmation_required") is True:
+                candidate_action["confirmation_basis_digest"] = (
+                    self._canonical_delegation_basis(candidate_data, action_id)
+                )
+            candidate_actions[action_id] = candidate_action
+            candidate_data["action_states"] = candidate_actions
+
+            try:
+                candidate_record = MissionRecord.from_dict(candidate_data)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise MissionRecordValidationError(
+                    f"Invalid delegation candidate: {exc}"
+                ) from exc
+
+            self._validate_candidate_state(candidate_record)
+            self._require_action_unchanged_except_delegation(
+                candidate_record, durable_data, action_id
+            )
+            return self._atomic_write(candidate_record)
+
+    def transition_delegation_revoke(
+        self,
+        mission_id: str,
+        action_id: str,
+        expected_revision: int,
+        reason: str = "",
+    ) -> DurableCommitResult:
+        """Revoke a delegation grant (M33.2B: ACTIVE -> REVOKED, terminal).
+
+        Only MissionActionAuthority may call this. Already-revoked grants
+        return an explicit already_revoked outcome with no state change
+        and no revision bump (idempotent without recreating authority).
+        History is preserved: revocation never deletes the grant.
+        """
+        with self._lock:
+            self._check_poisoned()
+
+            try:
+                with open(self._mission_file(mission_id), "r", encoding="utf-8") as f:
+                    durable_data = json.load(f)
+            except FileNotFoundError:
+                return DurableCommitResult(
+                    outcome="not_found",
+                    revision=0,
+                    reason=f"No durable mission to update: {mission_id}",
+                )
+            except (json.JSONDecodeError, OSError) as exc:
+                raise MissionRecordValidationError(
+                    f"Cannot anchor commit: durable mission unreadable: {exc}"
+                ) from exc
+            self._validate_loaded_state(durable_data)
+
+            durable_revision = durable_data.get("revision")
+            if durable_revision != expected_revision:
+                return DurableCommitResult(
+                    outcome="revision_mismatch",
+                    revision=durable_revision,
+                    reason=f"Durable revision is {durable_revision}, "
+                    f"writer expected {expected_revision}",
+                )
+
+            durable_actions = durable_data.get("action_states", {})
+            if action_id not in durable_actions:
+                return DurableCommitResult(
+                    outcome="validation_failed",
+                    revision=durable_revision,
+                    reason=f"Action not found: {action_id}",
+                )
+            durable_action = durable_actions[action_id]
+            if not (durable_action.get("delegation_id") or ""):
+                return DurableCommitResult(
+                    outcome="validation_failed",
+                    revision=durable_revision,
+                    reason=f"Action carries no delegation grant: {action_id}",
+                )
+            if durable_action.get("delegation_state") == "REVOKED":
+                return DurableCommitResult(
+                    outcome="already_revoked",
+                    revision=durable_revision,
+                    reason=f"Delegation already revoked: {action_id}",
+                )
+
+            candidate_data = dict(durable_data)
+            candidate_data["revision"] = expected_revision + 1
+            candidate_data["updated_at"] = utc_iso()
+            candidate_actions = dict(candidate_data["action_states"])
+            candidate_action = dict(durable_action)
+            candidate_action["delegation_state"] = "REVOKED"
+            candidate_action["delegation_revoked_at"] = utc_iso()
+            candidate_action["delegation_revoke_reason"] = str(reason or "")
+            candidate_actions[action_id] = candidate_action
+            candidate_data["action_states"] = candidate_actions
+
+            try:
+                candidate_record = MissionRecord.from_dict(candidate_data)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise MissionRecordValidationError(
+                    f"Invalid revocation candidate: {exc}"
+                ) from exc
+
+            self._validate_candidate_state(candidate_record)
+            self._require_action_unchanged_except_delegation(
+                candidate_record, durable_data, action_id
+            )
+            return self._atomic_write(candidate_record)
+
+    def _require_action_unchanged_except_delegation(
+        self,
+        record: MissionRecord,
+        durable_data: Dict[str, Any],
+        changed_action_id: str,
+    ) -> None:
+        """Scope a delegation transition's blast radius.
+
+        Mission identity, plan, and every OTHER action must be
+        byte-identical (normalized); the changed action may differ only
+        in delegation fields (plus the confirmation basis, which the
+        canonical delegation-bound digest rule governs separately).
+        """
+        candidate = record.to_dict()
+        for field in self._IMMUTABLE_IDENTITY_FIELDS:
+            if candidate.get(field) != durable_data.get(field):
+                raise MissionRecordValidationError(
+                    f"Immutable mission identity field changed: {field}"
+                )
+        for field in ("mission_definition", "plan"):
+            if detach_json_value(candidate.get(field)) != detach_json_value(
+                durable_data.get(field)
+            ):
+                raise MissionRecordValidationError(
+                    f"Immutable mission identity field changed: {field}"
+                )
+        durable_actions = durable_data.get("action_states", {})
+        candidate_actions = candidate.get("action_states", {})
+        if set(candidate_actions) != set(durable_actions):
+            raise MissionRecordValidationError("Immutable action set changed")
+        for aid, durable_action in durable_actions.items():
+            candidate_action = candidate_actions.get(aid)
+            if not isinstance(candidate_action, dict):
+                raise MissionRecordValidationError(
+                    f"Immutable action missing: {aid}"
+                )
+            if aid != changed_action_id:
+                if detach_json_value(candidate_action) != detach_json_value(
+                    durable_action
+                ):
+                    raise MissionRecordValidationError(
+                        f"Delegation transition touched unrelated action: {aid}"
+                    )
+            else:
+                for key in candidate_action:
+                    if key in self._DELEGATION_PROTECTED_FIELDS:
+                        continue
+                    if key in ("confirmation_basis_digest",):
+                        continue
+                    if detach_json_value(candidate_action.get(key)) != detach_json_value(
+                        durable_action.get(key)
+                    ):
+                        raise MissionRecordValidationError(
+                            f"Delegation transition changed non-delegation field: "
+                            f"{aid}.{key}"
+                        )
+                for key in durable_action:
+                    if (
+                        key not in self._DELEGATION_PROTECTED_FIELDS
+                        and key != "confirmation_basis_digest"
+                        and key not in candidate_action
+                    ):
+                        raise MissionRecordValidationError(
+                            f"Delegation transition dropped field: {aid}.{key}"
+                        )
+
+    def _canonical_delegation_basis(
+        self, candidate_data: Dict[str, Any], action_id: str
+    ) -> str:
+        """Canonical confirmation basis bound to delegated semantics.
+
+        M33.2B §8: recomputed from the CANDIDATE (plan capability +
+        action triple + grant fields), so a confirmation issued for a
+        different delegate, delegation, target, resource, capability,
+        or lifetime can never satisfy it.
+        """
+        actions = candidate_data.get("action_states", {})
+        action = actions.get(action_id, {})
+        grant_capability = ""
+        for entry in candidate_data.get("plan", []) or ():
+            if isinstance(entry, dict) and entry.get("action_id") == action_id:
+                grant_capability = str(entry.get("capability", "") or "")
+                break
+        return confirmation_basis_for_grant(
+            delegation_id=str(action.get("delegation_id", "") or ""),
+            delegate_agent_id=str(action.get("delegation_delegate_agent_id", "") or ""),
+            capability=grant_capability,
+            governed_registration_id=str(
+                action.get("expected_governed_registration_id", "") or ""
+            ),
+            generation=action.get("expected_resource_generation", 0),
+            target=str(action.get("expected_resource_id", "") or ""),
+            expires_at=str(action.get("delegation_expires_at", "") or ""),
+        )
+
+    def _require_delegation_confirmation_basis(
+        self, candidate_data: Dict[str, Any], action_id: str
+    ) -> None:
+        """Enforce delegation-bound confirmation basis on granted actions.
+
+        Whenever a granted action carries confirmation_required=True, its
+        basis must equal the canonical digest bound to the delegated
+        semantics — whether the basis is set by the grant transition or
+        by a later confirmation transition.
+        """
+        action = (candidate_data.get("action_states", {}) or {}).get(action_id, {})
+        if not isinstance(action, dict):
+            return
+        if not (action.get("delegation_id") or ""):
+            return
+        if action.get("confirmation_required") is not True:
+            return
+        expected = self._canonical_delegation_basis(candidate_data, action_id)
+        if action.get("confirmation_basis_digest", "") != expected:
+            raise MissionRecordValidationError(
+                f"Action {action_id}: confirmation basis on a delegated "
+                "action must bind the delegated semantics"
+            )
 
     def _do_commit(
         self,
@@ -615,6 +953,20 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                             "may only be modified through "
                             "transition_confirmation()"
                         )
+            # M33.2B: delegation fields are security-sensitive and may
+            # ONLY be modified through transition_delegation_grant() /
+            # transition_delegation_revoke(). Ordinary commit() always
+            # rejects delegation field changes (normalized comparison so
+            # tuple/list representation drift can never read as a change).
+            for delegation_field in self._DELEGATION_PROTECTED_FIELDS:
+                if detach_json_value(
+                    candidate_action.get(delegation_field)
+                ) != detach_json_value(durable_action.get(delegation_field)):
+                    raise MissionRecordValidationError(
+                        f"Delegation field {aid}.{delegation_field} "
+                        "may only be modified through the canonical "
+                        "delegation transitions"
+                    )
 
     def _validate_transition(
         self, candidate: MissionRecord, durable_data: Dict[str, Any],
@@ -846,6 +1198,118 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
                     raise MissionRecordValidationError(
                         f"Action state {action_id}: confirmation_required=True "
                         "requires non-empty confirmation_basis_digest"
+                    )
+            # M33.2B hardening: delegation field types on raw loaded state.
+            # (Completeness — all-or-nothing grant shape — is enforced by
+            # DurableActionState.__post_init__ via from_dict.)
+            for label in (
+                "delegation_id",
+                "delegation_parent_mission_id",
+                "delegation_parent_action_id",
+                "delegation_parent_delegation_id",
+                "delegation_root_mission_id",
+                "delegation_root_action_id",
+                "delegation_root_governed_registration_id",
+                "delegation_delegator_grid",
+                "delegation_delegator_agent_id",
+                "delegation_delegate_agent_id",
+                "delegation_delegate_grid",
+                "delegation_max_risk_level",
+                "delegation_max_side_effect",
+                "delegation_created_at",
+                "delegation_expires_at",
+                "delegation_state",
+                "delegation_revoked_at",
+                "delegation_revoke_reason",
+            ):
+                if label in state and not isinstance(state[label], str):
+                    raise MissionRecordValidationError(
+                        f"Action state {action_id}: {label} must be str"
+                    )
+            if "delegation_root_generation" in state and (
+                not isinstance(state["delegation_root_generation"], int)
+                or isinstance(state["delegation_root_generation"], bool)
+            ):
+                raise MissionRecordValidationError(
+                    f"Action state {action_id}: delegation_root_generation "
+                    "must be an int"
+                )
+            if "delegation_max_timeout_seconds" in state and (
+                not isinstance(state["delegation_max_timeout_seconds"], (int, float))
+                or isinstance(state["delegation_max_timeout_seconds"], bool)
+            ):
+                raise MissionRecordValidationError(
+                    f"Action state {action_id}: delegation_max_timeout_seconds "
+                    "must be numeric"
+                )
+            if "delegation_require_verification" in state and (
+                state["delegation_require_verification"] is not None
+                and not isinstance(state["delegation_require_verification"], bool)
+            ):
+                raise MissionRecordValidationError(
+                    f"Action state {action_id}: delegation_require_verification "
+                    "must be a bool or None"
+                )
+            for label in (
+                "delegation_allowed_capabilities",
+                "delegation_allowed_resources",
+                "delegation_allowed_targets",
+            ):
+                if label in state and not isinstance(state[label], (list, tuple)):
+                    raise MissionRecordValidationError(
+                        f"Action state {action_id}: {label} must be a sequence"
+                    )
+            if "delegation_state" in state and state["delegation_state"] not in (
+                "NONE",
+                "ACTIVE",
+                "REVOKED",
+            ):
+                raise MissionRecordValidationError(
+                    f"Action state {action_id}: delegation_state must be "
+                    "NONE, ACTIVE, or REVOKED"
+                )
+            # M33.2B: a durable grant must be complete, not partial. A
+            # delegation_id with missing scope/identity fields is corrupt
+            # state and fails load loudly (handoff enforcement re-proves
+            # the same shape, but corruption must not travel that far).
+            if isinstance(state.get("delegation_id"), str) and state.get(
+                "delegation_id"
+            ):
+                for label in (
+                    "delegation_parent_mission_id",
+                    "delegation_parent_action_id",
+                    "delegation_root_mission_id",
+                    "delegation_root_action_id",
+                    "delegation_delegator_grid",
+                    "delegation_delegate_agent_id",
+                ):
+                    if not state.get(label) or not isinstance(
+                        state.get(label), str
+                    ):
+                        raise MissionRecordValidationError(
+                            f"Action state {action_id}: partial delegation "
+                            f"grant is corrupt ({label} missing)"
+                        )
+                caps = state.get("delegation_allowed_capabilities", [])
+                if (
+                    not isinstance(caps, (list, tuple))
+                    or not caps
+                    or not all(isinstance(c, str) and c for c in caps)
+                ):
+                    raise MissionRecordValidationError(
+                        f"Action state {action_id}: partial delegation "
+                        "grant is corrupt (capabilities missing)"
+                    )
+                resources = state.get("delegation_allowed_resources", [])
+                if not isinstance(resources, (list, tuple)) or not resources:
+                    raise MissionRecordValidationError(
+                        f"Action state {action_id}: partial delegation "
+                        "grant is corrupt (resources missing)"
+                    )
+                if state.get("delegation_state") not in ("ACTIVE", "REVOKED"):
+                    raise MissionRecordValidationError(
+                        f"Action state {action_id}: granted delegation_state "
+                        "must be ACTIVE or REVOKED"
                     )
 
         # Validate completed_nodes / failed_nodes

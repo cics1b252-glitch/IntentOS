@@ -288,6 +288,136 @@ class MissionRuntime:
         )
         store.create(record)
 
+    def _revalidate_delegation_live(
+        self, durable_data: Dict[str, Any], contract: Any, node: Any
+    ) -> bool:
+        """Re-prove a delegation grant live immediately before handoff.
+
+        M33.2B: runs only when the durable action carries a grant. Proves
+        (1) the pure derivation over durable state (chain walk, subset
+        re-proof, liveness, expiry, depth — the guard re-verifies the same
+        proof in acquire()); (2) RRM liveness for every chained binding
+        plus the delegate agent (found, generation match, eligible);
+        (3) the live runtime contract sits within the grant's effective
+        ceilings. Anything unknown, stale, ineligible, or out-of-scope
+        returns False; the caller fails closed. Never raises.
+        """
+        try:
+            from intent_kernel.mission import delegation as _delegation
+
+            action_id = getattr(contract, "action_id", "") or ""
+            ok, _reason, chain = _delegation.verify_grant_dispatch(
+                durable_data,
+                action_id,
+                presenter_executor_id=None,
+                now_iso=utc_iso(),
+            )
+            if not ok or not chain:
+                return False
+            rm = self.resource_manager
+            if rm is None:
+                return False
+            # Root liveness: the pinned original ceiling must still resolve
+            # live, or the whole derivation is stale (D4/D15).
+            leaf_grant = chain[0][2]
+            root_grid = str(
+                leaf_grant.get("delegation_root_governed_registration_id", "")
+                or ""
+            )
+            if root_grid:
+                try:
+                    root_gen = int(
+                        leaf_grant.get("delegation_root_generation", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    return False
+                if not self._delegation_resource_live(rm, root_grid, root_gen):
+                    return False
+            for _aid, _action, _grant in chain:
+                grid = str(_action.get("expected_governed_registration_id", "") or "")
+                if not grid:
+                    continue
+                try:
+                    want_gen = int(_action.get("expected_resource_generation", 0) or 0)
+                except (TypeError, ValueError):
+                    return False
+                if not self._delegation_resource_live(rm, grid, want_gen):
+                    return False
+            leaf_grant = chain[0][2]
+            delegate = str(
+                leaf_grant.get("delegation_delegate_agent_id", "") or ""
+            )
+            delegate_grid = str(
+                leaf_grant.get("delegation_delegate_grid", "") or ""
+            )
+            if not delegate:
+                return False
+            delegate_obj = None
+            try:
+                for _agent in rm.list_agents():
+                    if getattr(_agent, "agent_id", "") == delegate:
+                        delegate_obj = _agent
+                        break
+            except Exception:
+                delegate_obj = None
+            if delegate_obj is None:
+                return False
+            if not bool(getattr(delegate_obj, "is_eligible", True)):
+                return False
+            if delegate_grid and getattr(
+                delegate_obj, "governed_registration_id", ""
+            ) != delegate_grid:
+                return False
+            effective = _delegation.resolve_effective_ceilings(chain)
+            if not effective:
+                return False
+            contract_values = {
+                "risk_level": getattr(contract, "risk_level", ""),
+                "timeout": getattr(contract, "timeout", 0),
+                "verification_required": getattr(
+                    contract, "verification_required", None
+                ),
+                "side_effect": getattr(contract, "side_effect_level", ""),
+            }
+            ok, _reason = _delegation.contract_within_grant(
+                contract_values, effective
+            )
+            return bool(ok)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _delegation_resource_live(rm: Any, grid: str, generation: int) -> bool:
+        """Resolve one pinned (grid, generation) binding against live RRM.
+
+        M33.2B: the resource must resolve by governed registration id,
+        match the pinned generation exactly, and be eligible. Anything
+        else (removed, stale, ineligible) fails closed. Never raises.
+        """
+        try:
+            current = None
+            for _list in (
+                rm.list_providers,
+                rm.list_agents,
+                rm.list_capabilities,
+            ):
+                try:
+                    for _res in _list():
+                        if getattr(_res, "governed_registration_id", "") == grid:
+                            current = _res
+                            break
+                except Exception:
+                    continue
+                if current is not None:
+                    break
+            if current is None:
+                return False
+            if getattr(current, "generation", None) != generation:
+                return False
+            return bool(getattr(current, "is_eligible", True))
+        except Exception:
+            return False
+
     def get_instance(self, runtime_id: str) -> Optional[MissionRuntimeInstance]:
         """Retrieve an active or stored runtime instance."""
         return self._instances.get(runtime_id)
@@ -692,6 +822,18 @@ class MissionRuntime:
                                     _rebind_result = curr if curr is not None else True
                                     if dur_grid or dur_gen:
                                         _rebind_durable = (dur_grid, dur_gen, dur_logical)
+                                    # M33.2B delegation: a granted action must
+                                    # additionally prove its derivation live
+                                    # (chain, RRM liveness, contract ceilings).
+                                    # Any failure fails closed like the rebind.
+                                    if _rebind_result is not None and (
+                                        action_data.get("delegation_id") or ""
+                                    ):
+                                        if not self._revalidate_delegation_live(
+                                            durable_data, contract, node
+                                        ):
+                                            _rebind_result = None
+                                            _rebind_durable = None
                                 else:
                                     _rebind_result = None
                             else:

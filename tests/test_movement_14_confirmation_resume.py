@@ -875,3 +875,285 @@ async def test_consumed_confirmation_cannot_resume_again(runtime_stack):
     assert second.accepted is False
     assert second.state is ConfirmationState.STALE
     assert len(resumed.completed_nodes) == 1
+
+
+# ---------------------------------------------------------------------------
+# G8. Bridge restart regression: durable per-mission authority governs resume
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_g8_bridge_restart_regression_durable_record_governs_resume(
+    bridge, monkeypatch
+):
+    """G8: bridge mission -> authoritative MissionRecord -> fresh runtime over
+    the same store sees the SAME record; governed resume semantics forbid
+    redispatch (durable RESULT_RECORDED -> DO_NOT_REDISPATCH), and distinct
+    missions never share one canonical record."""
+    from intent_kernel.mission import (
+        MissionActionAuthority,
+        ProductiveDispatchGuard,
+        ReplayDecision,
+        spec_for_runtime_node,
+    )
+    from intent_kernel.mission.mission_record import ActionState
+
+    counts = _counting_executor(bridge, monkeypatch)
+    response, conf = await _open_waiting(bridge, "G8R")
+    mid = response["mission_id"]
+    r2 = await bridge.dispatch(_confirm_params(response, conf, "G8R"))
+    assert r2["status"] == "COMPLETED"
+    assert counts["executor"] == 1
+
+    store = bridge.components.mission_record_store
+    assert store is not None
+    data = store.load(mid)
+    assert data is not None
+    assert data["mission_id"] == mid
+    rev_before = data["revision"]
+    actions = data.get("action_states", {})
+    assert len(actions) == 1
+    aid = next(iter(actions))
+    assert actions[aid]["state"] == ActionState.RESULT_RECORDED.value
+
+    # Distinct second mission -> distinct canonical record.
+    response2, _ = await _open_waiting(bridge, "G8R2")
+    mid2 = response2["mission_id"]
+    assert mid2 != mid
+    data2 = store.load(mid2)
+    assert data2 is not None
+    assert data2["mission_id"] == mid2
+
+    # Fresh runtime over the same store, same action identity.
+    src = None
+    for inst in bridge.components.mission_runtime._instances.values():
+        if inst.mission_id == mid:
+            src = next(iter(inst.nodes.values()))
+            break
+    assert src is not None
+    c = src.action_contract
+    node = RuntimeNode(
+        node_id=src.node_id, capability=src.capability, agent_id=src.agent_id,
+        action_contract=ActionContract(
+            action_id=c.action_id, capability=c.capability,
+            action_type=c.action_type,
+            inputs_reference=dict(c.inputs_reference),
+            idempotency_key=c.idempotency_key,
+        ),
+    )
+    guard = ProductiveDispatchGuard(MissionActionAuthority(store), store)
+    assert guard.decide(spec_for_runtime_node(mid, node)) is ReplayDecision.DO_NOT_REDISPATCH
+
+    fresh = MissionRuntime(
+        executor=bridge.components.mission_runtime.executor,
+        constitution=_ConstitutionAllow(),
+        dispatch_guard=guard,
+        mission_record_store=store,
+        rrm_service=bridge.components.resource_manager,
+    )
+    inst2 = fresh.create_instance(mid, "g1", [node])
+    await fresh.run_mission(inst2.runtime_id)
+    assert counts["executor"] == 1
+    # Duplicate attempt left durable authority untouched.
+    data_after = store.load(mid)
+    assert data_after["revision"] == rev_before
+    assert data_after["action_states"][aid]["state"] == ActionState.RESULT_RECORDED.value
+
+
+# ---------------------------------------------------------------------------
+# G7. Production reconfirmation authority (CanonicalConfirmationService)
+# ---------------------------------------------------------------------------
+
+async def _bound_and_confirmed(runtime_stack, *, basis, token="tok-1", session="s1"):
+    """Bind a basis + submit approval; return (service, mission, conf)."""
+    from intent_kernel.application.confirmation_service import ConfirmationSubmission
+    engine, runtime, service = runtime_stack
+    mission, instance, conf = await _pending_runtime(runtime_stack)
+    service.bind_pending(
+        confirmation_id=conf.confirmation_id,
+        mission_id=str(mission.id),
+        runtime_id=instance.runtime_id,
+        action_id=conf.action_id,
+        session_id=session,
+        project_id="GLOBAL",
+        confirmation_token=token,
+        authorization={"tool_id": "synthetic-tool"},
+        confirmation_basis_digest=basis,
+    )
+    outcome = await service.submit(ConfirmationSubmission(
+        mission_id=str(mission.id),
+        confirmation_id=conf.confirmation_id,
+        approved=True,
+        session_id=session,
+        project_id="GLOBAL",
+        confirmation_token=token,
+    ))
+    assert outcome.state is ConfirmationState.CONFIRMED
+    return service, mission, conf
+
+
+@pytest.mark.asyncio
+async def test_g7_valid_live_confirmation_authorizes(runtime_stack):
+    """G7: a live CONFIRMED requirement with matching basis validates True."""
+    service, mission, conf = await _bound_and_confirmed(
+        runtime_stack, basis="basis-live")
+    assert service.validate_confirmation(
+        mission_id=str(mission.id),
+        action_id=conf.action_id,
+        confirmation_basis_digest="basis-live",
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_g7_wrong_basis_fails_closed(runtime_stack):
+    """G7: a mismatched basis digest never validates."""
+    service, mission, conf = await _bound_and_confirmed(
+        runtime_stack, basis="basis-live")
+    assert service.validate_confirmation(
+        mission_id=str(mission.id),
+        action_id=conf.action_id,
+        confirmation_basis_digest="wrong-basis",
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_g7_expired_confirmation_fails_closed(runtime_stack):
+    """G7: a CONFIRMED requirement past its expiry never validates."""
+    service, mission, conf = await _bound_and_confirmed(
+        runtime_stack, basis="basis-live")
+    conf.expires_at = "2000-01-01T00:00:00Z"
+    assert service.validate_confirmation(
+        mission_id=str(mission.id),
+        action_id=conf.action_id,
+        confirmation_basis_digest="basis-live",
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_g7_consumed_confirmation_cannot_be_reused(runtime_stack):
+    """G7: a consumed approval is single-use; validation fails afterwards."""
+    service, mission, conf = await _bound_and_confirmed(
+        runtime_stack, basis="basis-live")
+    service.consume(conf.confirmation_id)
+    assert service.validate_confirmation(
+        mission_id=str(mission.id),
+        action_id=conf.action_id,
+        confirmation_basis_digest="basis-live",
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_g7_missing_confirmation_fails_closed(runtime_stack):
+    """G7: unknown mission/action never validates."""
+    _engine, _runtime, service = runtime_stack
+    assert service.validate_confirmation(
+        mission_id="no-such-mission",
+        action_id="no-such-action",
+        confirmation_basis_digest="basis-live",
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_g7_restart_does_not_resurrect_confirmation(runtime_stack):
+    """G7: approvals are in-memory only; a fresh runtime/service pair (a
+    restart) finds no CONFIRMED requirement and validation fails."""
+    from intent_kernel.application.confirmation_service import (
+        CanonicalConfirmationService,
+    )
+    engine, runtime, service = runtime_stack
+    _svc, mission, conf = await _bound_and_confirmed(
+        runtime_stack, basis="basis-live")
+    fresh_runtime = MissionRuntime(
+        mission_engine=engine, constitution=_ConstitutionAllow())
+    fresh_service = CanonicalConfirmationService(
+        engine, fresh_runtime, confirmation_ttl_seconds=300)
+    assert fresh_service.validate_confirmation(
+        mission_id=str(mission.id),
+        action_id=conf.action_id,
+        confirmation_basis_digest="basis-live",
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_g7_reconfirmation_transition_authorizes_with_live_confirmation(
+    runtime_stack, tmp_path
+):
+    """G7 end-to-end: RECONFIRMATION_REQUIRED -> AUTHORIZED succeeds only
+    with a live service-validated confirmation; without the production
+    service wired, the same transition is rejected."""
+    from intent_kernel.mission import MissionActionAuthority
+    from intent_kernel.mission.action_authority import ActionTransitionEvidence
+    from intent_kernel.mission.mission_record import (
+        ActionState,
+        DurableActionState,
+        MissionDefinition,
+        MissionRecord,
+        MissionStatus,
+    )
+    from intent_kernel.mission.store_impl import JsonFileMissionRecordStore
+
+    service, mission, conf = await _bound_and_confirmed(
+        runtime_stack, basis="basis-g7t")
+    mid, aid = str(mission.id), conf.action_id
+
+    def _record():
+        ident = "test-install"
+        definition = MissionDefinition(objective="g7", context={})
+        probe = MissionRecord(
+            mission_id="probe", installation_id=ident,
+            mission_definition=definition)
+        return MissionRecord(
+            mission_id=mid, installation_id=ident, revision=1,
+            runtime_id="rt-1", mission_definition=definition,
+            mission_definition_digest=probe.compute_definition_digest(),
+            mission_status=MissionStatus.RUNNING,
+            plan=({
+                "action_id": aid, "capability": "test.echo",
+                "node_id": "n1", "dependencies": [],
+                "request_semantics_digest": "d",
+            },),
+            action_states={aid: DurableActionState(
+                action_id=aid, node_id="n1",
+                state=ActionState.RECONFIRMATION_REQUIRED,
+                confirmation_required=True,
+                confirmation_basis_digest="basis-g7t",
+            )},
+        )
+
+    root = tmp_path / "g7store"
+    (root / "missions").mkdir(parents=True, exist_ok=True)
+    (root / "cont").mkdir(parents=True, exist_ok=True)
+    store = JsonFileMissionRecordStore(
+        missions_dir=root / "missions",
+        continuity_file=root / "cont" / "identity.json",
+    )
+    store._continuity_identity = "test-install"
+    assert store.create(_record()).outcome == "committed"
+
+    # Without the production service wired, digest alone cannot authorize.
+    bare = MissionActionAuthority(store)
+    import pytest as _pytest
+    from intent_kernel.mission.store import MissionRecordValidationError
+    with _pytest.raises(MissionRecordValidationError):
+        bare.transition_action(
+            mid, aid, 1,
+            ActionState.RECONFIRMATION_REQUIRED, ActionState.AUTHORIZED,
+            ActionTransitionEvidence(
+                requested_by="test", reason="test",
+                confirmation_basis_digest="basis-g7t"),
+        )
+
+    # With the production service wired + live approval, it authorizes and
+    # clears the durable confirmation requirement fields.
+    wired = MissionActionAuthority(store, confirmation_service=service)
+    result = wired.transition_action(
+        mid, aid, 1,
+        ActionState.RECONFIRMATION_REQUIRED, ActionState.AUTHORIZED,
+        ActionTransitionEvidence(
+            requested_by="test", reason="test",
+            confirmation_basis_digest="basis-g7t"),
+    )
+    assert result is not None
+    after = store.load(mid)["action_states"][aid]
+    assert after["state"] == ActionState.AUTHORIZED.value
+    assert after["confirmation_required"] is False
+    assert after["confirmation_basis_digest"] == ""

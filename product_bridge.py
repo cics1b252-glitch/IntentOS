@@ -1177,6 +1177,10 @@ Estratégia completa registrada no histórico para execução."""
             capability="test.echo",
             action_type="SIMULATED",
             inputs_reference={"message": message, "requested_capability": capability},
+            # G8: the simulated echo deterministically returns inputs["message"];
+            # declare it so EXACT verification (explicit-contract required)
+            # can pass on the bridge completion path.
+            expected_output=message,
             side_effect_level=SideEffectLevel.EXTERNAL_REVERSIBLE,
             required_permissions=list(permission),
             confirmation_required=True,
@@ -1190,6 +1194,12 @@ Estratégia completa registrada no histórico para execução."""
             capability=capability,
             action_contract=contract,
         )
+        # G8: canonical durable identity — the contract action id must equal
+        # the node id. The dispatch guard derives spec.action_id from node_id
+        # while the runtime resolves durable actions by contract.action_id;
+        # divergent ids leave the action unbindable in durable authority
+        # (fail-closed "No durable action for attempt").
+        contract.action_id = node.node_id
         instance = self.components.mission_runtime.create_instance(
             str(mission.id),
             str(getattr(executive, "execution_graph", None) or "ecc-plan"),
@@ -1488,6 +1498,16 @@ Estratégia completa registrada no histórico para execução."""
             text = "A missão não está aguardando confirmação; nenhuma execução ocorreu."
         elif reason in ("mission_not_found", "confirmation_not_found"):
             text = "Confirmação ou missão não encontrada; nenhuma execução ocorreu."
+        elif reason.startswith("authorization_revoked"):
+            text = (
+                "A autorização foi revogada após a confirmação; "
+                "nenhuma execução ocorreu."
+            )
+            return CanonicalTurnResult.local(
+                text,
+                kind=CanonicalResultKind.AUTHORIZATION_REQUIRED,
+                metadata={**meta, "confirm_state": outcome.state.value, "reason": reason},
+            )
         else:
             text = "A confirmação não foi aplicada; nenhuma execução ocorreu."
         return CanonicalTurnResult.local(

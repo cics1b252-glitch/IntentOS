@@ -203,7 +203,90 @@ class MissionRuntime:
 
         instance.status = MissionRuntimeState.READY
         self._instances[instance.runtime_id] = instance
+
+        # G8: anchor each new governed mission in durable authority before
+        # productive execution. No-op when no store is configured or a
+        # record already exists (existing authority is never overwritten).
+        self._anchor_mission_record(mission_id, instance.runtime_id, nodes)
         return instance
+
+    def _anchor_mission_record(
+        self,
+        mission_id: str,
+        runtime_id: str,
+        nodes: List[RuntimeNode],
+    ) -> None:
+        """Create the authoritative durable MissionRecord for one mission.
+
+        G8: every governed mission gets its own record keyed by mission_id,
+        so distinct missions can never share one. This instance's node
+        actions are bound as PENDING with plan digests derived from the
+        node contracts (the same digest function the dispatch guard uses,
+        so later acquire() verification matches). Confirmation is not
+        required by the anchor; explicit governed bindings (RRM grid /
+        generation, durable confirmation requirements) are added by the
+        binding paths that own them. Runtimes without a mission record
+        store are untouched (legacy mode).
+        """
+        store = self._mission_record_store
+        if store is None:
+            return
+        try:
+            existing = store.load(mission_id)
+        except Exception:
+            existing = None
+        if existing is not None:
+            return
+        ident_fn = getattr(store, "get_continuity_identity", None)
+        ident = ident_fn() if callable(ident_fn) else ""
+        if not ident:
+            return
+        from intent_kernel.mission.dispatch_guard import spec_for_runtime_node
+
+        definition = MissionDefinition(objective=f"mission:{mission_id}", context={})
+        probe = MissionRecord(
+            mission_id="probe",
+            installation_id=ident,
+            mission_definition=definition,
+        )
+        plan_entries: List[Dict[str, Any]] = []
+        action_states: Dict[str, DurableActionState] = {}
+        for node in nodes:
+            contract = node.action_contract
+            if contract is not None:
+                action_id = getattr(contract, "action_id", "") or node.node_id
+            else:
+                action_id = node.node_id
+            spec = spec_for_runtime_node(mission_id, node)
+            plan_entries.append({
+                "action_id": action_id,
+                "capability": node.capability or "",
+                "node_id": node.node_id,
+                "dependencies": [],
+                "request_semantics_digest": spec.request_semantics_digest,
+            })
+            action_states[action_id] = DurableActionState(
+                action_id=action_id,
+                node_id=node.node_id,
+                state=ActionState.PENDING,
+                expected_resource_id="",
+                expected_governed_registration_id="",
+                expected_resource_generation=0,
+                expected_executor_kind="",
+                expected_executor_logical_id=spec.executor_logical_id,
+            )
+        record = MissionRecord(
+            mission_id=mission_id,
+            installation_id=ident,
+            revision=1,
+            runtime_id=runtime_id,
+            mission_definition=definition,
+            mission_definition_digest=probe.compute_definition_digest(),
+            mission_status=MissionStatus.RUNNING,
+            plan=tuple(plan_entries),
+            action_states=action_states,
+        )
+        store.create(record)
 
     def get_instance(self, runtime_id: str) -> Optional[MissionRuntimeInstance]:
         """Retrieve an active or stored runtime instance."""

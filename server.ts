@@ -1,10 +1,89 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import { IntentGatewayAdapter } from './gateway/adapter.js';
 import { transportFailureProductResponse } from './gateway/product-response.js';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = '0.0.0.0';
+
+// ---------------------------------------------------------------------------
+// M33.2C — Hardened ingress authentication (parity with FastAPI boundary)
+// ---------------------------------------------------------------------------
+
+const RESERVED_CONTEXT_KEYS = new Set([
+  '_authenticated_caller', 'caller', 'authorization', 'bearer',
+  'token', 'api_key', 'apikey', 'credential', 'secret',
+]);
+
+function sanitizeContextForGateway(context: any): any {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return context;
+  const lowerReserved = new Set([...RESERVED_CONTEXT_KEYS].map(k => k.toLowerCase()));
+  const clean: Record<string, any> = {};
+  for (const [k, v] of Object.entries(context)) {
+    if (!lowerReserved.has(k.toLowerCase())) clean[k] = v;
+  }
+  return clean;
+}
+
+function credentialReferenceFor(rawKey: string): string {
+  return `api_key:${crypto.createHash('sha256').update(rawKey, 'utf8').digest('hex').slice(0, 16)}`;
+}
+
+function authenticateRequest(req: Request): { callerId: string; reference: string } | null {
+  const expected = process.env.INTENT_OS_API_KEY;
+  const allowAnonymous =
+    (process.env.INTENT_OS_ALLOW_ANONYMOUS || '').trim().toLowerCase() === 'true';
+  const hasKey = !!expected && expected.trim() !== '';
+
+  if (!hasKey) {
+    if (allowAnonymous) return { callerId: 'anonymous', reference: 'anonymous' };
+    return null; // fail-closed: no key configured and anonymous not allowed
+  }
+
+  const auth = req.headers.authorization;
+  if (!auth || typeof auth !== 'string' || !auth.startsWith('Bearer ')) return null;
+  const token = auth.slice(7);
+  if (!token || token !== token.trim() || token.includes(' ') || token.includes('\t') || token.includes('\n')) return null;
+  if (token.startsWith('Bearer ')) return null;
+  // Constant-time compare (length check first to avoid timing oracle on length, then timingSafeEqual on padded buffers is not needed — compare_digest handles length mismatch in constant time via Node's timingSafeEqual on equal-length buffers; we do length-guarded compare).
+  const a = Buffer.from(token, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return null;
+  if (!crypto.timingSafeEqual(a, b)) return null;
+  const ref = credentialReferenceFor(expected);
+  return { callerId: ref, reference: ref };
+}
+
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const expected = process.env.INTENT_OS_API_KEY;
+  const hasKey = !!expected && expected.trim() !== '';
+  const allowAnonymous =
+    (process.env.INTENT_OS_ALLOW_ANONYMOUS || '').trim().toLowerCase() === 'true';
+  if (!hasKey && !allowAnonymous) {
+    return res.status(503).json({ ok: false, error: 'Authentication is not configured: set INTENT_OS_API_KEY or explicitly enable anonymous access with INTENT_OS_ALLOW_ANONYMOUS=true for development.' });
+  }
+  if (!hasKey && allowAnonymous) {
+    (req as any)._authenticatedCaller = {
+      caller_id: 'anonymous', credential_class: 'anonymous',
+      validation_result: 'anonymous', credential_reference: 'anonymous',
+      authenticated_at: new Date().toISOString(),
+    };
+    return next();
+  }
+  const result = authenticateRequest(req);
+  if (!result) {
+    const auth = req.headers.authorization;
+    if (!auth) return res.status(401).json({ ok: false, error: 'Authorization header required' });
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+  (req as any)._authenticatedCaller = {
+    caller_id: result.callerId, credential_class: 'api_key',
+    validation_result: 'valid', credential_reference: result.reference,
+    authenticated_at: new Date().toISOString(),
+  };
+  next();
+}
 
 const app = express();
 
@@ -41,10 +120,16 @@ app.get('/api/status', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/intent
-app.post('/api/intent', async (req: Request, res: Response) => {
+// POST /api/intent — effect-capable, authenticated (M33.2C)
+app.post('/api/intent', requireAuth, async (req: Request, res: Response) => {
   try {
-    const result = await gatewayAdapter.processIntent(req.body || {});
+    const body = req.body || {};
+    const cleanContext = sanitizeContextForGateway(body.context);
+    const result = await gatewayAdapter.processIntent({
+      ...body,
+      context: cleanContext,
+      _authenticated_caller: (req as any)._authenticatedCaller,
+    });
     res.json(result);
   } catch (err: any) {
     res.status(500).json(transportFailureProductResponse(
@@ -179,8 +264,14 @@ app.get('/api/v1/status', async (req: Request, res: Response) => {
   res.json(status);
 });
 
-app.post('/api/v1/process', async (req: Request, res: Response) => {
-  const result = await gatewayAdapter.processIntent(req.body || {});
+app.post('/api/v1/process', requireAuth, async (req: Request, res: Response) => {
+  const body = req.body || {};
+  const cleanContext = sanitizeContextForGateway(body.context);
+  const result = await gatewayAdapter.processIntent({
+    ...body,
+    context: cleanContext,
+    _authenticated_caller: (req as any)._authenticatedCaller,
+  });
   res.json(result);
 });
 

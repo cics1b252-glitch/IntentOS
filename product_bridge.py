@@ -195,6 +195,35 @@ class ProductBridge:
         self.last_conversation_authority: dict[str, Any] | None = None
 
     async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
+        # M33.2C: isolate trusted caller provenance (set only by ingress
+        # authenticator) from client-controlled context. Raw credential
+        # material never enters mission authority or evidence.
+        _caller = request.get("_authenticated_caller")
+        # Defense-in-depth: strip any forged caller/auth keys from context
+        # even if the ingress layer already sanitized them.
+        ctx_in = request.get("context")
+        if isinstance(ctx_in, dict):
+            for _k in list(ctx_in.keys()):
+                if _k.lower() in (
+                    "_authenticated_caller", "caller", "authorization",
+                    "bearer", "token", "api_key", "apikey",
+                    "credential", "secret",
+                ):
+                    ctx_in.pop(_k, None)
+        # Provenance is observational only — attached to audit, never to
+        # MissionRecord grid/generation/delegation authority.
+        if isinstance(_caller, dict):
+            # FastAPI passes a dataclass; Express passes a dict — normalize
+            # to safe reference only (no raw key).
+            _caller_ref = _caller.get("credential_reference", "")
+        elif _caller is not None and hasattr(_caller, "credential_reference"):
+            _caller_ref = getattr(_caller, "credential_reference", "")
+        else:
+            _caller_ref = ""
+        # Store safe reference for audit/provenance (not for authority).
+        if _caller_ref:
+            request["_caller_reference"] = _caller_ref
+
         action = request.get("action")
         if action == "health":
             return {"ok": True, **_health_payload()}

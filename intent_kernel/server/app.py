@@ -3,11 +3,16 @@
 REST API layer for the Intent OS Kernel.
 The Kernel remains independent — this is just an interface.
 
-Usage:
-    # Development
-    uvicorn intent_kernel.server.app:app --reload
+M33.2C: hardened ingress authentication (strict Bearer, constant-time
+compare, fail-closed when unconfigured in production, CORS fixed,
+context sanitized, provenance-only caller identity).
 
-    # Production
+Usage:
+    # Development (explicit anonymous allowed)
+    INTENT_OS_ALLOW_ANONYMOUS=true uvicorn intent_kernel.server.app:app --reload
+
+    # Production (key required)
+    INTENT_OS_API_KEY=<secret> uvicorn intent_kernel.server.app:app --reload
     intent-os-server
 """
 
@@ -17,11 +22,16 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from intent_kernel.application import ApplicationFactory, KernelBuilder
+from intent_kernel.auth import (
+    ApiKeyAuthenticator,
+    AuthenticatedCaller,
+    sanitize_context,
+)
 from intent_kernel.kernel import Kernel
 from product_bridge import ProductBridge
 
@@ -84,6 +94,22 @@ async def lifespan(app: FastAPI):
     print("🧠 Intent OS Kernel shut down")
 
 
+def _is_production_docs_enabled() -> bool:
+    """Docs are disabled by default; enable explicitly in development."""
+    return os.environ.get("INTENT_OS_ENABLE_DOCS", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+def _cors_origins() -> list[str]:
+    raw = os.environ.get("INTENT_OS_CORS_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    # Development default: localhost only (not wildcard). Production
+    # should set INTENT_OS_CORS_ORIGINS explicitly.
+    return ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+
 # ---------------------------------------------------------------------------
 # FastAPI App
 # ---------------------------------------------------------------------------
@@ -93,13 +119,17 @@ app = FastAPI(
     description="Cognitive Operating System — REST API",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url="/docs" if _is_production_docs_enabled() else None,
+    redoc_url="/redoc" if _is_production_docs_enabled() else None,
+    openapi_url="/openapi.json" if _is_production_docs_enabled() else None,
 )
 
-# CORS
+# CORS — never allow wildcard + credentials together (fail-closed).
+# Production must set INTENT_OS_CORS_ORIGINS explicitly.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -186,24 +216,59 @@ class EventResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Auth middleware
+# Auth — hardened ingress (M33.2C)
 # ---------------------------------------------------------------------------
 
-API_KEY = os.environ.get("INTENT_OS_API_KEY")
+def _authenticator() -> ApiKeyAuthenticator:
+    """Fresh authenticator per request (reads env, no stale global)."""
+    return ApiKeyAuthenticator.from_env()
+
+
+async def authenticate_caller(
+    request: Request,
+    authorization: str | None = Header(None),
+) -> AuthenticatedCaller:
+    """Authenticate the caller for this request.
+
+    Returns an AuthenticatedCaller (provenance only, never authority).
+    Raises HTTPException on every failure — raw key is never logged.
+    """
+    auth = _authenticator()
+    try:
+        caller = auth.authenticate(authorization)
+    except Exception as exc:
+        # Map authenticator errors to HTTP semantics without leaking key material.
+        from intent_kernel.auth.api_key_auth import (
+            AuthRequiredError,
+            AuthUnavailableError,
+        )
+        if isinstance(exc, AuthUnavailableError):
+            raise HTTPException(status_code=503, detail=str(exc))
+        if isinstance(exc, AuthRequiredError):
+            raise HTTPException(status_code=401, detail=str(exc))
+        raise HTTPException(status_code=401, detail=str(exc))
+    # Attach to request state for downstream provenance (internal channel,
+    # never from client context).
+    request.state.authenticated_caller = caller
+    return caller
 
 
 async def verify_api_key(authorization: str | None = Header(None)):
-    """Verify API key if configured."""
-    if API_KEY is None:
-        return True  # No auth configured — open access
+    """Legacy alias: verify API key (now delegates to hardened authenticator).
 
-    if authorization is None:
-        raise HTTPException(status_code=401, detail="Authorization header required")
+    Kept for backward compatibility with direct Depends(verify_api_key)
+    call sites — new routes should Depend(authenticate_caller).
+    """
+    from intent_kernel.auth.api_key_auth import AuthUnavailableError
 
-    token = authorization.replace("Bearer ", "")
-    if token != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API key")
-
+    auth = _authenticator()
+    try:
+        auth.authenticate(authorization)
+    except AuthUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        # AuthRequiredError / AuthRejectedError → 401
+        raise HTTPException(status_code=401, detail=str(exc))
     return True
 
 
@@ -213,27 +278,38 @@ async def verify_api_key(authorization: str | None = Header(None)):
 
 @app.get("/api/v1/status", response_model=StatusResponse)
 async def status():
-    """Get Kernel status."""
+    """Get Kernel status — explicitly public (no auth)."""
     kernel = get_kernel()
     s = kernel.status()
     return StatusResponse(**s)
 
 
 @app.post("/api/v1/process", response_model=ProcessResponse)
-async def process_intent(req: ProcessRequest, _: bool = Depends(verify_api_key)):
+async def process_intent(
+    req: ProcessRequest,
+    request: Request,
+    caller: AuthenticatedCaller = Depends(authenticate_caller),
+):
     """Process through ProductBridge without overriding canonical semantics."""
-    # Transport context is subordinate: it cannot replace the route-selected
-    # action or the typed user text accepted by this endpoint.
-    request = {**dict(req.context), "action": "intent", "message": req.text}
-    # The historical `mode` input remains accepted as a presentation preference,
-    # but it cannot override CognitiveResponse.execution_mode.
-    request["requested_presentation_mode"] = req.mode
-    result = await get_product_bridge().dispatch(request)
+    # Sanitize caller-controlled context: strip any forged caller/auth keys.
+    # Trusted provenance comes only from the ingress authenticator.
+    clean_context = sanitize_context(dict(req.context))
+    proxied_request: dict[str, Any] = {
+        **clean_context,
+        "action": "intent",
+        "message": req.text,
+        "_authenticated_caller": caller,
+    }
+    proxied_request["requested_presentation_mode"] = req.mode
+    result = await get_product_bridge().dispatch(proxied_request)
     return ProcessResponse(**result)
 
 
 @app.get("/api/v1/query", response_model=QueryResponse)
-async def query_pkb(q: str = "", _: bool = Depends(verify_api_key)):
+async def query_pkb(
+    q: str = "",
+    caller: AuthenticatedCaller = Depends(authenticate_caller),
+):
     """Query the PKB."""
     kernel = get_kernel()
     events = await kernel.query(q)
@@ -260,7 +336,7 @@ async def query_pkb(q: str = "", _: bool = Depends(verify_api_key)):
 async def list_events(
     limit: int = 50,
     domain: str | None = None,
-    _: bool = Depends(verify_api_key),
+    caller: AuthenticatedCaller = Depends(authenticate_caller),
 ):
     """List PKB events."""
     from intent_kernel.types import Domain, EventLifecycle, EventType, QueryFilters
@@ -291,7 +367,10 @@ async def list_events(
 
 
 @app.delete("/api/v1/pkb/events/{event_id}")
-async def delete_event(event_id: str, _: bool = Depends(verify_api_key)):
+async def delete_event(
+    event_id: str,
+    caller: AuthenticatedCaller = Depends(authenticate_caller),
+):
     """Delete a PKB event (Soberania)."""
     kernel = get_kernel()
     deleted = await kernel.knowledge.store.delete(event_id)
@@ -301,7 +380,7 @@ async def delete_event(event_id: str, _: bool = Depends(verify_api_key)):
 
 
 @app.delete("/api/v1/pkb")
-async def clear_pkb(_: bool = Depends(verify_api_key)):
+async def clear_pkb(caller: AuthenticatedCaller = Depends(authenticate_caller)):
     """Clear all PKB data (Soberania)."""
     kernel = get_kernel()
     await kernel.knowledge.delete_all()

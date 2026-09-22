@@ -1520,4 +1520,3 @@ async def test_d24_composition_without_parallel_system(tmp_path):
     assert not hasattr(components, "delegation_authority")
     assert components.mission_runtime.dispatch_guard is not None
     assert components.mission_runtime._mission_record_store is not None
-

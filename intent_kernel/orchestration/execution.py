@@ -12,6 +12,7 @@ from typing import Any
 from intent_kernel.contracts import (
     AgentLimits,
     AgentRequest,
+    CapabilityRequest,
     CapabilityResult,
     ConstitutionEngine,
     EffectType,
@@ -518,12 +519,38 @@ class CapabilityExecutionService:
         from intent_kernel.rrm.binding import ExecutionPrecondition
 
         if registration.executor_kind is ExecutorKind.CORE_APP:
-            return await self.capability_router.execute_exact(
-                mission,
-                registration,
-                payload,
-                context,
+            # Dispatch the exact selected binding directly — no second router lookup.
+            # The registration.object (executor) is the same object that was selected
+            # by CanonicalResourceBindingAuthority and revalidated. Using a fresh
+            # CapabilityRouter lookup after revalidation violates the identity invariant:
+            #   SELECTED = REVALIDATED = DISPATCHED
+            # Using the registration's executor directly prevents TOCTOU binding
+            # replacement where the router's internal maps are swapped between
+            # selection and dispatch.
+            executor = registration.executor
+            if executor is None:
+                return CapabilityResult(
+                    capability=registration.capability.name,
+                    success=False,
+                    error_code=ErrorCode.CAPABILITY_UNAVAILABLE,
+                    metadata={"mission_id": str(mission.id)},
+                )
+            result = await executor.execute(
+                CapabilityRequest(
+                    mission=mission,
+                    capability=registration.capability.name,
+                    payload=deepcopy(payload or {}),
+                    context=deepcopy(context or {}),
+                )
             )
+            result.metadata.setdefault(
+                "core_app", getattr(executor, "app_id", registration.executor_id)
+            )
+            result.metadata.setdefault("mission_id", str(mission.id))
+            result.metadata.setdefault(
+                "dispatched_binding", registration.binding_identity
+            )
+            return result
         if registration.executor_kind is ExecutorKind.AGENT:
             return await self.agent_orchestrator.execute(
                 AgentRequest(

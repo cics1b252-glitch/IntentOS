@@ -24,7 +24,13 @@ from intent_kernel.contracts import (
     ProviderResponse,
 )
 from intent_kernel.orchestration.registry import ExecutorKind
-from intent_kernel.rrm.models import ResourceStatus
+from intent_kernel.promotion.models import BootstrapResourceDeclaration
+from intent_kernel.rrm.models import (
+    ConditionalResourceStatusRequest,
+    ConditionalUpdateOutcome,
+    ResourceStatus,
+    ResourceType,
+)
 from intent_kernel.rrm.projection import RuntimeResourceProjection
 
 APP_ID = "replaceable"
@@ -76,6 +82,17 @@ def _register_core_app(components, app) -> None:
     components.capability_router.register(app)
     components.capability_registry.register_core_app(app)
     RuntimeResourceProjection(components.resource_manager).project_core_app(app)
+    registrations = components.capability_registry.discover(
+        CAPABILITY,
+        executor_kind=ExecutorKind.CORE_APP,
+    )
+    registration = next(
+        r for r in registrations if r.executor_id == app.app_id
+    )
+    report = components.resource_promotion_service.bootstrap_govern(
+        [BootstrapResourceDeclaration.from_registration(registration)]
+    )
+    assert report.success, [(e.resource_id, e.reason) for e in report.entries]
 
 
 async def _running_mission(components, domain: Domain = Domain.OTHER):
@@ -384,8 +401,17 @@ async def test_rrm_unavailable_between_selection_and_dispatch_fails_closed(tmp_p
     mission = await _running_mission(components)
 
     def break_rrm() -> None:
-        resource = components.resource_manager.get_capability(CAPABILITY)
-        resource.status = ResourceStatus.UNAVAILABLE
+        snapshot = components.resource_manager.get_capability(CAPABILITY)
+        update = components.resource_manager.conditional_update_status(
+            ConditionalResourceStatusRequest(
+                resource_type=ResourceType.CAPABILITY,
+                resource_id=CAPABILITY,
+                expected_governed_registration_id=snapshot.governed_registration_id,
+                expected_generation=snapshot.generation,
+                desired_status=ResourceStatus.UNAVAILABLE,
+            )
+        )
+        assert update.outcome is ConditionalUpdateOutcome.APPLIED
 
     components.capability_execution_service.constitution = MutatingConstitution(
         components.constitution_engine, break_rrm

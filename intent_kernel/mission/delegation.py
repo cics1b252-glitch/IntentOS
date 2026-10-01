@@ -551,10 +551,26 @@ def prove_edge(
             _triple(r)
             for r in (child_grant.get("delegation_allowed_resources", ()) or ())
         }
-        parent_resources = set(parent_view.get("resources", set()))
+        parent_resources = set(parent_view.get("resources", set()) or set())
+        # FRONT-H1.1: an empty child allowlist must never mean unrestricted
+        # authority under a restricted parent (mirrors the capability rule
+        # above: empty child capabilities always fail). Unrestricted parent
+        # dimensions (empty set) keep existing admit-any semantics.
+        if parent_resources and not child_resources:
+            return False, "resource-escalation"
         if child_resources and not child_resources <= parent_resources:
             return False, "resource-escalation"
+        parent_targets = parent_view.get("targets")
         child_targets = set(child_grant.get("delegation_allowed_targets", ()) or ())
+        # None = root edge with no parent set to narrow (existing behavior:
+        # any explicit child set admitted). A non-empty parent set requires
+        # an explicit non-empty child subset.
+        if (
+            parent_targets is not None
+            and set(parent_targets or ())
+            and not child_targets
+        ):
+            return False, "target-escalation"
         if child_targets and not target_subset(
             child_targets, parent_view.get("targets")
         ):

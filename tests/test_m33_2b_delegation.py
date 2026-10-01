@@ -1633,3 +1633,219 @@ async def test_d26_child_binding_inside_grant_target_proceeds(tmp_path):
         _ev()).mission_revision
     assert rev2 == rev + 2
     assert app.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# H1-01..H1-10: resource/target allowlist monotonicity (FRONT-H1.1)
+# ---------------------------------------------------------------------------
+
+_H1_CEILINGS = {
+    "max_risk_level": "critical",
+    "max_timeout_seconds": 3600.0,
+    "require_verification": True,
+    "max_side_effect": "EXTERNAL_IRREVERSIBLE",
+}
+
+
+def _h1_parent_view(targets, resources=(("r", "grid-1", 1),)):
+    return {
+        "capabilities": {"c.rt"},
+        "resources": set(resources),
+        "targets": None if targets is None else set(targets),
+        "ceilings": dict(_H1_CEILINGS),
+        "expiry": "",
+    }
+
+
+def _h1_grant(targets=(), resources=(), caps=("c.rt",)):
+    return {
+        "delegation_allowed_capabilities": list(caps),
+        "delegation_allowed_resources": [
+            {"resource_id": r, "governed_registration_id": g,
+             "generation": n} for (r, g, n) in resources
+        ],
+        "delegation_allowed_targets": list(targets),
+        "delegation_max_risk_level": "critical",
+        "delegation_max_timeout_seconds": 3600.0,
+        "delegation_require_verification": True,
+        "delegation_max_side_effect": "EXTERNAL_IRREVERSIBLE",
+        "delegation_expires_at": "",
+    }
+
+
+def _h1_child_view(target="T2", resource_id="r", grid="grid-1", gen=1,
+                   capability="c.rt"):
+    return {"capability": capability, "grid": grid, "generation": gen,
+            "target": target, "resource_id": resource_id}
+
+
+def test_h1_01_empty_child_targets_under_restricted_parent_deny():
+    ok, reason = prove_edge(
+        _h1_grant(targets=(),
+                  resources=[("r", "grid-1", 1)]),
+        _h1_child_view(target="T2"),
+        _h1_parent_view({"T1"}),
+    )
+    assert (ok, reason) == (False, "target-escalation")
+
+
+def test_h1_02_valid_target_subset_allows():
+    ok, reason = prove_edge(
+        _h1_grant(targets=("T1",),
+                  resources=[("r", "grid-1", 1)]),
+        _h1_child_view(target="T1"),
+        _h1_parent_view({"T1", "T2"}),
+    )
+    assert (ok, reason) == (True, "")
+
+
+def test_h1_03_explicit_out_of_scope_target_denies():
+    ok, reason = prove_edge(
+        _h1_grant(targets=("T2",),
+                  resources=[("r", "grid-1", 1)]),
+        _h1_child_view(target="T2"),
+        _h1_parent_view({"T1"}),
+    )
+    assert (ok, reason) == (False, "target-escalation")
+
+
+def test_h1_04_action_outside_child_allowlist_denies():
+    ok, reason = prove_edge(
+        _h1_grant(targets=("T1",),
+                  resources=[("r", "grid-1", 1)]),
+        _h1_child_view(target="T2"),
+        _h1_parent_view({"T1", "T2"}),
+    )
+    assert (ok, reason) == (False, "child-binding-outside-grant:target")
+
+
+def test_h1_05_empty_child_resources_under_restricted_parent_deny():
+    ok, reason = prove_edge(
+        _h1_grant(targets=("T1",), resources=[]),
+        {"capability": "c.rt", "grid": "grid-9", "generation": 9,
+         "target": "T1", "resource_id": "r2"},
+        _h1_parent_view({"T1"}),
+    )
+    assert (ok, reason) == (False, "resource-escalation")
+
+
+def test_h1_06_valid_resource_subset_allows():
+    ok, reason = prove_edge(
+        _h1_grant(targets=("T1",),
+                  resources=[("r", "grid-1", 1)]),
+        _h1_child_view(target="T1"),
+        _h1_parent_view({"T1"}),
+    )
+    assert (ok, reason) == (True, "")
+
+
+def test_h1_07_empty_child_capabilities_unchanged():
+    ok, reason = prove_edge(
+        _h1_grant(targets=("T1",),
+                  resources=[("r", "grid-1", 1)], caps=()),
+        _h1_child_view(target="T1"),
+        _h1_parent_view({"T1"}),
+    )
+    assert (ok, reason) == (False, "capability-escalation")
+
+
+async def _h1_chain(tmp_path, name):
+    """p1 (AUTH) + c1/c2/c3 (PENDING, target "r"); governed + delegate live."""
+    components = _components(tmp_path, tmp_path / ".intent-os")
+    app = CountingApp(capability="c.rt")
+    grid, gen, _snap = _govern(components, app)
+    dgrid, dgen, _dsnap = _govern_delegate(components)
+    mission = await _started_mission(components, name)
+    mid = str(mission.id)
+    store = _mission_store(tmp_path)
+    spec_actions = [{
+        "node": _make_node(node_id="p1", agent_id="ex-rt",
+                           idempotency_key="rk-h1-p"),
+        "grid": grid, "gen": gen,
+    }]
+    for aid in ("c1", "c2", "c3"):
+        spec_actions.append({
+            "node": _make_node(node_id=aid, agent_id="delegate-1",
+                               idempotency_key=f"rk-h1-{aid}"),
+            "grid": grid, "gen": gen, "executor": "delegate-1",
+        })
+    _bind_record(store, mid, spec_actions)
+    authority = _authority(store)
+    rev = _drive_authorized(authority, mid, "p1")
+    return {
+        "components": components, "store": store, "mid": mid,
+        "authority": authority, "rev": rev,
+        "grid": grid, "gen": gen, "dgrid": dgrid, "dgen": dgen,
+    }
+
+
+def _h1_grant_kw(ctx, targets, resources=None):
+    res = ([{"resource_id": "r",
+             "governed_registration_id": ctx["grid"],
+             "generation": ctx["gen"]}]
+           if resources is None else resources)
+    return _grant_kwargs(
+        ctx["grid"], ctx["gen"], "delegate-1", ctx["dgrid"],
+        allowed_capabilities=("c.rt",),
+        allowed_resources=res, allowed_targets=list(targets))
+
+
+@pytest.mark.asyncio
+async def test_h1_08_restart_preserves_allow_and_deny(tmp_path):
+    ctx = await _h1_chain(tmp_path, "h1-08")
+    authority, store, mid = ctx["authority"], ctx["store"], ctx["mid"]
+    authority.grant_delegation(
+        mid, "c1", _rev_for(authority, mid), parent_action_id="p1",
+        **_h1_grant_kw(ctx, ["r"]))
+    _drive_authorized(authority, mid, "c1")
+    with pytest.raises(ActionTransitionError, match="target-escalation"):
+        authority.grant_delegation(
+            mid, "c2", _rev_for(authority, mid), parent_action_id="c1",
+            **_h1_grant_kw(ctx, []))
+    # Restart: fresh store + authority over the same durable dirs.
+    store2 = _mission_store(tmp_path)
+    authority2 = _authority(store2)
+    assert store2.load(mid)["revision"] == _rev_for(authority, mid)
+    ok, _why, _chain = verify_grant_dispatch(store2.load(mid), "c1")
+    assert ok is True
+    with pytest.raises(ActionTransitionError, match="target-escalation"):
+        authority2.grant_delegation(
+            mid, "c2", _rev_for(authority2, mid), parent_action_id="c1",
+            **_h1_grant_kw(ctx, []))
+
+
+@pytest.mark.asyncio
+async def test_h1_09_multihop_empty_grandchild_denies(tmp_path):
+    ctx = await _h1_chain(tmp_path, "h1-09")
+    authority, mid = ctx["authority"], ctx["mid"]
+    authority.grant_delegation(
+        mid, "c1", _rev_for(authority, mid), parent_action_id="p1",
+        **_h1_grant_kw(ctx, ["r", "T2"]))
+    _drive_authorized(authority, mid, "c1")
+    authority.grant_delegation(
+        mid, "c2", _rev_for(authority, mid), parent_action_id="c1",
+        **_h1_grant_kw(ctx, ["r"]))
+    _drive_authorized(authority, mid, "c2")
+    with pytest.raises(ActionTransitionError, match="target-escalation"):
+        authority.grant_delegation(
+            mid, "c3", _rev_for(authority, mid), parent_action_id="c2",
+            **_h1_grant_kw(ctx, []))
+    with pytest.raises(ActionTransitionError, match="target-escalation"):
+        authority.grant_delegation(
+            mid, "c3", _rev_for(authority, mid), parent_action_id="c2",
+            **_h1_grant_kw(ctx, ["T9"]))
+
+
+@pytest.mark.asyncio
+async def test_h1_10_narrowed_ceilings_path_unchanged(tmp_path):
+    ctx = await _h1_chain(tmp_path, "h1-10")
+    authority, store, mid = ctx["authority"], ctx["store"], ctx["mid"]
+    kw = _h1_grant_kw(ctx, ["r"])
+    kw.update(max_risk_level="low", max_timeout_seconds=60.0)
+    authority.grant_delegation(
+        mid, "c1", _rev_for(authority, mid), parent_action_id="p1", **kw)
+    stored = store.load(mid)["action_states"]["c1"]
+    assert stored["delegation_max_risk_level"] == "low"
+    assert stored["delegation_max_timeout_seconds"] == 60.0
+    ok, _why, _chain = verify_grant_dispatch(store.load(mid), "c1")
+    assert ok is True

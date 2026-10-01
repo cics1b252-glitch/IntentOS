@@ -1520,3 +1520,116 @@ async def test_d24_composition_without_parallel_system(tmp_path):
     assert not hasattr(components, "delegation_authority")
     assert components.mission_runtime.dispatch_guard is not None
     assert components.mission_runtime._mission_record_store is not None
+
+
+# ---------------------------------------------------------------------------
+# D25/D26 — FRONT-A target ceiling: delegated-action target membership
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_d25_child_binding_outside_grant_target_rejected(tmp_path):
+    """FRONT-A negative: the child action's own target (its durable
+    expected_resource_id) lies outside the narrowed child grant's
+    delegation_allowed_targets. Grant-scope narrowing alone would pass
+    (root parent targets are unbounded), so only the restored
+    action-target binding check can deny this. Expected DENY with
+    child-binding-outside-grant:target and zero productive effect."""
+    components = _components(tmp_path, tmp_path / ".intent-os")
+    app = CountingApp(capability="resource.d25")
+    grid, gen, _snap = _govern(components, app)
+    _govern_delegate(components, agent_id="delegate-1",
+                     grid="gov-delegate-1")
+    mission = await _started_mission(components, "d25")
+    mid = str(mission.id)
+    store = _mission_store(tmp_path)
+    cap = "resource.d25"
+    nodes = {
+        nid: _make_node(node_id=nid, agent_id="delegate-1",
+                        idempotency_key=f"rk-{nid}", capability=cap)
+        for nid in ("nA", "nB")
+    }
+    _bind_record(store, mid, [
+        {"node": nodes[nid], "grid": grid, "gen": gen,
+         "executor": "delegate-1", "resource_id": "t1"}
+        for nid in ("nA", "nB")
+    ])
+    authority = _authority(store)
+    rev = authority.transition_action(
+        mid, "nA", 1, ActionState.PENDING, ActionState.AUTHORIZED,
+        _ev()).mission_revision
+    before = store.load(mid)
+    import pytest as _p
+    with _p.raises(ActionTransitionError) as exc:
+        authority.grant_delegation(
+            mid, "nB", rev, parent_action_id="nA",
+            delegate_agent_id="delegate-1",
+            delegate_governed_registration_id="gov-delegate-1",
+            allowed_capabilities=[cap],
+            allowed_resources=[{"resource_id": "t1",
+                                "governed_registration_id": grid,
+                                "generation": gen}],
+            allowed_targets=["t2"],
+            max_risk_level="critical", max_timeout_seconds=3600.0,
+            require_verification=True,
+            max_side_effect="EXTERNAL_IRREVERSIBLE",
+            expires_at="")
+    assert "child-binding-outside-grant:target" in str(exc.value)
+    after = store.load(mid)
+    assert after["revision"] == before["revision"]
+    assert after["action_states"]["nB"]["state"] == ActionState.PENDING.value
+    assert not after["action_states"]["nB"].get("delegation_id")
+    assert app.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_d26_child_binding_inside_grant_target_proceeds(tmp_path):
+    """FRONT-A control: identical setup to D25 but the child grant's
+    target allowlist contains the child action's own target. The grant
+    must succeed, persist the narrowed allowlist, and leave the action
+    usable (drivable to AUTHORIZED) with zero dispatches on the grant
+    path itself."""
+    components = _components(tmp_path, tmp_path / ".intent-os")
+    app = CountingApp(capability="resource.d26")
+    grid, gen, _snap = _govern(components, app)
+    _govern_delegate(components, agent_id="delegate-1",
+                     grid="gov-delegate-1")
+    mission = await _started_mission(components, "d26")
+    mid = str(mission.id)
+    store = _mission_store(tmp_path)
+    cap = "resource.d26"
+    nodes = {
+        nid: _make_node(node_id=nid, agent_id="delegate-1",
+                        idempotency_key=f"rk-{nid}", capability=cap)
+        for nid in ("nA", "nB")
+    }
+    _bind_record(store, mid, [
+        {"node": nodes[nid], "grid": grid, "gen": gen,
+         "executor": "delegate-1", "resource_id": "t1"}
+        for nid in ("nA", "nB")
+    ])
+    authority = _authority(store)
+    rev = authority.transition_action(
+        mid, "nA", 1, ActionState.PENDING, ActionState.AUTHORIZED,
+        _ev()).mission_revision
+    result = authority.grant_delegation(
+        mid, "nB", rev, parent_action_id="nA",
+        delegate_agent_id="delegate-1",
+        delegate_governed_registration_id="gov-delegate-1",
+        allowed_capabilities=[cap],
+        allowed_resources=[{"resource_id": "t1",
+                            "governed_registration_id": grid,
+                            "generation": gen}],
+        allowed_targets=["t1"],
+        max_risk_level="critical", max_timeout_seconds=3600.0,
+        require_verification=True,
+        max_side_effect="EXTERNAL_IRREVERSIBLE",
+        expires_at="")
+    assert result.mission_revision == rev + 1
+    assert store.load(mid)["action_states"]["nB"][
+        "delegation_allowed_targets"] == ["t1"]
+    rev2 = authority.transition_action(
+        mid, "nB", result.mission_revision,
+        ActionState.PENDING, ActionState.AUTHORIZED,
+        _ev()).mission_revision
+    assert rev2 == rev + 2
+    assert app.calls == 0

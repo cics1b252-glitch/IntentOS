@@ -633,7 +633,7 @@ def prove_edge(
         # Target membership: with a non-empty allowlist the action must
         # present an exact listed target. An absent target can never
         # prove membership (fail closed).
-        child_targets = set(child_grant.get("allowed_targets", ()) or ())
+        child_targets = set(child_grant.get("delegation_allowed_targets", ()) or ())
         if child_targets:
             action_target = str(child_view.get("target", "") or "")
             if not action_target or action_target not in child_targets:

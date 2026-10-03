@@ -598,7 +598,8 @@ async def test_clock_07_sound_chain_absent_stays_proven_without_clock(tmp_path):
     data = ctx["store"].load(ctx["mid"])
     ok, why, chain = _dlg.verify_grant_dispatch(
         {"action_states": dict(data["action_states"]),
-         "plan": list(data["plan"])},
+         "plan": list(data["plan"]),
+         "mission_id": ctx["mid"]},
         "c1", now_iso="")
     assert ok, why
     assert _view._chain_expiry_state(chain) == "ABSENT"

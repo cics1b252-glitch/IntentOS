@@ -713,14 +713,18 @@ def walk_chain(
     action_states: Mapping[str, Any],
     leaf_action_id: str,
     now_iso: str,
+    canonical_mission_id: str,
 ) -> Tuple[bool, str, List[Tuple[str, Mapping[str, Any], Mapping[str, Any]]]]:
     """Walk parent_delegation_id links from the leaf to the root.
 
     Returns (ok, reason, chain) where chain is [(action_id, action_dict,
-    grant_dict)] from leaf outward. Enforces: resolvable parents,
-    depth bound, acyclicity, ACTIVE state, unexpired grants, root
-    consistency (every grant's root_* pins the terminal root).
-    Pure durable proof — no RRM, no clock reads (now_iso passed in).
+    grant_dict)] from leaf outward. Enforces: mission anchoring (every
+    walked grant must belong to the canonical enclosing mission),
+    resolvable parents, depth bound, acyclicity, ACTIVE state, unexpired
+    grants, root consistency (every grant's root_* pins the terminal
+    root). Pure durable proof — no RRM, no clock reads (now_iso passed
+    in). ``canonical_mission_id`` is required: cross-mission
+    transplantation fails closed, including on the root edge.
     """
     chain: List[Tuple[str, Mapping[str, Any], Mapping[str, Any]]] = []
     seen = set()
@@ -733,6 +737,14 @@ def walk_chain(
         grant = grant_view(action)
         if grant is None or not grant.get("delegation_id"):
             return False, "unknown-parent-grant", []
+        # FRONT-K1.2: mission anchoring precedes every other evaluation.
+        # Identity first: a grant transplanted from another mission can
+        # never satisfy any later check, including on the root edge
+        # (parent_delegation_id == "" does not exempt it).
+        if str(grant.get("delegation_root_mission_id", "") or "") != canonical_mission_id:
+            return False, "mission-pin-mismatch:root", []
+        if str(grant.get("delegation_parent_mission_id", "") or "") != canonical_mission_id:
+            return False, "mission-pin-mismatch:parent", []
         gid = str(grant.get("delegation_id"))
         if gid in seen:
             return False, "delegation-cycle", []
@@ -813,14 +825,21 @@ def verify_grant_dispatch(
     ``data`` is the FULL mission mapping (with ``action_states`` and
     ``plan``) — never the bare action-states sub-mapping; passing the
     sub-mapping fails closed with unknown-action by construction.
-    Verifies: a grant exists; presenter matches the delegate (when a
-    presenter is given); the chain walks to a consistent root within
-    depth bounds with every grant ACTIVE and unexpired; every edge
-    re-proves child ⊆ parent (creation proof recomputed from durable
-    state, so post-creation tampering fails closed).
+    Canonical mission identity comes from ``data["mission_id"]`` — never
+    from the grant, planner, executor, presenter, or telemetry; a
+    missing/invalid mission identity fails closed. Verifies: a grant
+    exists; every walked grant belongs to the canonical mission;
+    presenter matches the delegate (when a presenter is given); the chain
+    walks to a consistent root within depth bounds with every grant
+    ACTIVE and unexpired; every edge re-proves child ⊆ parent (creation
+    proof recomputed from durable state, so post-creation tampering
+    fails closed).
     Actions without a grant pass through as (True, "not-delegated", []).
     """
     try:
+        canonical_mission_id = data.get("mission_id", "") if isinstance(data, Mapping) else ""
+        if not isinstance(canonical_mission_id, str) or not canonical_mission_id.strip():
+            return False, "missing-canonical-mission", []
         action_states = data.get("action_states", {}) or {}
         action = action_states.get(action_id)
         if not isinstance(action, dict):
@@ -835,7 +854,7 @@ def verify_grant_dispatch(
                 grant.get("delegation_delegate_agent_id", "") or ""
             ):
                 return False, "presenter-not-delegate", []
-        ok, reason, chain = walk_chain(action_states, action_id, now_iso)
+        ok, reason, chain = walk_chain(action_states, action_id, now_iso, canonical_mission_id)
         if not ok:
             return False, reason, []
         # Re-prove every edge from durable state.

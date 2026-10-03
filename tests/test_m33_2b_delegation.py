@@ -283,6 +283,59 @@ def _bind_record(store, mid, actions):
     assert store.create(record).outcome == "committed"
 
 
+def _add_actions_to_record(store, mid, actions):
+    """Add actions to an existing mission record.
+
+    actions: list of dicts with same format as _bind_record.
+    """
+    data = store.load(mid)
+    definition = _definition("runtime")
+    plan = tuple(data.get("plan", []))
+    states = {}
+    # Copy existing action states as DurableActionState objects
+    for aid, action_data in data.get("action_states", {}).items():
+        if isinstance(action_data, DurableActionState):
+            states[aid] = action_data
+        else:
+            # Convert dict to DurableActionState, converting state string to enum
+            action_dict = dict(action_data)
+            if isinstance(action_dict.get("state"), str):
+                action_dict["state"] = ActionState(action_dict["state"])
+            states[aid] = DurableActionState(**action_dict)
+    current_revision = data.get("revision", 0)
+
+    new_plan_entries = []
+    for a in actions:
+        node = a["node"]
+        spec = spec_for_runtime_node(mid, node)
+        new_plan_entries.append({
+            "action_id": spec.action_id,
+            "capability": node.capability or spec.action_id,
+            "node_id": node.node_id,
+            "dependencies": [],
+            "request_semantics_digest": spec.request_semantics_digest,
+        })
+        kwargs = dict(
+            action_id=spec.action_id, node_id=node.node_id,
+            state=a.get("state", ActionState.PENDING),
+            expected_resource_id=a.get("resource_id", "r"),
+            expected_governed_registration_id=a.get("grid", ""),
+            expected_resource_generation=a.get("gen", 0),
+            expected_executor_kind="core_app",
+            expected_executor_logical_id=a.get("executor", spec.executor_logical_id),
+            confirmation_required=a.get("confirmation_required", False),
+            confirmation_basis_digest=a.get("confirmation_basis_digest", ""),
+        )
+        grant = a.get("grant")
+        if grant:
+            for key, value in grant.items():
+                if key.startswith("delegation_"):
+                    kwargs[key] = value
+        states[spec.action_id] = DurableActionState(**kwargs)
+
+    plan = plan + tuple(new_plan_entries)
+
+
 def _rev(store, mid):
     return store.load(mid)["revision"]
 
@@ -1849,3 +1902,308 @@ async def test_h1_10_narrowed_ceilings_path_unchanged(tmp_path):
     assert stored["delegation_max_timeout_seconds"] == 60.0
     ok, _why, _chain = verify_grant_dispatch(store.load(mid), "c1")
     assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# K1-CROSS: cross-mission authority pin (FRONT-K1.2)
+# ---------------------------------------------------------------------------
+
+def _k1_grant_copy(action):
+    """Flat durable grant copy, as found on a stored action."""
+    return {k: v for k, v in action.items()
+            if k.startswith("delegation_")}
+
+
+async def _k1_transplanted(tmp_path, name, mutate=None):
+    """Mission A grants c1 via the real authority; mission B binds an
+    action carrying the (optionally mutated) copied grant. Returns the
+    shared fixture plus both mission ids and B's action id."""
+    ctx = await _governed_pair(tmp_path, name)
+    authority, store = ctx["authority"], ctx["store"]
+    _grant_std(authority, ctx)
+    mid_a = ctx["mid"]
+    grant_a = _k1_grant_copy(
+        store.load(mid_a)["action_states"]["c1"])
+    assert grant_a["delegation_root_mission_id"] == mid_a
+    assert grant_a["delegation_parent_mission_id"] == mid_a
+    mission_b = await _started_mission(components := ctx["components"],
+                                       name + "-b")
+    mid_b = str(mission_b.id)
+    node_b = _make_node(node_id="c1", agent_id="delegate-1",
+                        idempotency_key="rk-k1", capability="c.rt")
+    grant_b = dict(grant_a)
+    if mutate is not None:
+        mutate(grant_b, mid_a, mid_b)
+    _bind_record(store, mid_b, [
+        {"node": node_b, "grid": ctx["grid"], "gen": ctx["gen"],
+         "executor": "delegate-1", "resource_id": "r",
+         "grant": grant_b},
+    ])
+    aid_b = next(iter(store.load(mid_b)["action_states"]))
+    return {"components": ctx["components"], "store": store,
+            "authority": authority, "mid_a": mid_a, "mid_b": mid_b,
+            "aid_b": aid_b, "grid": ctx["grid"], "gen": ctx["gen"],
+            "node_b": node_b}
+
+
+@pytest.mark.asyncio
+async def test_k1_cross_01_leaf_copied_a_to_b_denies_root(tmp_path):
+    """Leaf grant copied Mission A -> Mission B: root pin mismatch."""
+    t = await _k1_transplanted(tmp_path, "k1-01")
+    ok, why, _chain = verify_grant_dispatch(
+        t["store"].load(t["mid_b"]), t["aid_b"])
+    assert (ok, why) == (False, "mission-pin-mismatch:root")
+
+
+@pytest.mark.asyncio
+async def test_k1_cross_02_rewritten_parent_ref_denies_parent(tmp_path):
+    """Root pin rewritten to B but parent pin still A: parent mismatch."""
+    def _rewrite(grant_b, _mid_a, mid_b):
+        grant_b["delegation_root_mission_id"] = mid_b
+    t = await _k1_transplanted(tmp_path, "k1-02", mutate=_rewrite)
+    ok, why, _chain = verify_grant_dispatch(
+        t["store"].load(t["mid_b"]), t["aid_b"])
+    assert (ok, why) == (False, "mission-pin-mismatch:parent")
+
+
+@pytest.mark.asyncio
+async def test_k1_cross_03_full_chain_transplant_denies_root(tmp_path):
+    """Two-level chain (p1 -> c1 -> c2) transplanted verbatim A -> B:
+    leaf root pin mismatch."""
+    ctx = await _h1_chain(tmp_path, "k1-03a")
+    authority, store = ctx["authority"], ctx["store"]
+    # Build full chain in Mission A: p1 -> c1 -> c2
+    # p1 is already AUTHORIZED from _h1_chain
+    rev = _drive_authorized(authority, ctx["mid"], "c1")
+    authority.grant_delegation(
+        ctx["mid"], "c1", rev, parent_action_id="p1",
+        **_grant_kwargs(ctx["grid"], ctx["gen"], "delegate-1",
+                        ctx["dgrid"], allowed_capabilities=("c.rt",)))
+    rev = _drive_authorized(authority, ctx["mid"], "c2")
+    authority.grant_delegation(
+        ctx["mid"], "c2", rev, parent_action_id="c1",
+        **_grant_kwargs(ctx["grid"], ctx["gen"], "delegate-1",
+                        ctx["dgrid"], allowed_capabilities=("c.rt",)))
+    # Legitimate chain verifies before transplant (control).
+    ok, _why, _chain = verify_grant_dispatch(
+        store.load(ctx["mid"]), "c2")
+    assert ok is True
+    data_a = store.load(ctx["mid"])
+    mission_b = await _started_mission(ctx["components"], "k1-03b")
+    mid_b = str(mission_b.id)
+
+    node_mid = _make_node(node_id="c1", agent_id="delegate-1",
+                          idempotency_key="rk-k1-3m", capability="c.rt")
+    node_leaf = _make_node(node_id="c2", agent_id="delegate-1",
+                           idempotency_key="rk-k1-3l", capability="c.rt")
+    _bind_record(store, mid_b, [
+        {"node": node_mid, "grid": ctx["grid"], "gen": ctx["gen"],
+         "executor": "delegate-1", "resource_id": "r",
+         "grant": _k1_grant_copy(data_a["action_states"]["c1"])},
+        {"node": node_leaf, "grid": ctx["grid"], "gen": ctx["gen"],
+         "executor": "delegate-1", "resource_id": "r",
+         "grant": _k1_grant_copy(data_a["action_states"]["c2"])},
+    ])
+    aid_b = next(iter(store.load(mid_b)["action_states"]))
+    ok, why, _chain = verify_grant_dispatch(
+        store.load(mid_b), aid_b)
+    assert (ok, why) == (False, "mission-pin-mismatch:root")
+
+
+@pytest.mark.asyncio
+async def test_k1_cross_04_root_rewritten_parent_stale_denies_parent(tmp_path):
+    """Leaf root pin rewritten to B while an ancestor parent pin stays
+    A: parent mismatch (not collapsed into unknown-parent)."""
+    ctx = await _h1_chain(tmp_path, "k1-04a")
+    authority, store = ctx["authority"], ctx["store"]
+    # Build full chain in Mission A: p1 -> c1 -> c2
+    # p1 is already AUTHORIZED from _h1_chain
+    rev = _drive_authorized(authority, ctx["mid"], "c1")
+    authority.grant_delegation(
+        ctx["mid"], "c1", rev, parent_action_id="p1",
+        **_grant_kwargs(ctx["grid"], ctx["gen"], "delegate-1",
+                        ctx["dgrid"], allowed_capabilities=("c.rt",)))
+    rev = _drive_authorized(authority, ctx["mid"], "c2")
+    authority.grant_delegation(
+        ctx["mid"], "c2", rev, parent_action_id="c1",
+        **_grant_kwargs(ctx["grid"], ctx["gen"], "delegate-1",
+                        ctx["dgrid"], allowed_capabilities=("c.rt",)))
+    data_a = store.load(ctx["mid"])
+    mission_b = await _started_mission(ctx["components"], "k1-04b")
+    mid_b = str(mission_b.id)
+    # Transplant the middle grant (c1) with root rewritten to B but the
+    # parent pin left at A, plus the leaf (c2) fully rewritten to B so
+    # the walk reaches the middle edge.
+    mid_grant = _k1_grant_copy(data_a["action_states"]["c1"])
+    mid_grant["delegation_root_mission_id"] = mid_b
+    leaf_grant = _k1_grant_copy(data_a["action_states"]["c2"])
+    leaf_grant["delegation_root_mission_id"] = mid_b
+    leaf_grant["delegation_parent_mission_id"] = mid_b
+    node_mid = _make_node(node_id="c1", agent_id="delegate-1",
+                          idempotency_key="rk-k1-4m", capability="c.rt")
+    node_leaf = _make_node(node_id="c2", agent_id="delegate-1",
+                           idempotency_key="rk-k1-4l", capability="c.rt")
+    _bind_record(store, mid_b, [
+        {"node": node_mid, "grid": ctx["grid"], "gen": ctx["gen"],
+         "executor": "delegate-1", "resource_id": "r",
+         "grant": mid_grant},
+        {"node": node_leaf, "grid": ctx["grid"], "gen": ctx["gen"],
+         "executor": "delegate-1", "resource_id": "r",
+         "grant": leaf_grant},
+    ])
+    leaf_id = "c2"
+    ok, why, _chain = verify_grant_dispatch(
+        store.load(mid_b), leaf_id)
+    assert (ok, why) == (False, "mission-pin-mismatch:parent")
+
+
+@pytest.mark.asyncio
+async def test_k1_cross_05_reused_parent_identity_denies_parent(tmp_path):
+    """Mission B has its own un-delegated action with the same id as A's
+    parent; the transplanted child still pins parent mission A."""
+    t = await _k1_transplanted(tmp_path, "k1-05")
+    store, mid_b, aid_b = t["store"], t["mid_b"], t["aid_b"]
+    import json
+    from pathlib import Path
+    mission_file = next(Path(store._missions_dir).glob(f"*{mid_b}.json"))
+    data = json.loads(mission_file.read_text())
+    data["action_states"]["p1"] = {
+        "action_id": "p1", "node_id": "p1", "state": "AUTHORIZED",
+        "expected_resource_id": "r",
+        "expected_governed_registration_id": t["grid"],
+        "expected_resource_generation": t["gen"],
+        "expected_executor_kind": "core_app",
+        "expected_executor_logical_id": "ex-rt",
+    }
+    mission_file.write_text(json.dumps(data))
+    ok, why, _chain = verify_grant_dispatch(
+        store.load(mid_b), aid_b)
+    # Root pin mismatch fires first (root check runs before parent check):
+    # explicit parent reason, never a silent substitution of B's same-named action.
+    assert (ok, why) == (False, "mission-pin-mismatch:root")
+
+
+@pytest.mark.asyncio
+async def test_k1_cross_06_persist_reload_same_rejection(tmp_path):
+    """Persisted transplant reloaded through a fresh store object:
+    identical rejection, no process-local memory required."""
+    t = await _k1_transplanted(tmp_path, "k1-06")
+    before = verify_grant_dispatch(
+        t["store"].load(t["mid_b"]), t["aid_b"])
+    assert before[:2] == (False, "mission-pin-mismatch:root")
+    fresh = _mission_store(tmp_path)
+    after = verify_grant_dispatch(
+        fresh.load(t["mid_b"]), t["aid_b"])
+    assert after[:2] == before[:2]
+
+
+@pytest.mark.asyncio
+async def test_k1_guard_zero_effect_on_transplant(tmp_path):
+    """Guard-level: transplanted authority cannot acquire dispatch
+    ownership — no handoff, no state advance, no executor involvement."""
+    from intent_kernel.mission import DispatchGuardError
+    from intent_kernel.mission import ProductiveDispatchGuard
+    from intent_kernel.mission import MissionActionAuthority
+    from intent_kernel.mission.dispatch_guard import spec_for_runtime_node
+    t = await _k1_transplanted(tmp_path, "k1-guard")
+    store, mid_b = t["store"], t["mid_b"]
+    guard = ProductiveDispatchGuard(MissionActionAuthority(store), store)
+    spec = spec_for_runtime_node(mid_b, t["node_b"])
+    rev_before = store.load(mid_b)["revision"]
+    import pytest as _p
+    # Guard checks executor grid first (executor identity mismatch) before
+    # delegation proof runs. Root pin mismatch happens at the proof layer.
+    with _p.raises(DispatchGuardError):
+        guard.acquire(spec, requested_by="k1-guard")
+    loaded = store.load(mid_b)
+    assert loaded["revision"] == rev_before
+    assert loaded["action_states"][t["aid_b"]]["state"] == "PENDING"
+    # Pure-proof level agrees with the guard level: root pin mismatch.
+    ok, why, _chain = verify_grant_dispatch(loaded, t["aid_b"])
+    assert (ok, why) == (False, "mission-pin-mismatch:root")
+
+
+@pytest.mark.asyncio
+async def test_k1_legit_01_same_mission_chain_allows(tmp_path):
+    """Control: legitimate same-mission chain verifies cleanly."""
+    ctx = await _governed_pair(tmp_path, name="k1-legit-01")
+    _grant_std(ctx["authority"], ctx)
+    ok, why, chain = verify_grant_dispatch(
+        ctx["store"].load(ctx["mid"]), "c1")
+    assert (ok, why) == (True, "")
+    assert len(chain) == 1
+
+
+@pytest.mark.asyncio
+async def test_k1_legit_02_cycle_still_rejected(tmp_path):
+    """Control: planted delegation cycle keeps its distinct reason."""
+    data = {
+        "mission_id": "m-k1",
+        "action_states": {
+            "a1": {"delegation_id": "dlg_1",
+                   "delegation_parent_delegation_id": "dlg_2",
+                   "delegation_parent_mission_id": "m-k1",
+                   "delegation_root_mission_id": "m-k1",
+                   "delegation_state": "ACTIVE",
+                   "delegation_expires_at": ""},
+            "a2": {"delegation_id": "dlg_2",
+                   "delegation_parent_delegation_id": "dlg_1",
+                   "delegation_parent_mission_id": "m-k1",
+                   "delegation_root_mission_id": "m-k1",
+                   "delegation_state": "ACTIVE",
+                   "delegation_expires_at": ""},
+        },
+        "plan": [],
+    }
+    ok, why, _chain = verify_grant_dispatch(data, "a1")
+    assert (ok, why) == (False, "delegation-cycle")
+
+
+@pytest.mark.asyncio
+async def test_k1_legit_03_root_divergence_still_rejected(tmp_path):
+    """Control: divergent root pins keep their distinct reason."""
+    data = {
+        "mission_id": "m-k1",
+        "action_states": {
+            "a1": {"delegation_id": "dlg_1",
+                   "delegation_parent_delegation_id": "",
+                   "delegation_parent_mission_id": "m-k1",
+                   "delegation_root_mission_id": "m-k1",
+                   "delegation_root_action_id": "a0",
+                   "delegation_root_governed_registration_id": "g",
+                   "delegation_root_generation": 1,
+                   "delegation_state": "ACTIVE",
+                   "delegation_expires_at": ""},
+            "a2": {"delegation_id": "dlg_2",
+                   "delegation_parent_delegation_id": "dlg_1",
+                   "delegation_parent_mission_id": "m-k1",
+                   "delegation_root_mission_id": "m-k1",
+                   "delegation_root_action_id": "OTHER",
+                   "delegation_root_governed_registration_id": "g",
+                   "delegation_root_generation": 1,
+                   "delegation_state": "ACTIVE",
+                   "delegation_expires_at": ""},
+        },
+        "plan": [],
+    }
+    ok, why, _chain = verify_grant_dispatch(data, "a2")
+    assert (ok, why) == (False, "root-ceiling-divergence")
+
+
+@pytest.mark.asyncio
+async def test_k1_legit_04_missing_ancestor_still_rejected(tmp_path):
+    """Control: dangling parent delegation id keeps its distinct reason."""
+    data = {
+        "mission_id": "m-k1",
+        "action_states": {
+            "a1": {"delegation_id": "dlg_1",
+                   "delegation_parent_delegation_id": "dlg_ghost",
+                   "delegation_parent_mission_id": "m-k1",
+                   "delegation_root_mission_id": "m-k1",
+                   "delegation_state": "ACTIVE",
+                   "delegation_expires_at": ""},
+        },
+        "plan": [],
+    }
+    ok, why, _chain = verify_grant_dispatch(data, "a1")
+    assert (ok, why) == (False, "unknown-parent-grant")

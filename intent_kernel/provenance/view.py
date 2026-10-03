@@ -427,7 +427,8 @@ class AuthorityProvenanceView:
                     _plan = data.get("plan", ())
                     ok, why, _chain = _delegation.verify_grant_dispatch(
                         {"action_states": dict(_states) if isinstance(_states, Mapping) else {},
-                         "plan": list(_plan) if isinstance(_plan, (list, tuple)) else []},
+                         "plan": list(_plan) if isinstance(_plan, (list, tuple)) else [],
+                         "mission_id": mission_id},
                         action_id, now_iso=self._now_iso,
                     )
                 except Exception as exc:

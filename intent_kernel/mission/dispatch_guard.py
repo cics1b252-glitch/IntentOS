@@ -217,6 +217,27 @@ class ProductiveDispatchGuard:
             confirmation_required=confirmation_required,
         )
 
+    def get_authorized_request_digest(
+        self,
+        mission_id: str,
+        action_id: str,
+    ) -> str:
+        """Get the authorized request_semantics_digest for an action from the
+        durable MissionRecord. Returns empty string if not found.
+
+        This reads from the canonical durable MissionRecord, not the legacy
+        mission.plan, ensuring C1 invariant: authorized request == durable
+        authorized request.
+        """
+        data = self._store.load(mission_id)
+        if data is None:
+            return ""
+        plan = data.get("plan", ())
+        for entry in plan:
+            if isinstance(entry, dict) and entry.get("action_id") == action_id:
+                return entry.get("request_semantics_digest", "")
+        return ""
+
     # -- ownership ----------------------------------------------------------
 
     def acquire_for_legacy(

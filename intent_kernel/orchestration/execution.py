@@ -36,6 +36,7 @@ from intent_kernel.pkb import KnowledgePipeline
 from intent_kernel.providers import ProviderManager
 # CanonicalResourceBindingAuthority imported at top level
 from intent_kernel.rrm.binding import CanonicalResourceBindingAuthority
+from intent_kernel.mission.dispatch_guard import _canonical_request_digest
 
 # ExecutionPrecondition and PreconditionKind imported lazily to avoid circular import
 # with orchestration/__init__.py -> orchestration/execution.py -> rrm/binding.py -> orchestration/registry
@@ -327,6 +328,44 @@ class CapabilityExecutionService:
                     "freshness_phase": "hd",
                 },
             )
+
+# C1.1: Exact presented request ↔ authorized durable request binding.
+        # Recompute presented request digest and compare to durable authorized digest.
+        # Must happen before guard.acquire() to ensure zero durable mutation on mismatch.
+        if use_guard and durable_action is not None:
+            # Get the authorized request_semantics_digest from the durable
+            # MissionRecord (canonical source), not from mission.plan.
+            # Support both MissionId objects (with .value) and plain strings.
+            mission_id_raw = getattr(mission, "id", "")
+            mission_id_str = mission_id_str = mission_id.value if hasattr(mission_id_raw, "value") else str(mission_id_raw)
+            if not mission_id_str:
+                return self._error(
+                    capability,
+                    ErrorCode.INVALID_REQUEST,
+                    metadata={"c1_mismatch": "no_mission_id"},
+                )
+            authorized_digest = self.dispatch_guard.get_authorized_request_digest(
+                mission_id_str, durable_action.action_id
+            )
+            if not authorized_digest:
+                return self._error(
+                    capability,
+                    ErrorCode.INVALID_REQUEST,
+                    metadata={"c1_mismatch": "no_authorized_digest_for_action"},
+                )
+            # Recompute presented request digest from caller parameters
+            presented_digest = _canonical_request_digest(
+                capability, payload or {}, idempotency_key
+            )
+            if presented_digest != authorized_digest:
+                return self._error(
+                    capability,
+                    ErrorCode.INVALID_REQUEST,
+                    metadata={
+                        "c1_mismatch": "presented_request_digest_mismatch",
+                        "authorized_action_id": durable_action.action_id,
+                    },
+                )
 
         started = perf_counter()
         # Durable intent BEFORE any external handoff (guarded calls only).

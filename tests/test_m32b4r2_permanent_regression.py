@@ -658,8 +658,8 @@ async def test_b4r2_r15_ambiguous_states_cannot_redispatch(tmp_path):
     )
     _bind_runtime_action(store, str(mission.id), spec)
     with pytest.raises(RuntimeError, match="simulated crash"):
-        await svc.execute(mission.id, app.capability_name, payload=payload, durable_action=spec)
+        await svc.execute(mission.id, app.capability_name, payload=payload, idempotency_key="k", durable_action=spec)
     svc2 = _service(components, _guard_for(store))
-    outcome = await svc2.execute(mission.id, app.capability_name, payload=payload, durable_action=spec)
+    outcome = await svc2.execute(mission.id, app.capability_name, payload=payload, idempotency_key="k", durable_action=spec)
     assert outcome.result.error_code is not None
     assert app.calls == 1

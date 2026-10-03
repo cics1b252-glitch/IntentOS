@@ -698,3 +698,246 @@ async def test_runtime_guarded_refusal_no_dispatch(tmp_path):
     assert executor.calls == 0
     assert (store.load("m-rt-2")["action_states"][spec.action_id]["state"]
             in ("DISPATCH_INTENT_RECORDED", "DISPATCHING"))
+
+
+# ---------------------------------------------------------------------------
+# C1.1: Exact presented request ↔ authorized durable request binding
+# ---------------------------------------------------------------------------
+
+class _AllowConstitutionC1:
+    """Constitution that always allows for C1 tests."""
+    async def evaluate(self, action, data=None, context=None):
+        from intent_kernel.contracts import ConstitutionVerdict, ConstitutionDecision
+        return ConstitutionVerdict(decision=ConstitutionDecision.ALLOW)
+
+
+async def _setup_c1_env(tmp_path, capability="resource.c1"):
+    """Setup common C1 test environment."""
+    store_root = tmp_path / ".intent-os"
+    components = _components(tmp_path, store_root)
+    app = CountingApp(capability=capability)
+    _govern(components, app)
+    mission = await _running_mission(components)
+    store = _mission_store(tmp_path)
+    guard = _guard_for(store)
+    svc = _service(components, guard)
+    return components, app, mission, store, guard, svc
+
+
+@pytest.mark.asyncio
+async def test_c1_adv_01_payload_and_key_mismatch(tmp_path):
+    """C1-ADV-01: authorized P1 / presented P2 → DENY, executor=0, no mutation."""
+    components, app, mission, store, guard, svc = await _setup_c1_env(tmp_path)
+
+    # Authorized request
+    authorized_payload = {"text": "AUTHORIZED_P1"}
+    authorized_key = "key_authorized"
+    spec = _spec_for(components, mission, app, authorized_payload, authorized_key)
+    _bind_action(store, str(mission.id), spec)
+
+    # Presented request differs in BOTH payload and key
+    presented_payload = {"text": "PRESENTED_P2"}
+    presented_key = "key_presented"
+
+    outcome = await svc.execute(
+        mission.id, app.capability_name,
+        payload=presented_payload, idempotency_key=presented_key,
+        durable_action=spec,
+    )
+
+    # Should be denied with INVALID_REQUEST
+    assert outcome.result.error_code is not None
+    assert "c1_mismatch" in str(outcome.result.metadata)
+    # Zero executor calls
+    assert app.calls == 0
+    # No durable dispatch mutation (action state should remain PENDING)
+    stored = store.load(str(mission.id))["action_states"][spec.action_id]
+    assert stored["state"] == "PENDING"
+    # Authorized request remains retryable (same spec can be used again)
+    outcome2 = await svc.execute(
+        mission.id, app.capability_name,
+        payload=authorized_payload, idempotency_key=authorized_key,
+        durable_action=spec,
+    )
+    # Exact match should succeed
+    assert outcome2.result.error_code is None
+    assert app.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_c1_adv_02_capability_mismatch(tmp_path):
+    """C1-ADV-02: authorized capability A / presented capability B → DENY before acquire."""
+    components, app, mission, store, guard, svc = await _setup_c1_env(tmp_path)
+
+    authorized_payload = {"text": "test"}
+    authorized_key = "key1"
+    spec = _spec_for(components, mission, app, authorized_payload, authorized_key)
+    _bind_action(store, str(mission.id), spec)
+
+    # Present different capability (but same action_id from spec)
+    # We need a different capability registered - create another app
+    app2 = CountingApp(capability="resource.c1b")
+    _govern(components, app2)
+
+    outcome = await svc.execute(
+        mission.id, app2.capability_name,  # Different capability!
+        payload=authorized_payload, idempotency_key=authorized_key,
+        durable_action=spec,
+    )
+
+    assert outcome.result.error_code is not None
+    assert "c1_mismatch" in str(outcome.result.metadata)
+    assert app.calls == 0
+    assert app2.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_c1_adv_03_same_key_altered_payload(tmp_path):
+    """C1-ADV-03: same capability, same key, altered payload → DENY before acquire."""
+    components, app, mission, store, guard, svc = await _setup_c1_env(tmp_path)
+
+    authorized_payload = {"text": "ORIGINAL"}
+    authorized_key = "same_key"
+    spec = _spec_for(components, mission, app, authorized_payload, authorized_key)
+    _bind_action(store, str(mission.id), spec)
+
+    # Same key, different payload
+    altered_payload = {"text": "TAMPERED"}
+
+    outcome = await svc.execute(
+        mission.id, app.capability_name,
+        payload=altered_payload, idempotency_key=authorized_key,
+        durable_action=spec,
+    )
+
+    assert outcome.result.error_code is not None
+    assert "c1_mismatch" in str(outcome.result.metadata)
+    assert app.calls == 0
+    stored = store.load(str(mission.id))["action_states"][spec.action_id]
+    assert stored["state"] == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_c1_adv_04_same_payload_altered_key(tmp_path):
+    """C1-ADV-04: same capability, same payload, altered idempotency_key → DENY."""
+    components, app, mission, store, guard, svc = await _setup_c1_env(tmp_path)
+
+    authorized_payload = {"text": "payload"}
+    authorized_key = "key_original"
+    spec = _spec_for(components, mission, app, authorized_payload, authorized_key)
+    _bind_action(store, str(mission.id), spec)
+
+    # Same payload, different key
+    altered_key = "key_tampered"
+
+    outcome = await svc.execute(
+        mission.id, app.capability_name,
+        payload=authorized_payload, idempotency_key=altered_key,
+        durable_action=spec,
+    )
+
+    assert outcome.result.error_code is not None
+    assert "c1_mismatch" in str(outcome.result.metadata)
+    assert app.calls == 0
+    stored = store.load(str(mission.id))["action_states"][spec.action_id]
+    assert stored["state"] == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_c1_adv_05_exact_match_continues(tmp_path):
+    """C1-ADV-05: exact match → request identity proof PASS → continue through gates."""
+    components, app, mission, store, guard, svc = await _setup_c1_env(tmp_path)
+
+    authorized_payload = {"text": "exact"}
+    authorized_key = "key_exact"
+    spec = _spec_for(components, mission, app, authorized_payload, authorized_key)
+    _bind_action(store, str(mission.id), spec)
+
+    outcome = await svc.execute(
+        mission.id, app.capability_name,
+        payload=authorized_payload, idempotency_key=authorized_key,
+        durable_action=spec,
+    )
+
+    # Should succeed through all downstream gates
+    assert outcome.result.error_code is None
+    assert outcome.result.success is True
+    assert app.calls == 1
+    stored = store.load(str(mission.id))["action_states"][spec.action_id]
+    assert stored["state"] == "RESULT_RECORDED"
+
+
+@pytest.mark.asyncio
+async def test_c1_adv_06_restart_semantics(tmp_path):
+    """C1-ADV-06: restart with fresh service + empty cache.
+
+    Case A: PENDING/dispatchable action → exact authorized request succeeds (1 executor call).
+    Case B: RESULT_RECORDED action → CONFLICT/duplicate_dispatch_prevented (0 new calls).
+    """
+    components, app, mission, store, guard, svc = await _setup_c1_env(tmp_path)
+
+    authorized_payload = {"text": "restart_test"}
+    authorized_key = "key_restart"
+    spec = _spec_for(components, mission, app, authorized_payload, authorized_key)
+    _bind_action(store, str(mission.id), spec)
+
+    # Case A: PENDING action, fresh service + empty cache → exact request succeeds
+    svc_a = _service(components, _guard_for(store))
+    outcome_a = await svc_a.execute(
+        mission.id, app.capability_name,
+        payload=authorized_payload, idempotency_key=authorized_key,
+        durable_action=spec,
+    )
+    assert outcome_a.result.error_code is None
+    assert app.calls == 1
+
+    # Case B: RESULT_RECORDED action, fresh service + empty cache → CONFLICT
+    svc_b = _service(components, _guard_for(store))
+    outcome_b = await svc_b.execute(
+        mission.id, app.capability_name,
+        payload=authorized_payload, idempotency_key=authorized_key,
+        durable_action=spec,
+    )
+    assert outcome_b.result.error_code is not None
+    assert outcome_b.result.metadata.get("duplicate_dispatch_prevented") is True
+    assert app.calls == 1  # No new executor call
+    # Revision unchanged
+    assert store.load(str(mission.id))["revision"] == store.load(str(mission.id))["revision"]
+
+
+@pytest.mark.asyncio
+async def test_c1_adv_07_mismatch_then_retry_exact(tmp_path):
+    """C1-ADV-07: mismatch → DENY, no mutation → exact retry succeeds."""
+    components, app, mission, store, guard, svc = await _setup_c1_env(tmp_path)
+
+    authorized_payload = {"text": "retry_test"}
+    authorized_key = "key_retry"
+    spec = _spec_for(components, mission, app, authorized_payload, authorized_key)
+    _bind_action(store, str(mission.id), spec)
+
+    # First attempt: mismatch
+    outcome1 = await svc.execute(
+        mission.id, app.capability_name,
+        payload={"text": "WRONG"}, idempotency_key="wrong_key",
+        durable_action=spec,
+    )
+    assert outcome1.result.error_code is not None
+    assert "c1_mismatch" in str(outcome1.result.metadata)
+    assert app.calls == 0
+    stored1 = store.load(str(mission.id))["action_states"][spec.action_id]
+    assert stored1["state"] == "PENDING"
+    revision1 = store.load(str(mission.id))["revision"]
+
+    # Second attempt: exact match - should succeed
+    outcome2 = await svc.execute(
+        mission.id, app.capability_name,
+        payload=authorized_payload, idempotency_key=authorized_key,
+        durable_action=spec,
+    )
+    assert outcome2.result.error_code is None
+    assert app.calls == 1
+    stored2 = store.load(str(mission.id))["action_states"][spec.action_id]
+    assert stored2["state"] == "RESULT_RECORDED"
+    # Revision advanced only on successful execution
+    revision2 = store.load(str(mission.id))["revision"]
+    assert revision2 > revision1

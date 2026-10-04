@@ -1147,6 +1147,19 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
         except (ValueError, KeyError):
             raise MissionRecordValidationError(f"Invalid mission_status: {mission_status}")
 
+        # Validate intent ceiling (J1) — canonical location is mission_definition.intent_ceiling
+        mission_def = data.get("mission_definition")
+        if isinstance(mission_def, dict):
+            ceiling_data = mission_def.get("intent_ceiling")
+            if ceiling_data is not None:
+                if not isinstance(ceiling_data, dict):
+                    raise MissionRecordValidationError("intent_ceiling must be a dict")
+                try:
+                    from intent_kernel.mission.intent_ceiling import IntentCeiling
+                    IntentCeiling.from_dict(ceiling_data)
+                except (ValueError, TypeError, KeyError) as exc:
+                    raise MissionRecordValidationError(f"Invalid intent_ceiling: {exc}")
+
         # Validate plan
         plan = data.get("plan", [])
         if not isinstance(plan, list):

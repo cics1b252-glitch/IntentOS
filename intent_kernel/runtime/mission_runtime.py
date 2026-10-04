@@ -187,6 +187,7 @@ class MissionRuntime:
         nodes: List[RuntimeNode],
         project_id: str = "GLOBAL",
         execution_policy: Optional[Dict[str, Any]] = None,
+        intent_authority: Any = None,
     ) -> MissionRuntimeInstance:
         """Create a new MissionRuntimeInstance with initialized nodes."""
         instance = MissionRuntimeInstance(
@@ -207,7 +208,9 @@ class MissionRuntime:
         # G8: anchor each new governed mission in durable authority before
         # productive execution. No-op when no store is configured or a
         # record already exists (existing authority is never overwritten).
-        self._anchor_mission_record(mission_id, instance.runtime_id, nodes)
+        self._anchor_mission_record(
+            mission_id, instance.runtime_id, nodes, intent_authority
+        )
         return instance
 
     def _anchor_mission_record(
@@ -215,6 +218,7 @@ class MissionRuntime:
         mission_id: str,
         runtime_id: str,
         nodes: List[RuntimeNode],
+        intent_authority: Any = None,
     ) -> None:
         """Create the authoritative durable MissionRecord for one mission.
 
@@ -243,7 +247,28 @@ class MissionRuntime:
             return
         from intent_kernel.mission.dispatch_guard import spec_for_runtime_node
 
-        definition = MissionDefinition(objective=f"mission:{mission_id}", context={})
+        # J1.2: authority-bearing missions REQUIRE established canonical intent
+        # authority. Absence is never unlimited authority (OPTION_C): a mission
+        # without an attested IntentAuthorityRecord cannot acquire a canonical
+        # plan and therefore cannot acquire productive authority.
+        if intent_authority is None:
+            definition = MissionDefinition(
+                objective=f"mission:{mission_id}", context={}
+            )
+        else:
+            from intent_kernel.mission.intent_authority import (
+                IntentAuthorityRecord,
+            )
+            if not isinstance(intent_authority, IntentAuthorityRecord):
+                raise ValueError(
+                    "intent_authority must be an IntentAuthorityRecord"
+                )
+            definition = MissionDefinition(
+                objective=f"mission:{mission_id}",
+                context={},
+                intent_ceiling=intent_authority.ceiling,
+                intent_authority=intent_authority,
+            )
         probe = MissionRecord(
             mission_id="probe",
             installation_id=ident,
@@ -264,6 +289,17 @@ class MissionRuntime:
                 "node_id": node.node_id,
                 "dependencies": [],
                 "request_semantics_digest": spec.request_semantics_digest,
+                "operation": str(getattr(contract, "action_type", "") or "") if contract else "",
+                "target": str(getattr(contract, "capability", "") or "") if contract else "",
+                "risk_level": str(getattr(contract, "risk_level", "") or "") if contract else "",
+                "side_effect": (
+                    getattr(contract, "side_effect_level", "").value
+                    if contract and hasattr(getattr(contract, "side_effect_level", ""), "value")
+                    else ""
+                ),
+                "verification_required": bool(
+                    getattr(contract, "verification_required", False)
+                ) if contract else False,
             })
             action_states[action_id] = DurableActionState(
                 action_id=action_id,
@@ -275,6 +311,16 @@ class MissionRuntime:
                 expected_executor_kind="",
                 expected_executor_logical_id=spec.executor_logical_id,
             )
+
+        # J1.2: prove PLAN <= INTENT before the plan becomes canonical.
+        from intent_kernel.mission.intent_authority import (
+            prove_plan_actions_against_authority,
+        )
+        from intent_kernel.time_utils import utc_iso
+        prove_plan_actions_against_authority(
+            definition.intent_authority, plan_entries, now_iso=utc_iso()
+        )
+
         record = MissionRecord(
             mission_id=mission_id,
             installation_id=ident,

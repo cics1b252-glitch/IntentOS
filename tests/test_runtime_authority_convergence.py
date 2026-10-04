@@ -13,6 +13,47 @@ from product_bridge import ProductBridge
 from intent_kernel.tools.models import ToolAuthorizationDecisionState
 
 
+async def _explicit_intent_grant(bridge, message: str, permissions=()):
+    """J1.4 fixture convergence.
+
+    Builds the MINIMUM explicit bounded authority the scenario actually needs:
+    it asks the real analyzer what capability it proposes, then grants exactly
+    that one capability — never an unlimited/wildcard ceiling, and never a
+    ceiling inferred from the message text.
+
+    Exercises the real PROPOSED -> APPROVED -> ESTABLISHED chain.
+    """
+    from intent_kernel.mission.intent_grant import (
+        approve_intent_authority,
+        propose_intent_authority,
+    )
+
+    turn = await bridge.conversation_service.analyze_turn(
+        message, project_id="GLOBAL", authorized_permissions=permissions,
+    )
+    match = turn.capability_decision
+    resolved = tuple(
+        r.capability_id for r in getattr(match, "requirements", ()) if r.capability_id
+    )
+    capabilities = resolved or ("knowledge.search",)
+    proposal = propose_intent_authority(
+        allow_capabilities=capabilities,
+        allowed_operations=("READ", "GENERATE", "SIMULATED"),
+        target_scope=capabilities,
+        max_risk_level="low",
+        max_side_effect="EXTERNAL_REVERSIBLE",
+        require_verification=True,
+        rationale="minimum bounded authority for convergence scenario",
+    )
+    return approve_intent_authority(
+        proposal,
+        authority_source_type="user_explicit",
+        authority_source_identity="runtime_authority_convergence_fixture",
+        approved_at="2026-10-03T00:00:00+00:00",
+    ).to_dict()
+from intent_kernel.tools.models import ToolAuthorizationDecisionState
+
+
 @pytest.fixture
 def bridge(tmp_path, monkeypatch):
     monkeypatch.setenv("INTENTOS_DATA_ROOT", str(tmp_path))
@@ -78,6 +119,9 @@ async def test_authorized_action_reaches_mission_runtime_without_real_effect(bri
         "action": "chat",
         "message": "Crie e envie um e-mail.",
         "authorized_permissions": ["email.send"],
+        # J1.4: explicit bounded intent authority grant (minimum scope only).
+        "intent_authority_grant": await _explicit_intent_grant(
+            bridge, "Crie e envie um e-mail.", ["email.send"]),
     })
     assert response["execution_mode"] == "MISSION"
     assert response["runtime_status"] == "WAITING_USER_CONFIRMATION"
@@ -319,6 +363,9 @@ async def test_authorization_and_mission_override_pending_finance(bridge):
         "message": "Crie e envie um e-mail.",
         "session_id": "pending-action",
         "authorized_permissions": ["email.send"],
+        # J1.4: explicit bounded intent authority grant (minimum scope only).
+        "intent_authority_grant": await _explicit_intent_grant(
+            bridge, "Crie e envie um e-mail.", ["email.send"]),
     })
 
     assert authorization["status"] == "AUTHORIZATION_REQUIRED"
@@ -476,11 +523,21 @@ async def test_only_allow_crosses_tool_authorization_boundary(
     monkeypatch.setattr(runtime.action_gate, "evaluate", counted_action_gate)
     monkeypatch.setattr(runtime.executor, "execute", counted_execute)
 
-    response = await bridge.dispatch({
-        "action": "chat",
-        "message": "Crie e envie um e-mail.",
-        "authorized_permissions": ["email.send"],
-    })
+    # For ALLOW gate state, provide explicit intent authority grant to reach runtime
+    if gate_state is ToolAuthorizationDecisionState.ALLOW:
+        response = await bridge.dispatch({
+            "action": "chat",
+            "message": "Crie e envie um e-mail.",
+            "authorized_permissions": ["email.send"],
+            "intent_authority_grant": await _explicit_intent_grant(
+                bridge, "Crie e envie um e-mail.", ["email.send"]),
+        })
+    else:
+        response = await bridge.dispatch({
+            "action": "chat",
+            "message": "Crie e envie um e-mail.",
+            "authorized_permissions": ["email.send"],
+        })
 
     assert response["authorization_gate"] == gate_state.value
     assert response["status"] == expected_status

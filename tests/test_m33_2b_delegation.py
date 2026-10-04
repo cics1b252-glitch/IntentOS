@@ -1525,7 +1525,33 @@ async def test_adv_corrupt_durable_delegation_fails_closed(tmp_path):
     data["action_states"]["c1"]["delegation_state"] = "ACTIVE"
     mission_file.write_text(json.dumps(data))
     rt = _wired_runtime(store, components)
-    inst = rt.create_instance(str(mission.id), "g1", [node])
+    # J1.2.1 fixture convergence (authorized): establish the minimum explicit
+    # bounded intent authority this scenario actually requires, so the mission
+    # can legitimately reach the K1 delegation-corruption layer. K1 production
+    # semantics and assertions are unchanged.
+    from intent_kernel.mission.intent_authority import (
+        establish_intent_authority,
+    )
+    from intent_kernel.mission.intent_ceiling import IntentCeiling
+    from intent_kernel.time_utils import utc_iso
+    _j1_now = utc_iso()
+    _j1_authority = establish_intent_authority(
+        ceiling=IntentCeiling(
+            allow_capabilities=("c.rt",),
+            allowed_operations=("READ",),
+            target_scope=("c.rt",),
+            max_risk_level="low",
+            max_side_effect="NONE",
+            require_verification=True,
+        ),
+        source_type="test_explicit",
+        source_identity="test_m33_2b_fixture",
+        established_at=_j1_now,
+        now_iso=_j1_now,
+    )
+    inst = rt.create_instance(
+        str(mission.id), "g1", [node], intent_authority=_j1_authority
+    )
     import pytest as _p
     with _p.raises(Exception):
         await rt.run_mission(inst.runtime_id)

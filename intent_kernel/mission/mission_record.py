@@ -498,6 +498,8 @@ class MissionDefinition:
     context: dict[str, Any] = field(default_factory=dict)
     success_criteria: tuple[str, ...] = ()
     scope: tuple[str, ...] = ()
+    intent_ceiling: Optional[Any] = None
+    intent_authority: Optional[Any] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.objective, str) or not self.objective.strip():
@@ -510,12 +512,35 @@ class MissionDefinition:
                 if not isinstance(item, str):
                     raise ValueError(f"{label} items must be strings")
             object.__setattr__(self, label, tuple(getattr(self, label)))
+        if self.intent_ceiling is not None:
+            from intent_kernel.mission.intent_ceiling import IntentCeiling
+            if not isinstance(self.intent_ceiling, IntentCeiling):
+                raise ValueError("intent_ceiling must be an IntentCeiling or None")
+        if self.intent_authority is not None:
+            from intent_kernel.mission.intent_authority import IntentAuthorityRecord
+            if not isinstance(self.intent_authority, IntentAuthorityRecord):
+                raise ValueError(
+                    "intent_authority must be an IntentAuthorityRecord or None"
+                )
+            # The ceiling carried by the definition MUST equal the attested
+            # authority's ceiling: authority is only what the attestation
+            # proves. A bare ceiling without attestation is not authority.
+            if self.intent_ceiling is None:
+                object.__setattr__(self, "intent_ceiling", self.intent_authority.ceiling)
+            elif self.intent_ceiling.to_dict() != self.intent_authority.ceiling.to_dict():
+                raise ValueError(
+                    "intent_ceiling does not match attested intent_authority"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["context"] = dict(self.context)
         d["success_criteria"] = list(self.success_criteria)
         d["scope"] = list(self.scope)
+        if self.intent_ceiling is not None:
+            d["intent_ceiling"] = self.intent_ceiling.to_dict()
+        if self.intent_authority is not None:
+            d["intent_authority"] = self.intent_authority.to_dict()
         return d
 
     @classmethod
@@ -524,6 +549,18 @@ class MissionDefinition:
         d["context"] = dict(d.get("context", {}))
         d["success_criteria"] = tuple(d.get("success_criteria", []))
         d["scope"] = tuple(d.get("scope", []))
+        ceiling_data = d.get("intent_ceiling")
+        if ceiling_data:
+            from intent_kernel.mission.intent_ceiling import IntentCeiling
+            d["intent_ceiling"] = IntentCeiling.from_dict(ceiling_data)
+        else:
+            d["intent_ceiling"] = None
+        authority_data = d.get("intent_authority")
+        if authority_data:
+            from intent_kernel.mission.intent_authority import IntentAuthorityRecord
+            d["intent_authority"] = IntentAuthorityRecord.from_dict(authority_data)
+        else:
+            d["intent_authority"] = None
         return cls(**d)
 
 

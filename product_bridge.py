@@ -431,6 +431,12 @@ class ProductBridge:
         context: dict[str, Any] = {
             "session_id": session_id,
             "project_id": project_id,
+            # J1.4: EXPLICIT intent authority grant transport. This is the ONLY
+            # accepted authority input for a controlled mission. It is carried
+            # verbatim and NEVER inferred from `message`, from
+            # authorized_permissions, from the framework permission table, or
+            # from planner/analyzer output.
+            "intent_authority_grant": request.get("intent_authority_grant"),
             # A generated compatibility dialogue ID is not a Mission identity.
             # Only an explicitly authorized resume may enter Kernel context.
             "mission_id": resume_mission_id,
@@ -1203,7 +1209,7 @@ Estratégia completa registrada no histórico para execução."""
                 },
             )
         contract = ActionContract(
-            capability="test.echo",
+            capability=capability,
             action_type="SIMULATED",
             inputs_reference={"message": message, "requested_capability": capability},
             # G8: the simulated echo deterministically returns inputs["message"];
@@ -1229,11 +1235,52 @@ Estratégia completa registrada no histórico para execução."""
         # divergent ids leave the action unbindable in durable authority
         # (fail-closed "No durable action for attempt").
         contract.action_id = node.node_id
+        # J1.4: canonical intent authority establishment/transport.
+        #
+        # PRODUCT_BRIDGE != AUTHORITY: this boundary only establishes durable
+        # authority from an EXPLICIT approved grant supplied by the caller.
+        #
+        # FORBIDDEN and not implemented here: inferring a ceiling from the
+        # message, from authorized_permissions, from the framework permission
+        # table, from the analyzer requirements, or from planner output.
+        # DISCOVERABLE_CAPABILITY != AUTHORIZED_CAPABILITY: the capability
+        # derived above is NOT authority.
+        _grant_raw = context.get("intent_authority_grant")
+        if not _grant_raw:
+            return CanonicalTurnResult.blocked(
+                "A missao controlada exige concessao explicita de autoridade "
+                "de intencao (intent_authority_grant).",
+                reason="missing_explicit_intent_authority_grant",
+                mission_id=str(mission.id),
+                metadata={"domain": decision.domain_hint},
+            )
+        from intent_kernel.mission.intent_grant import (
+            IntentAuthorityGrant,
+            establish_intent_authority_from_grant,
+        )
+        from intent_kernel.time_utils import utc_iso
+        try:
+            _grant = (
+                _grant_raw if isinstance(_grant_raw, IntentAuthorityGrant)
+                else IntentAuthorityGrant.from_dict(_grant_raw)
+            )
+            _authority = establish_intent_authority_from_grant(
+                _grant, now_iso=utc_iso()
+            )
+        except Exception as _exc:
+            return CanonicalTurnResult.blocked(
+                "A concessao de autoridade de intencao e invalida ou nao "
+                "corresponde ao escopo aprovado.",
+                reason=f"invalid_intent_authority_grant:{_exc}",
+                mission_id=str(mission.id),
+                metadata={"domain": decision.domain_hint},
+            )
         instance = self.components.mission_runtime.create_instance(
             str(mission.id),
             str(getattr(executive, "execution_graph", None) or "ecc-plan"),
             [node],
             project_id=context["project_id"],
+            intent_authority=_authority,
         )
         instance = await self.components.mission_runtime.run_mission(instance.runtime_id)
         confirmation_meta = self._bind_pending_confirmation(

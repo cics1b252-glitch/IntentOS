@@ -149,14 +149,25 @@ def _mission_store(tmp_path, name="mstore"):
     )
 
 
-def _definition(objective="productive"):
-    return MissionDefinition(objective=objective, context={"k": "v"})
+def _definition(objective="productive", quantity_authority=None):
+    return MissionDefinition(
+        objective=objective, context={"k": "v"},
+        quantity_authority=quantity_authority,
+    )
 
 
-def _bind_action(store, mission_id, spec, runtime_id="rt-pb"):
-    """Pre-establish the durable record + PENDING action for one spec."""
+def _bind_action(
+    store, mission_id, spec, runtime_id="rt-pb",
+    quantity=None, operation="", quantity_authority=None,
+):
+    """Pre-establish the durable record + PENDING action for one spec.
+
+    C2/C3/G1.2 §3 / C2/C3/G1.3 §2: operation and quantity are durable,
+    authority-bearing parts of the plan, and the established quantity
+    authority is carried on the mission definition.
+    """
     ident = store.get_continuity_identity()
-    definition = _definition()
+    definition = _definition(quantity_authority=quantity_authority)
     probe = MissionRecord(
         mission_id="probe", installation_id=ident,
         mission_definition=definition)
@@ -171,6 +182,12 @@ def _bind_action(store, mission_id, spec, runtime_id="rt-pb"):
             "node_id": "n1",
             "dependencies": [],
             "request_semantics_digest": spec.request_semantics_digest,
+            # C2/C3/G1.2 §3: operation is durable and authority-bearing. These
+            # are non-quantitative counter reads, so the canonical operation
+            # is READ — carried from the spec, never a placeholder.
+            "operation": operation or spec.operation,
+            # C2/C3/G1.3 §2: the exact C1-bound quantity travels with the plan.
+            "quantity": quantity if quantity is not None else spec.quantity,
         },),
         action_states={spec.action_id: DurableActionState(
             action_id=spec.action_id, node_id="n1",
@@ -208,7 +225,7 @@ def _service(components, guard=None, cache=None):
     )
 
 
-def _spec_for(components, mission, app, payload, key=""):
+def _spec_for(components, mission, app, payload, key="", operation="READ", quantity=None):
     snap = components.resource_manager.get_capability(app.capability_name)
     return spec_for_legacy_dispatch(
         mission_id=str(mission.id),
@@ -218,6 +235,11 @@ def _spec_for(components, mission, app, payload, key=""):
         executor_logical_id=app.app_id,
         expected_governed_registration_id=snap.governed_registration_id,
         expected_resource_generation=snap.generation,
+        # C2/C3/G1.2 §2/§4 + C2/C3/G1.3 §4: the canonical structured
+        # operation is bound INSIDE the C1 request digest, never reconstructed
+        # later. Callers pass the true operation for their scenario.
+        operation=operation,
+        quantity=quantity,
     )
 
 
@@ -645,6 +667,9 @@ def _bind_runtime_action(store, mid, spec):
             "node_id": "n1",
             "dependencies": [],
             "request_semantics_digest": spec.request_semantics_digest,
+            # C2/C3/G1.2 §3: durable, authority-bearing operation carried from
+            # the node's canonical ActionContract.action_type.
+            "operation": spec.operation,
         },),
         action_states={spec.action_id: DurableActionState(
             action_id=spec.action_id, node_id="n1",

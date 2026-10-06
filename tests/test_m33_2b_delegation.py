@@ -254,6 +254,9 @@ def _bind_record(store, mid, actions):
             "node_id": node.node_id,
             "dependencies": [],
             "request_semantics_digest": spec.request_semantics_digest,
+            # C2/C3/G1.2 §3: operation is durable and authority-bearing; it is
+            # carried from the node's canonical ActionContract.action_type.
+            "operation": spec.operation,
         })
         kwargs = dict(
             action_id=spec.action_id, node_id=node.node_id,
@@ -314,6 +317,9 @@ def _add_actions_to_record(store, mid, actions):
             "node_id": node.node_id,
             "dependencies": [],
             "request_semantics_digest": spec.request_semantics_digest,
+            # C2/C3/G1.2 §3: operation is durable and authority-bearing; it is
+            # carried from the node's canonical ActionContract.action_type.
+            "operation": spec.operation,
         })
         kwargs = dict(
             action_id=spec.action_id, node_id=node.node_id,
@@ -1252,6 +1258,11 @@ def test_d18_no_parallel_delegation_types():
         "risk_allows", "side_effect_allows", "target_subset",
         "timeout_allows", "verification_allows", "verify_grant_dispatch",
         "walk_chain", "grant_view",
+        # C2/C3/G1.3 §2: quantity is another constrained dimension of the SAME
+        # pure delegation derivation — added to this allowlist as pure provers,
+        # not as an independent authority engine.
+        "quantity_allows", "quantity_subset",
+        "verify_quantity_against_grant",
     }
 
 

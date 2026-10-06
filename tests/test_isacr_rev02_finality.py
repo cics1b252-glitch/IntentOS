@@ -94,7 +94,7 @@ def _bind_record(store, mid, actions):
     for a in actions:
         node = a["node"]
         spec = spec_for_runtime_node(mid, node)
-        plan.append({"action_id": spec.action_id, "capability": node.capability or spec.action_id, "node_id": node.node_id, "dependencies": [], "request_semantics_digest": spec.request_semantics_digest})
+        plan.append({"action_id": spec.action_id, "capability": node.capability or spec.action_id, "node_id": node.node_id, "dependencies": [], "request_semantics_digest": spec.request_semantics_digest, "operation": spec.operation})
         kwargs = dict(action_id=spec.action_id, node_id=node.node_id, state=a.get("state", ActionState.PENDING), expected_resource_id=a.get("resource_id", "r"), expected_governed_registration_id=a.get("grid", ""), expected_resource_generation=a.get("gen", 0), expected_executor_kind="core_app", expected_executor_logical_id=a.get("executor", spec.executor_logical_id), confirmation_required=a.get("confirmation_required", False), confirmation_basis_digest=a.get("confirmation_basis_digest", ""))
         grant = a.get("grant")
         if grant:
@@ -393,7 +393,7 @@ async def test_rev02_race_parent_active_child_derived_then_parent_revoked(tmp_pa
     for nid in ("nA", "nB", "nC"):
         node = nodes[nid]
         spec = spec_for_runtime_node(mid, node)
-        plan.append({"action_id": spec.action_id, "capability": cap, "node_id": nid, "dependencies": [], "request_semantics_digest": spec.request_semantics_digest})
+        plan.append({"action_id": spec.action_id, "capability": cap, "node_id": nid, "dependencies": [], "request_semantics_digest": spec.request_semantics_digest, "operation": spec.operation})
         states[spec.action_id] = DurableActionState(action_id=spec.action_id, node_id=nid, expected_resource_id="r", expected_governed_registration_id=grid, expected_resource_generation=gen, expected_executor_kind="core_app", expected_executor_logical_id="delegate-1")
     record = MissionRecord(mission_id=mid, installation_id=ident, revision=1, runtime_id="rt-1", mission_definition=definition, mission_definition_digest=probe.compute_definition_digest(), mission_status=MissionStatus.RUNNING, plan=tuple(plan), action_states=states)
     assert store.create(record).outcome == "committed"

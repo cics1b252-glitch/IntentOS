@@ -170,6 +170,11 @@ class DurableActionState:
     delegation_max_timeout_seconds: float = 0.0
     delegation_require_verification: Optional[bool] = None
     delegation_max_side_effect: str = ""
+    #: C2/C3/G1.3 §2: quantity is another constrained dimension of the SAME
+    #: delegation derivation. It is normalized and validated here exactly like
+    #: delegation_allowed_targets, so it cannot smuggle a non-mapping or be
+    #: silently dropped on a JSON round-trip.
+    delegation_quantity_ceilings: tuple = ()
     delegation_created_at: str = ""
     delegation_expires_at: str = ""
     delegation_state: str = "NONE"
@@ -317,6 +322,23 @@ class DurableActionState:
                 "generation": item["generation"],
             })
         object.__setattr__(self, "delegation_allowed_resources", tuple(normalized))
+        q_ceilings = self.delegation_quantity_ceilings or ()
+        if not isinstance(q_ceilings, (tuple, list)):
+            raise ValueError("delegation_quantity_ceilings must be a sequence")
+        normalized_q = []
+        for item in q_ceilings:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    "delegation_quantity_ceilings items must be mappings"
+                )
+            if "quantity" not in item:
+                raise ValueError(
+                    "delegation_quantity_ceilings items must carry quantity"
+                )
+            normalized_q.append({"quantity": item["quantity"]})
+        object.__setattr__(
+            self, "delegation_quantity_ceilings", tuple(normalized_q)
+        )
         if self.delegation_state not in ("NONE", "ACTIVE", "REVOKED"):
             raise ValueError(
                 f"delegation_state must be NONE, ACTIVE, or REVOKED, "
@@ -343,6 +365,7 @@ class DurableActionState:
                 or self.delegation_max_timeout_seconds not in (0, 0.0)
                 or self.delegation_require_verification is not None
                 or self.delegation_max_side_effect
+                or self.delegation_quantity_ceilings
                 or self.delegation_created_at
                 or self.delegation_expires_at
                 or self.delegation_state != "NONE"
@@ -500,6 +523,7 @@ class MissionDefinition:
     scope: tuple[str, ...] = ()
     intent_ceiling: Optional[Any] = None
     intent_authority: Optional[Any] = None
+    quantity_authority: Optional[Any] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.objective, str) or not self.objective.strip():
@@ -531,6 +555,12 @@ class MissionDefinition:
                 raise ValueError(
                     "intent_ceiling does not match attested intent_authority"
                 )
+        if self.quantity_authority is not None:
+            from intent_kernel.mission.intent_authority import QuantityAuthorityRecord
+            if not isinstance(self.quantity_authority, QuantityAuthorityRecord):
+                raise ValueError(
+                    "quantity_authority must be a QuantityAuthorityRecord or None"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -541,6 +571,8 @@ class MissionDefinition:
             d["intent_ceiling"] = self.intent_ceiling.to_dict()
         if self.intent_authority is not None:
             d["intent_authority"] = self.intent_authority.to_dict()
+        if self.quantity_authority is not None:
+            d["quantity_authority"] = self.quantity_authority.to_dict()
         return d
 
     @classmethod
@@ -561,6 +593,12 @@ class MissionDefinition:
             d["intent_authority"] = IntentAuthorityRecord.from_dict(authority_data)
         else:
             d["intent_authority"] = None
+        quantity_authority_data = d.get("quantity_authority")
+        if quantity_authority_data:
+            from intent_kernel.mission.intent_authority import QuantityAuthorityRecord
+            d["quantity_authority"] = QuantityAuthorityRecord.from_dict(quantity_authority_data)
+        else:
+            d["quantity_authority"] = None
         return cls(**d)
 
 

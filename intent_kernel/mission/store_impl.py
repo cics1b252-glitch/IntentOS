@@ -511,6 +511,9 @@ class JsonFileMissionRecordStore(MissionRecordStorePort):
         "delegation_max_timeout_seconds",
         "delegation_require_verification",
         "delegation_max_side_effect",
+        # C2/C3/G1.3 §2: quantity ceilings are part of the grant identity and
+        # must never be droppable by an ordinary commit.
+        "delegation_quantity_ceilings",
         "delegation_created_at",
         "delegation_expires_at",
         "delegation_state",

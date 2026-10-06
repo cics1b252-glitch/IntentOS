@@ -353,9 +353,18 @@ class CapabilityExecutionService:
                     ErrorCode.INVALID_REQUEST,
                     metadata={"c1_mismatch": "no_authorized_digest_for_action"},
                 )
-            # Recompute presented request digest from caller parameters
+            # Recompute presented request digest from caller parameters.
+            # C2/C3/G1.2 §4: the digest binds capability + OPERATION + payload
+            # + idempotency_key, matching spec_for_legacy_dispatch exactly.
+            # The presented operation is read from the AUTHORIZED durable plan
+            # entry, so an operation substitution cannot silently re-derive a
+            # matching digest; a caller that presents a different operation is
+            # rejected by the guard's authoritative operation check.
+            authorized_operation = self.dispatch_guard.get_authorized_operation(
+                mission_id_str, durable_action.action_id
+            )
             presented_digest = _canonical_request_digest(
-                capability, payload or {}, idempotency_key
+                capability, authorized_operation, payload or {}, idempotency_key
             )
             if presented_digest != authorized_digest:
                 return self._error(
@@ -364,6 +373,26 @@ class CapabilityExecutionService:
                     metadata={
                         "c1_mismatch": "presented_request_digest_mismatch",
                         "authorized_action_id": durable_action.action_id,
+                    },
+                )
+
+            # C2/C3/G1.3 §3 ADVISORY CHECK (non-authorizing).
+            # Runs after the initial C1 verification and produces a DIAGNOSTIC
+            # ONLY. It never authorizes, never grants a quantity ceiling, and
+            # never advances durable state. The authoritative refusal lives in
+            # the revision-anchored acquire proof below; this surface exists so
+            # a quantity-semantics problem is visible before dispatch.
+            advisory_refusal = self._quantity_advisory_refusal(
+                mission_id_str, durable_action.action_id
+            )
+            if advisory_refusal is not None:
+                return self._error(
+                    capability,
+                    ErrorCode.INVALID_REQUEST,
+                    metadata={
+                        "quantity_advisory": "refused",
+                        "authoritative": False,
+                        **advisory_refusal,
                     },
                 )
 
@@ -454,11 +483,18 @@ class CapabilityExecutionService:
             # must never outrun durable truth. Recording failure fails
             # closed (the durable INTENT still forbids redispatch).
             try:
+                # C2/C3/G1.3 GAP 1: the durable result summary carries the
+                # real post-effect observation, if the provider produced one.
+                # Success alone is NOT an observation: when no observed
+                # quantity exists the evidence status is UNKNOWN.
+                _summary = _durable_capability_summary(result)
+                _observed = _extract_observed_quantity(_summary)
                 guard.record_result(
                     ownership,
-                    result_summary=_durable_capability_summary(result),
+                    result_summary=_summary,
                     provider_effect_id="",
                     requested_by="capability-execution-service",
+                    observed_quantity=_observed,
                 )
             except Exception as exc:
                 return self._error(
@@ -778,6 +814,91 @@ class CapabilityExecutionService:
             )
         )
 
+    def _quantity_advisory_refusal(
+        self,
+        mission_id: str,
+        action_id: str,
+    ) -> dict[str, Any] | None:
+        """C2/C3/G1.3 §3: non-authorizing quantity advisory diagnostic.
+
+        Reads the durable record and reports a quantity-semantics problem
+        (missing quantity authority for a quantitative operation, or an
+        undeclared operation) so it is visible BEFORE dispatch. This helper
+        deliberately has NO effect on authority or durable state: it returns
+        a diagnostic dict or None, and never approves anything. The
+        authoritative proof remains the revision-anchored acquire path.
+        """
+        try:
+            from intent_kernel.mission.quantity import (
+                QuantityAuthorityRecord,
+                resolve_quantity_applicability,
+            )
+
+            store = getattr(self.dispatch_guard, "store", None)
+            if store is None:
+                store = getattr(self.dispatch_guard, "_store", None)
+            if store is None:
+                return None
+            data = store.load(mission_id)
+            if not isinstance(data, dict):
+                return None
+            entry = None
+            for plan_entry in data.get("plan", ()):
+                if (
+                    isinstance(plan_entry, dict)
+                    and plan_entry.get("action_id") == action_id
+                ):
+                    entry = plan_entry
+                    break
+            if entry is None:
+                return None
+            operation = str(entry.get("operation", "") or "")
+            determination = resolve_quantity_applicability(operation)
+            if determination.state.value == "NOT_APPLICABLE":
+                return None
+            raw_authority = (data.get("mission_definition") or {}).get(
+                "quantity_authority"
+            )
+            if not isinstance(raw_authority, dict):
+                return {
+                    "quantity_reason": "missing_quantity_authority",
+                    "operation": operation,
+                }
+            if not QuantityAuthorityRecord.from_dict(raw_authority).ceilings:
+                return {
+                    "quantity_reason": "empty_quantity_authority",
+                    "operation": operation,
+                }
+            return None
+        except Exception as exc:  # diagnostic only, never a hard failure
+            return {
+                "quantity_reason": "advisory_unavailable",
+                "detail": str(exc),
+            }
+
+
+def _extract_observed_quantity(
+    summary: dict[str, Any],
+) -> Any | None:
+    """Read a real post-effect observed quantity, or None.
+
+    Success alone is never an observation. Only an explicit observable
+    quantity in the durable summary becomes ObservedQuantity.
+    """
+    try:
+        from intent_kernel.mission.quantity import ObservedQuantity, Quantity
+
+        raw = summary.get("observed_quantity")
+        if raw is None:
+            return None
+        if isinstance(raw, ObservedQuantity):
+            return raw
+        if isinstance(raw, dict):
+            return ObservedQuantity.from_quantity(Quantity.from_dict(raw))
+    except Exception:
+        return None
+    return None
+
 
 def _durable_capability_summary(result: Any) -> dict[str, Any]:
     """Minimal JSON-safe handoff-result summary for durable recording.
@@ -798,8 +919,33 @@ def _durable_capability_summary(result: Any) -> dict[str, Any]:
         error_code = str(error_code) if error_code is not None else ""
     except Exception:
         error_code = ""
-    return {
+    summary = {
         "success": success,
         "output": output[:2000],
         "error_code": error_code,
     }
+    # C2/C3/G1.3 GAP 1: carry a REAL post-effect observed quantity when the
+    # provider reported one, so the durable result path can distinguish
+    # OBSERVED from REQUESTED. Absence stays absent (UNKNOWN) - success is
+    # never converted into an observation.
+    observed = None
+    try:
+        observed = getattr(result, "observed_quantity", None)
+    except Exception:
+        observed = None
+    if observed is None:
+        try:
+            metadata = getattr(result, "metadata", None)
+            if isinstance(metadata, dict):
+                observed = metadata.get("observed_quantity")
+        except Exception:
+            observed = None
+    if observed is not None:
+        try:
+            if hasattr(observed, "to_dict"):
+                summary["observed_quantity"] = observed.to_dict()
+            elif isinstance(observed, dict):
+                summary["observed_quantity"] = dict(observed)
+        except Exception:
+            pass
+    return summary

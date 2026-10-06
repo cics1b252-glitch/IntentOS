@@ -107,9 +107,11 @@ def propose_intent_authority(
     require_verification: Optional[bool] = None,
     valid_from: str = "",
     valid_until: str = "",
+    quantity_ceilings=(),
     rationale: str = "",
 ) -> ProposedIntentAuthority:
     """Build a bounded proposal (never authority)."""
+    from intent_kernel.mission.quantity import QuantityCeiling
     return ProposedIntentAuthority.propose(
         IntentCeiling(
             allow_capabilities=tuple(allow_capabilities or ()),
@@ -120,6 +122,7 @@ def propose_intent_authority(
             require_verification=require_verification,
             valid_from=str(valid_from or ""),
             valid_until=str(valid_until or ""),
+            quantity_ceilings=tuple(QuantityCeiling.from_dict(c) if isinstance(c, dict) else c for c in (quantity_ceilings or ())),
         ),
         rationale=rationale,
     )

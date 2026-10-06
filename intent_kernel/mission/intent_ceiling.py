@@ -27,6 +27,10 @@ from intent_kernel.mission.delegation import (
     SIDE_EFFECT_SEVERITY,
     is_expired,
 )
+from intent_kernel.mission.quantity import (
+    QuantityCeiling,
+    QuantityDimension,
+)
 
 
 def _normalize_str_tuple(value: Any, label: str) -> Tuple[str, ...]:
@@ -61,6 +65,7 @@ class IntentCeiling:
     require_verification: Optional[bool] = None
     valid_from: str = ""
     valid_until: str = ""
+    quantity_ceilings: Tuple[QuantityCeiling, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "allow_capabilities", _normalize_str_tuple(self.allow_capabilities, "allow_capabilities"))
@@ -72,6 +77,19 @@ class IntentCeiling:
             raise ValueError(f"unknown side-effect level: {self.max_side_effect}")
         if self.require_verification is not None and not isinstance(self.require_verification, bool):
             raise ValueError("require_verification must be bool or None")
+        # Normalize quantity ceilings
+        if not isinstance(self.quantity_ceilings, tuple):
+            raise ValueError("quantity_ceilings must be a tuple")
+        for c in self.quantity_ceilings:
+            if not isinstance(c, QuantityCeiling):
+                raise ValueError("quantity_ceilings must contain QuantityCeiling objects")
+        # Check for duplicate dimensions
+        seen = set()
+        for c in self.quantity_ceilings:
+            dim_key = (c.quantity.dimension, c.quantity.unit)
+            if dim_key in seen:
+                raise ValueError(f"duplicate quantity dimension/unit: {dim_key}")
+            seen.add(dim_key)
 
     @property
     def is_constraining(self) -> bool:
@@ -85,6 +103,7 @@ class IntentCeiling:
             or self.require_verification is not None
             or self.valid_from
             or self.valid_until
+            or self.quantity_ceilings
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -97,6 +116,7 @@ class IntentCeiling:
             "require_verification": self.require_verification,
             "valid_from": self.valid_from,
             "valid_until": self.valid_until,
+            "quantity_ceilings": [c.to_dict() for c in self.quantity_ceilings],
         }
 
     @classmethod
@@ -110,6 +130,9 @@ class IntentCeiling:
             require_verification=data.get("require_verification"),
             valid_from=str(data.get("valid_from", "") or ""),
             valid_until=str(data.get("valid_until", "") or ""),
+            quantity_ceilings=tuple(
+                QuantityCeiling.from_dict(c) for c in data.get("quantity_ceilings", [])
+            ),
         )
 
 
@@ -123,6 +146,7 @@ def proof_plan_action_against_ceiling(
     side_effect: str = "",
     verification_required: bool = False,
     now_iso: str = "",
+    quantity: Optional[Any] = None,  # PlanQuantity or dict with dimension/amount/unit
 ) -> Tuple[bool, str]:
     """Pure fail-closed proof: PLAN_DIMENSION <= INTENT_CEILING_DIMENSION.
 
@@ -173,6 +197,41 @@ def proof_plan_action_against_ceiling(
     ok, reason = _check_temporal_validity(ceiling, now_iso)
     if not ok:
         return False, reason
+
+    # Quantity ceiling proof (C2/C3/G1)
+    if ceiling.quantity_ceilings:
+        from intent_kernel.mission.quantity import (
+            Quantity,
+            QuantityCeiling,
+            prove_plan_quantity_against_ceiling,
+            PlanQuantity,
+        )
+        if quantity is None:
+            # Quantity-bearing ceiling but no quantity provided in plan
+            return False, "quantity-missing"
+        # Convert quantity to PlanQuantity if needed
+        if isinstance(quantity, dict):
+            try:
+                q = Quantity.from_dict(quantity)
+                pq = PlanQuantity(quantity=q)
+            except Exception:
+                return False, "quantity-invalid"
+        elif hasattr(quantity, "quantity"):
+            # Assume it's a PlanQuantity
+            pq = quantity
+        else:
+            return False, "quantity-invalid"
+        # Prove against all quantity ceilings (must match at least one)
+        matched = False
+        for qc in ceiling.quantity_ceilings:
+            if pq.quantity.same_dimension_and_unit(qc.quantity):
+                ok, reason = prove_plan_quantity_against_ceiling(pq, qc)
+                if not ok:
+                    return False, reason
+                matched = True
+                break
+        if not matched:
+            return False, "quantity-dimension-not-authorized"
 
     return True, ""
 

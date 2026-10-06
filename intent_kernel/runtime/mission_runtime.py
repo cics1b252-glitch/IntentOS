@@ -188,6 +188,8 @@ class MissionRuntime:
         project_id: str = "GLOBAL",
         execution_policy: Optional[Dict[str, Any]] = None,
         intent_authority: Any = None,
+        quantity_authority: Any = None,
+        plan_quantities: Optional[List[Any]] = None,
     ) -> MissionRuntimeInstance:
         """Create a new MissionRuntimeInstance with initialized nodes."""
         instance = MissionRuntimeInstance(
@@ -209,7 +211,7 @@ class MissionRuntime:
         # productive execution. No-op when no store is configured or a
         # record already exists (existing authority is never overwritten).
         self._anchor_mission_record(
-            mission_id, instance.runtime_id, nodes, intent_authority
+            mission_id, instance.runtime_id, nodes, intent_authority, quantity_authority, plan_quantities
         )
         return instance
 
@@ -219,6 +221,8 @@ class MissionRuntime:
         runtime_id: str,
         nodes: List[RuntimeNode],
         intent_authority: Any = None,
+        quantity_authority: Any = None,
+        plan_quantities: Optional[List[Any]] = None,
     ) -> None:
         """Create the authoritative durable MissionRecord for one mission.
 
@@ -268,6 +272,7 @@ class MissionRuntime:
                 context={},
                 intent_ceiling=intent_authority.ceiling,
                 intent_authority=intent_authority,
+                quantity_authority=quantity_authority,
             )
         probe = MissionRecord(
             mission_id="probe",
@@ -275,6 +280,7 @@ class MissionRuntime:
             mission_definition=definition,
         )
         plan_entries: List[Dict[str, Any]] = []
+        plan_quantities: List[Any] = []
         action_states: Dict[str, DurableActionState] = {}
         for node in nodes:
             contract = node.action_contract
@@ -283,6 +289,10 @@ class MissionRuntime:
             else:
                 action_id = node.node_id
             spec = spec_for_runtime_node(mission_id, node)
+            # Extract quantity from contract if present
+            qty = None
+            if contract and hasattr(contract, "quantity") and contract.quantity:
+                qty = contract.quantity
             plan_entries.append({
                 "action_id": action_id,
                 "capability": node.capability or "",
@@ -300,7 +310,10 @@ class MissionRuntime:
                 "verification_required": bool(
                     getattr(contract, "verification_required", False)
                 ) if contract else False,
+                "quantity": qty,
             })
+            if qty:
+                plan_quantities.append({"action_id": action_id, "quantity": qty})
             action_states[action_id] = DurableActionState(
                 action_id=action_id,
                 node_id=node.node_id,
@@ -318,7 +331,9 @@ class MissionRuntime:
         )
         from intent_kernel.time_utils import utc_iso
         prove_plan_actions_against_authority(
-            definition.intent_authority, plan_entries, now_iso=utc_iso()
+            definition.intent_authority, plan_entries, now_iso=utc_iso(),
+            quantity_authority=definition.quantity_authority,
+            plan_quantities=plan_quantities or None,
         )
 
         record = MissionRecord(
@@ -902,11 +917,11 @@ class MissionRuntime:
                     can_acquire = _rebind_result is not None or self._mission_record_store is None
                     if can_acquire:
                         try:
+                            from intent_kernel.mission.dispatch_guard import (
+                                DispatchAttemptSpec,
+                                spec_for_runtime_node,
+                            )
                             if _rebind_durable is not None:
-                                from intent_kernel.mission.dispatch_guard import (
-                                    DispatchAttemptSpec,
-                                    spec_for_runtime_node,
-                                )
                                 base = spec_for_runtime_node(instance.mission_id, node)
                                 spec = DispatchAttemptSpec(
                                     mission_id=base.mission_id,
@@ -915,6 +930,13 @@ class MissionRuntime:
                                     executor_logical_id=base.executor_logical_id,
                                     expected_governed_registration_id=_rebind_durable[0],
                                     expected_resource_generation=_rebind_durable[1],
+                                    # C2/C3/G1.2 §1: operation (and quantity)
+                                    # are canonical attempt identity and must
+                                    # survive spec reconstruction, otherwise
+                                    # the authoritative operation check would
+                                    # see an empty presented operation.
+                                    quantity=base.quantity,
+                                    operation=base.operation,
                                 )
                                 ownership = self.dispatch_guard.acquire(
                                     spec,
@@ -922,9 +944,14 @@ class MissionRuntime:
                                     confirmation_required=False,
                                 )
                             else:
-                                ownership = self.dispatch_guard.acquire_for_node(
-                                    instance.mission_id,
-                                    node,
+                                # C2/C3/G1.3 §6: bind the exact acquired spec
+                                # so the final pre-handoff gate compares the
+                                # identity that actually won acquire.
+                                spec = spec_for_runtime_node(
+                                    instance.mission_id, node
+                                )
+                                ownership = self.dispatch_guard.acquire(
+                                    spec,
                                     requested_by="mission-runtime",
                                     confirmation_required=False,
                                 )
@@ -950,6 +977,51 @@ class MissionRuntime:
                             await self._sync_lifecycle(instance)
                             return instance
                     else:
+                        return instance
+
+                # C2/C3/G1.3 §6: final freshness/equality gate immediately before the
+                # executor handoff. Any mutation between acquire and effect
+                # fails closed with ZERO executor calls. This is equality
+                # revalidation only — it never grants authority.
+                if ownership is not None and self.dispatch_guard is not None:
+                    try:
+                        # C2/C3/G1.3 GAP 2: rederive the handoff identity from
+                        # the LIVE contract right now, not from the memoized
+                        # acquired spec. spec_for_runtime_node reads the live
+                        # node/contract (capability, action_type, inputs,
+                        # idempotency key, quantity) and recomputes the C1
+                        # digest, so any post-acquire mutation of capability,
+                        # operation, payload, key, quantity dimension/amount/
+                        # unit produces a mismatch here -> ZERO executor calls.
+                        live_spec = spec_for_runtime_node(
+                            instance.mission_id, node
+                        )
+                        self.dispatch_guard.verify_pre_handoff_identity(
+                            ownership,
+                            capability=str(node.capability or ""),
+                            operation=live_spec.operation,
+                            request_semantics_digest=(
+                                live_spec.request_semantics_digest
+                            ),
+                            quantity=live_spec.quantity,
+                        )
+                    except Exception as _exc:
+                        node.state = RuntimeNodeState.BLOCKED
+                        if node.node_id in instance.pending_nodes:
+                            instance.pending_nodes.remove(node.node_id)
+                        instance.blocked_nodes.append(node.node_id)
+                        node.error_message = (
+                            "Final pre-handoff gate refused: " f"{_exc}"
+                        )
+                        self._failure_reports.append(FailureReport(
+                            runtime_id=instance.runtime_id,
+                            mission_id=instance.mission_id,
+                            node_id=node.node_id,
+                            category=FailureCategory.POLICY_BLOCK,
+                            message=node.error_message,
+                        ))
+                        await self.save_checkpoint(instance)
+                        await self._sync_lifecycle(instance)
                         return instance
 
                 # Proceed to Execute

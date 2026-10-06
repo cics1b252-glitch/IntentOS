@@ -89,6 +89,156 @@ class DelegationState(str, Enum):
     REVOKED = "REVOKED"
 
 
+# ---------------------------------------------------------------------------
+# C2/C3/G1.3 — quantity as a constrained delegation dimension
+# ---------------------------------------------------------------------------
+#
+# Quantity ceilings participate in the SAME pure derivation as risk, timeout,
+# verification and side-effect ceilings: inherit-or-narrow per dimension, with
+# an explicit refusal on weakening. They are never an independent authority
+# path, and they never widen.
+#
+# Serialization goes through dicts so this module keeps its "pure logic only,
+# no runtime/store imports" property: the canonical quantity types are
+# reconstructed structurally here rather than imported.
+
+def _quantity_ceiling_to_dict(ceiling: Any) -> Dict[str, Any]:
+    """Serialize one quantity ceiling to its canonical dict form."""
+    quantity = getattr(ceiling, "quantity", None)
+    if quantity is None and isinstance(ceiling, Mapping):
+        quantity = ceiling.get("quantity", ceiling)
+    dimension = getattr(quantity, "dimension", None)
+    unit = getattr(quantity, "unit", None)
+    amount = getattr(quantity, "amount", None)
+    if dimension is None and isinstance(quantity, Mapping):
+        dimension = quantity.get("dimension")
+        unit = quantity.get("unit")
+        amount = quantity.get("amount")
+    dim_value = getattr(dimension, "value", dimension)
+    if not isinstance(dim_value, str) or not dim_value:
+        raise DelegationError("quantity ceiling dimension is invalid")
+    if (
+        not isinstance(amount, int)
+        or isinstance(amount, bool)
+        or amount < 0
+    ):
+        raise DelegationError("quantity ceiling amount must be an int >= 0")
+    if not isinstance(unit, str) or not unit:
+        raise DelegationError("quantity ceiling unit must be a non-empty string")
+    return {"quantity": {"dimension": dim_value, "amount": amount, "unit": unit}}
+
+
+def _normalize_quantity_ceilings(raw: Any) -> Tuple[Dict[str, Any], ...]:
+    """Normalize delegated quantity ceilings to canonical immutable dicts."""
+    if raw is None:
+        return ()
+    if isinstance(raw, (str, bytes, Mapping)):
+        raise DelegationError(
+            "delegation_quantity_ceilings must be a collection of ceilings"
+        )
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in raw:
+        entry = _quantity_ceiling_to_dict(item)
+        q = entry["quantity"]
+        key = (q["dimension"], q["unit"])
+        if key in seen:
+            raise DelegationError(
+                f"duplicate delegated quantity dimension/unit: {key}"
+            )
+        seen.add(key)
+        out.append(entry)
+    return tuple(out)
+
+
+def quantity_allows(
+    child: Any, parent: Any,
+) -> bool:
+    """True if the child quantity ceiling narrows-or-equals the parent.
+
+    Pure integer comparison within one exact (dimension, unit) identity space.
+    No cross-unit conversion is ever performed: a dimension or unit mismatch is
+    not a subset relation and therefore never allows.
+    """
+    def _key(value: Any) -> Optional[Tuple[str, str, int]]:
+        if value is None:
+            return None
+        quantity = getattr(value, "quantity", None)
+        if quantity is None and isinstance(value, Mapping):
+            quantity = value.get("quantity", value)
+        dimension = getattr(quantity, "dimension", None)
+        unit = getattr(quantity, "unit", None)
+        amount = getattr(quantity, "amount", None)
+        if dimension is None and isinstance(quantity, Mapping):
+            dimension = quantity.get("dimension")
+            unit = quantity.get("unit")
+            amount = quantity.get("amount")
+        dim_value = getattr(dimension, "value", dimension)
+        if not isinstance(dim_value, str) or not isinstance(amount, int):
+            return None
+        if isinstance(amount, bool) or amount < 0:
+            return None
+        if not isinstance(unit, str) or not unit:
+            return None
+        return (dim_value, unit, amount)
+
+    ckey = _key(child)
+    pkey = _key(parent)
+    if ckey is None or pkey is None:
+        return False
+    if ckey[0] != pkey[0] or ckey[1] != pkey[1]:
+        # Dimension or unit substitution is never a narrowing relation.
+        return False
+    return ckey[2] <= pkey[2]
+
+
+def quantity_subset(
+    child_ceilings: Any, parent_ceilings: Any,
+) -> bool:
+    """True when every child quantity ceiling sits within the parent set.
+
+    An absent/empty parent quantity set means "no parent quantity authority":
+    a child quantity ceiling can never prove membership against it, so this
+    fails closed (never widens).
+    """
+    children = _normalize_quantity_ceilings(child_ceilings)
+    parents = _normalize_quantity_ceilings(parent_ceilings)
+    if not parents:
+        return False
+    by_key = {(p["quantity"]["dimension"], p["quantity"]["unit"]): p for p in parents}
+    for child in children:
+        q = child["quantity"]
+        parent = by_key.get((q["dimension"], q["unit"]))
+        if parent is None:
+            return False
+        if q["amount"] > parent["quantity"]["amount"]:
+            return False
+    return True
+
+
+def verify_quantity_against_grant(
+    grant_ceilings: Any, quantity: Any,
+) -> Tuple[bool, str]:
+    """Prove one concrete quantity sits within the granted quantity ceilings."""
+    from intent_kernel.mission.quantity import Quantity, QuantityError
+
+    try:
+        q = Quantity.from_dict(quantity) if isinstance(quantity, Mapping) else None
+    except QuantityError:
+        return False, "malformed-quantity"
+    if q is None:
+        return False, "malformed-quantity"
+    granted = _normalize_quantity_ceilings(grant_ceilings)
+    for entry in granted:
+        gq = entry["quantity"]
+        if gq["dimension"] != q.dimension.value or gq["unit"] != q.unit:
+            continue
+        if q.amount > gq["amount"]:
+            return False, "quantity-escalation"
+        return True, ""
+    return False, "quantity-not-granted"
+
+
 @dataclass(frozen=True, slots=True)
 class DelegatedResource:
     """One exact resource triple a delegate may invoke.
@@ -170,6 +320,11 @@ class DelegationGrant:
     delegation_max_timeout_seconds: float = 0.0
     delegation_require_verification: Optional[bool] = None
     delegation_max_side_effect: str = ""
+    #: C2/C3/G1.3 §2: quantity ceilings carried by this grant. Quantity is
+    #: another constrained dimension of the SAME delegation chain — never an
+    #: independent authority path. Serialized as canonical typed quantity
+    #: ceilings so restart preserves the exact scope.
+    delegation_quantity_ceilings: Tuple[Any, ...] = ()
     delegation_created_at: str = ""
     delegation_expires_at: str = ""
     delegation_state: DelegationState = DelegationState.ACTIVE
@@ -250,6 +405,11 @@ class DelegationGrant:
         object.__setattr__(
             self, "delegation_allowed_targets", tuple(self.delegation_allowed_targets or ())
         )
+        # C2/C3/G1.3 §2: normalize + validate delegated quantity ceilings.
+        q_ceilings = _normalize_quantity_ceilings(
+            self.delegation_quantity_ceilings
+        )
+        object.__setattr__(self, "delegation_quantity_ceilings", q_ceilings)
         if (
             self.delegation_max_risk_level
             and self.delegation_max_risk_level not in RISK_SEVERITY
@@ -312,6 +472,9 @@ class DelegationGrant:
             "delegation_max_timeout_seconds": self.delegation_max_timeout_seconds,
             "delegation_require_verification": self.delegation_require_verification,
             "delegation_max_side_effect": self.delegation_max_side_effect,
+            "delegation_quantity_ceilings": [
+                _quantity_ceiling_to_dict(c) for c in self.delegation_quantity_ceilings
+            ],
             "delegation_created_at": self.delegation_created_at,
             "delegation_expires_at": self.delegation_expires_at,
             "delegation_state": self.delegation_state.value,
@@ -517,6 +680,11 @@ def resolve_parent_view(
             "max_side_effect": str(
                 parent_grant.get("delegation_max_side_effect", "") or ""
             ),
+            # C2/C3/G1.3 §2: the parent's quantity ceilings are the
+            # delegatable ceiling every child must narrow within.
+            "quantity_ceilings": _normalize_quantity_ceilings(
+                parent_grant.get("delegation_quantity_ceilings", ()) or ()
+            ),
         }
         view["expiry"] = str(parent_grant.get("delegation_expires_at", "") or "")
     except (TypeError, ValueError, AttributeError):
@@ -590,6 +758,10 @@ def prove_edge(
                 "max_side_effect": str(
                     child_grant.get("delegation_max_side_effect", "") or ""
                 ),
+                # C2/C3/G1.3 §2: quantity travels with the chain.
+                "quantity_ceilings": _normalize_quantity_ceilings(
+                    child_grant.get("delegation_quantity_ceilings", ()) or ()
+                ),
             }
         except (TypeError, ValueError, AttributeError):
             return False, "malformed-ceilings"
@@ -624,6 +796,17 @@ def prove_edge(
             child_se = eff["max_side_effect"] or ceilings.get("max_side_effect", "")
             if not side_effect_allows(child_se, ceilings.get("max_side_effect", "")):
                 return False, "constraint-weakening:side-effect"
+            # C2/C3/G1.3 §2: quantity narrows exactly like every other
+            # constrained dimension — inherit-or-narrow, refuse weakening.
+            parent_q = ceilings.get("quantity_ceilings", ()) or ()
+            child_q = eff.get("quantity_ceilings", ()) or ()
+            if child_q:
+                if not quantity_subset(child_q, parent_q):
+                    return False, "constraint-weakening:quantity"
+            elif parent_q:
+                # No child quantity declared: a parent quantity ceiling must
+                # not be silently widened by omission.
+                return False, "constraint-weakening:quantity"
         if not lifetime_subset(
             str(child_grant.get("delegation_expires_at", "") or ""),
             str(parent_view.get("expiry", "") or ""),
@@ -819,6 +1002,7 @@ def verify_grant_dispatch(
     *,
     presenter_executor_id: Optional[str] = None,
     now_iso: str = "",
+    quantity: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[bool, str, List[Tuple[str, Mapping[str, Any], Mapping[str, Any]]]]:
     """Full pure delegation proof for one productive handoff.
 
@@ -867,6 +1051,20 @@ def verify_grant_dispatch(
             if not proved:
                 return False, why, []
             _ = index
+        # C2/C3/G1.3 §2: the concrete requested quantity must fit the DEEPEST
+        # granted ceiling in the walked chain. The chain has already proven
+        # child <= parent per edge, so proving the leaf is sufficient and does
+        # not create a second authority engine.
+        if quantity is not None and chain:
+            leaf_grant = chain[0][2]
+            granted = leaf_grant.get("delegation_quantity_ceilings", ()) or ()
+            if not granted:
+                # Delegated action carries a quantity but the chain grants no
+                # quantity authority: fail closed, never unlimited.
+                return False, "quantity-not-granted", []
+            qok, qwhy = verify_quantity_against_grant(granted, quantity)
+            if not qok:
+                return False, qwhy, []
         return True, "", chain
     except (TypeError, ValueError, AttributeError) as exc:
         return False, f"malformed-delegation:{exc}", []
@@ -1057,6 +1255,9 @@ __all__ = [
     "MAX_DELEGATION_DEPTH",
     "RISK_SEVERITY",
     "SIDE_EFFECT_SEVERITY",
+    "quantity_allows",
+    "quantity_subset",
+    "verify_quantity_against_grant",
     "DelegationError",
     "DelegationState",
     "DelegatedResource",

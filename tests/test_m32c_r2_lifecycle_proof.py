@@ -203,10 +203,16 @@ def _bind_action(store, mid, node, *, state=ActionState.PENDING,
         mission_id="probe", installation_id=ident, mission_definition=definition)
     plan = [{
         "action_id": spec.action_id,
-        "capability": spec.action_id,
+        # C2/C3/G1.3 §6: carry the node's real capability identity. The C1
+        # request digest binds capability, so the durable plan must carry the
+        # same value for the final pre-handoff equality gate to be sound.
+        "capability": node.capability or spec.action_id,
         "node_id": node.node_id,
         "dependencies": [],
         "request_semantics_digest": spec.request_semantics_digest,
+        # C2/C3/G1.2 §3: durable, authority-bearing operation carried from
+        # the node's canonical ActionContract.action_type.
+        "operation": spec.operation,
     }]
     actions = {spec.action_id: DurableActionState(
         action_id=spec.action_id, node_id=node.node_id,

@@ -159,7 +159,7 @@ def _service(components, guard=None, cache=None):
     )
 
 
-def _bind_runtime_action(store, mid, spec, node_id="n1", node_agent="ex-rt"):
+def _bind_runtime_action(store, mid, spec, node_id="n1", node_agent="ex-rt", node_capability="c.rt"):
     ident = store.get_continuity_identity()
     definition = _definition("runtime")
     probe = MissionRecord(
@@ -171,10 +171,17 @@ def _bind_runtime_action(store, mid, spec, node_id="n1", node_agent="ex-rt"):
         mission_status=MissionStatus.RUNNING,
         plan=({
             "action_id": spec.action_id,
-            "capability": spec.action_id.split("#")[0] if "#" in spec.action_id else spec.action_id,
+            # C2/C3/G1.3 §6: carry the node's real capability identity so the
+            # final pre-handoff equality gate has a truthful value to compare.
+            "capability": node_capability or (spec.action_id.split("#")[0] if "#" in spec.action_id else spec.action_id),
             "node_id": node_id,
             "dependencies": [],
             "request_semantics_digest": spec.request_semantics_digest,
+            # C2/C3/G1.2 §3: operation is durable, authority-bearing and
+            # immutable with the plan. The canonical value is the
+            # ActionContract.action_type of the bound spec ("READ" — these
+            # are non-quantitative counter reads), never a placeholder.
+            "operation": spec.operation,
         },),
         action_states={spec.action_id: DurableActionState(
             action_id=spec.action_id, node_id=node_id,
@@ -207,6 +214,9 @@ def _make_runtime_spec_with_registration(mission_id, expected_governed_registrat
         executor_logical_id=spec.executor_logical_id,
         expected_governed_registration_id=expected_governed_registration_id,
         expected_resource_generation=expected_resource_generation,
+        # C2/C3/G1.2 §1: carry canonical operation/quantity through.
+        quantity=spec.quantity,
+        operation=spec.operation,
     ), node
 
 
@@ -221,6 +231,10 @@ def _spec_for_runtime_node_with_reg(mission_id, node, expected_governed_registra
         executor_logical_id=spec.executor_logical_id,
         expected_governed_registration_id=expected_governed_registration_id,
         expected_resource_generation=expected_resource_generation,
+        # C2/C3/G1.2 §1: operation (and quantity) are part of the canonical
+        # attempt identity and must be carried through spec reconstruction.
+        quantity=spec.quantity,
+        operation=spec.operation,
     )
 
 
@@ -246,6 +260,9 @@ async def test_b4r2_r1_production_mission_runtime_has_resource_manager(tmp_path)
         executor_logical_id=app.app_id,
         expected_governed_registration_id=reg_id,
         expected_resource_generation=gen,
+        # C2/C3/G1.2 §2/§4: canonical operation for this CountingApp counter
+        # read, bound inside the C1 request digest.
+        operation="READ",
     )
     _bind_runtime_action(store, str(mission.id), spec)
     runtime = MissionRuntime(
@@ -423,6 +440,9 @@ async def test_b4r2_r7_tombstone_zero_handoffs(tmp_path):
         executor_logical_id=app.app_id,
         expected_governed_registration_id=reg_id,
         expected_resource_generation=gen,
+        # C2/C3/G1.2 §2/§4: canonical operation for this CountingApp counter
+        # read, bound inside the C1 request digest.
+        operation="READ",
     )
     _bind_runtime_action(store, str(mission.id), spec)
     spec2, node = _make_runtime_spec(str(mission.id))
@@ -466,6 +486,9 @@ async def test_b4r2_r8_retirement_zero_handoffs(tmp_path):
         executor_logical_id=app.app_id,
         expected_governed_registration_id=reg_id,
         expected_resource_generation=gen,
+        # C2/C3/G1.2 §2/§4: canonical operation for this CountingApp counter
+        # read, bound inside the C1 request digest.
+        operation="READ",
     )
     _bind_runtime_action(store, str(mission.id), spec)
     spec2, node = _make_runtime_spec(str(mission.id))
@@ -655,6 +678,9 @@ async def test_b4r2_r15_ambiguous_states_cannot_redispatch(tmp_path):
         executor_logical_id=app.app_id,
         expected_governed_registration_id=snap.governed_registration_id,
         expected_resource_generation=snap.generation,
+        # C2/C3/G1.2 §2/§4: canonical operation for this CountingApp counter
+        # read, bound inside the C1 request digest.
+        operation="READ",
     )
     _bind_runtime_action(store, str(mission.id), spec)
     with pytest.raises(RuntimeError, match="simulated crash"):

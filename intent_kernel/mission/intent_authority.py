@@ -35,6 +35,10 @@ from intent_kernel.mission.intent_ceiling import (
     proof_plan_action_against_ceiling,
     _check_temporal_validity,
 )
+from intent_kernel.mission.quantity import (
+    prove_plan_quantities_against_authority,
+    QuantityAuthorityRecord,
+)
 
 
 class IntentAuthorityError(Exception):
@@ -74,6 +78,11 @@ class IntentAuthorityRecord:
             raise IntentAuthorityError(
                 "authority_digest does not match the attested authority"
             )
+
+    @property
+    def ceilings(self) -> Tuple:
+        """Return quantity ceilings from the ceiling for quantity proof."""
+        return self.ceiling.quantity_ceilings
 
     def compute_authority_digest(self) -> str:
         """Deterministic digest over the attested authority (no clock reads)."""
@@ -178,6 +187,8 @@ def prove_plan_actions_against_authority(
     actions,
     *,
     now_iso: str,
+    quantity_authority: Optional[QuantityAuthorityRecord] = None,
+    plan_quantities: Optional[List[Any]] = None,
 ) -> None:
     """Prove every proposed action <= established intent authority.
 
@@ -200,6 +211,7 @@ def prove_plan_actions_against_authority(
             side_effect=action.get("side_effect", "") or "",
             verification_required=bool(action.get("verification_required", False)),
             now_iso=now_iso,
+            quantity=action.get("quantity"),
         )
         if not ok:
             raise IntentAuthorityError(
@@ -207,10 +219,16 @@ def prove_plan_actions_against_authority(
                 f"action_id={action.get('action_id')} reason={reason}"
             )
 
+    # Prove quantities against quantity authority (C2/C3/G1)
+    if plan_quantities:
+        from intent_kernel.mission.quantity import prove_plan_quantities_against_authority
+        prove_plan_quantities_against_authority(quantity_authority, plan_quantities)
+
 
 __all__ = [
     "IntentAuthorityError",
     "IntentAuthorityRecord",
     "establish_intent_authority",
     "prove_plan_actions_against_authority",
+    "QuantityAuthorityRecord",
 ]

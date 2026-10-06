@@ -654,6 +654,7 @@ class MissionActionAuthority:
         require_verification: Optional[bool] = None,
         max_side_effect: str = "",
         expires_at: str = "",
+        delegation_quantity_ceilings: Any = (),
     ) -> TransitionResult:
         """Derive a non-escalating delegation grant for one action.
 
@@ -854,6 +855,12 @@ class MissionActionAuthority:
             "delegation_max_timeout_seconds": max_timeout_seconds,
             "delegation_require_verification": require_verification,
             "delegation_max_side_effect": str(max_side_effect or ""),
+            # C2/C3/G1.3 §2: quantity narrows exactly like every other
+            # constrained dimension of the SAME derivation.
+            "delegation_quantity_ceilings": [
+                dict(q) if isinstance(q, dict) else q
+                for q in (delegation_quantity_ceilings or ())
+            ],
             "delegation_created_at": now_iso,
             "delegation_expires_at": str(expires_at or ""),
             "delegation_state": "ACTIVE",

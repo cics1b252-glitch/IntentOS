@@ -91,6 +91,13 @@ _INERT_AUTHORITY_TOKEN = object()
 
 _ACTION_VERIFICATION_AUTHORITY_TOKEN = object()
 
+# M27.2-P04-R4 GATE 4: unforgeable in-process stamp set on a CompletionEvidence
+# instance ONLY by VerificationGate.evaluate_node after a GENUINE verification
+# (never on a verification bypass). It is not a dataclass field, so it never
+# serializes; it cannot be supplied through any public caller interface. Only
+# evidence carrying this exact token may mint an ActionVerificationProof.
+_GATE_ISSUANCE_TOKEN = object()
+
 
 @dataclass(frozen=True, slots=True)
 class ActionVerificationProof:
@@ -238,6 +245,16 @@ def issue_action_verification_proof(
     if status_value != "VERIFIED_SUCCESS":
         raise ValueError(
             f"proof requires VERIFIED_SUCCESS, got {status_value!r}"
+        )
+    # M27.2-P04-R4 GATE 4: the evidence object must carry the module-private
+    # issuance token stamped by a genuine VerificationGate.evaluate_node call.
+    # A caller-fabricated CompletionEvidence (or a verification bypass, which
+    # never receives the token) is insufficient even if every public field is
+    # forged to look gate-sourced.
+    if getattr(evidence, "_gate_issuance_token", None) is not _GATE_ISSUANCE_TOKEN:
+        raise ValueError(
+            "proof requires evidence issued by a genuine VerificationGate "
+            "evaluation; caller-fabricated or bypass evidence is insufficient"
         )
     source = getattr(evidence, "source", None)
     if source != "VerificationGate":
@@ -620,6 +637,7 @@ class VerificationGate:
         node: RuntimeNode,
         action: ActionContract,
         result: Any,
+        mission_id: Optional[str] = None,
     ) -> Tuple[VerificationStatus, CompletionEvidence]:
         """Verify a node execution result and generate canonical CompletionEvidence.
 
@@ -771,6 +789,7 @@ class VerificationGate:
             verification_method=f"{verifier_name}.verify()",
             details={
                 "node_id": node.node_id,
+                "mission_id": mission_id,
                 "capability": action.capability,
                 "verification_status": status.value if hasattr(status, "value") else str(status),
                 "verification_type": verification_type or "EXACT",
@@ -802,6 +821,14 @@ class VerificationGate:
                 ],
             },
         )
+
+        # M27.2-P04-R4 GATE 4: stamp unforgeable issuance provenance on the
+        # evidence ONLY when a genuine verification actually ran and succeeded.
+        # ``verification_required=False`` with no external observer is a
+        # canonical bypass (no verifier executed), so it never receives the
+        # token and can never back an ActionVerificationProof.
+        if is_verified and (action.verification_required or external_observer_available):
+            object.__setattr__(evidence, "_gate_issuance_token", _GATE_ISSUANCE_TOKEN)
 
         return status, evidence
 

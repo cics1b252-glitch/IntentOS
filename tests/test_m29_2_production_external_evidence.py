@@ -574,10 +574,14 @@ class TestResumePreservation(unittest.TestCase):
         )
 
     def test_f33_semantic_only_resume_unchanged(self):
+        # M27.2-R1: the evidence verification mechanism must match the current
+        # contract mechanism. This test exercises semantic-only resume, so the
+        # contract mechanism matches the evidence (EXACT) and the semantic
+        # identity is what governs restoration.
         rt = self._runtime()
         rules = [{"op": "equals_field", "left": "x", "right": "y"}]
         evidence = self._evidence("n1", None, verification_type="EXACT", semantic_rules=rules)
-        contract = ActionContract(expected_output="A", verification_type="STRUCTURAL", semantic_rules=rules)
+        contract = ActionContract(expected_output="A", verification_type="EXACT", semantic_rules=rules)
         self.assertTrue(
             rt._validate_resume_evidence("n1", "VERIFIED_SUCCESS", evidence, contract)
         )

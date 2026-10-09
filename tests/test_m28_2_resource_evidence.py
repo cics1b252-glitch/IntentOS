@@ -654,11 +654,15 @@ class TestResumeValidation(unittest.TestCase):
         self.assertFalse(result)
 
     def test_e8_no_current_action_contract_with_external_evidence(self):
+        """M27.2-R1: a missing current contract leaves no canonical verification
+        identity, so resume evidence can no longer be bound. This previously
+        fail-opened (returned True); it now fails closed.
+        """
         rt = self._get_mission_runtime()
         ext = [_make_requirement()]
         evidence = self._build_evidence("n1", ext)
         result = self._run_resume(rt, "n1", "VERIFIED_SUCCESS", evidence, None)
-        self.assertTrue(result)
+        self.assertFalse(result)
 
 
 # ===========================================================================

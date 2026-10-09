@@ -142,6 +142,37 @@ def _durable_result_summary(raw_result: Any) -> Dict[str, Any]:
     return {"success": success, "output": output[:2000]}
 
 
+def _recompute_proof_digest(evidence_record: Any) -> Optional[str]:
+    """M27.2-P04-R4: deterministically recompute an ActionVerificationProof
+    digest from its stored durable evidence record.
+
+    The durable record is ``proof.to_dict()`` plus a ``proof_digest`` entry.
+    Recompute exactly as ``ActionVerificationProof.proof_digest`` does: the
+    SHA-256 over the canonical JSON of the record minus ``proof_digest`` (the
+    self-referential field). Returns None on any non-canonical / malformed
+    input so callers fail closed.
+    """
+    if not isinstance(evidence_record, dict):
+        return None
+    try:
+        import hashlib
+        import json
+
+        payload = {
+            k: v for k, v in evidence_record.items() if k != "proof_digest"
+        }
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    except Exception:
+        return None
+
+
 class MissionRuntime:
     """Controlled cognitive execution runtime engine."""
 
@@ -348,6 +379,204 @@ class MissionRuntime:
             action_states=action_states,
         )
         store.create(record)
+
+    def _record_durable_gate_verification(
+        self,
+        *,
+        instance: "MissionRuntimeInstance",
+        node: "RuntimeNode",
+        contract: Optional[ActionContract],
+        evidence: Any,
+        ownership: Any,
+    ) -> None:
+        """M27.2-P04-R4: anchor a genuine gate VERIFIED_SUCCESS into the durable
+        MissionRecord via the exact canonical sequence
+
+            RESULT_RECORDED -> VERIFICATION_REQUIRED -> VERIFIED
+
+        and leave ``verification_proof_digest`` set so completion can be
+        validated on resume independent of any checkpoint.
+
+        Fail-closed: if there is no durable authority (store-less legacy mode),
+        no dispatch ownership, no authorized request digest, or any transition
+        is rejected, nothing is written. The caller's in-memory success stands,
+        but resume then cannot independently restore VERIFIED_SUCCESS. No
+        bypass path ever reaches here with a mint-able proof (GATE 1/GATE 4):
+        ``issue_action_verification_proof`` rejects evidence that is not
+        gate-issued.
+        """
+        if (
+            self._mission_record_store is None
+            or self.dispatch_guard is None
+            or ownership is None
+            or contract is None
+        ):
+            return
+        try:
+            from intent_kernel.mission.action_authority import (
+                ActionTransitionEvidence,
+                MissionActionAuthority,
+            )
+            from intent_kernel.runtime.verification import (
+                issue_action_verification_proof,
+            )
+
+            mission_id = instance.mission_id
+            action_id = str(
+                getattr(ownership, "action_id", "") or node.node_id
+            )
+            if not action_id:
+                return
+
+            # Bind the proof to the AUTHORIZED request digest held in the
+            # durable plan (never a live re-derivation that could drift).
+            request_digest = self.dispatch_guard.get_authorized_request_digest(
+                mission_id, action_id
+            )
+            if not request_digest:
+                return
+
+            proof = issue_action_verification_proof(
+                mission_id=mission_id,
+                action_id=action_id,
+                request_semantics_digest=str(request_digest),
+                node_id=node.node_id,
+                capability=str(
+                    getattr(contract, "capability", "") or node.capability or ""
+                ),
+                status=VerificationStatus.VERIFIED_SUCCESS,
+                evidence=evidence,
+                verified_at=utc_iso(),
+            )
+
+            authority = MissionActionAuthority(self._mission_record_store)
+            data = self._mission_record_store.load(mission_id)
+            if not isinstance(data, dict):
+                return
+            revision = data.get("revision")
+
+            # Step 1: RESULT_RECORDED -> VERIFICATION_REQUIRED (never skipped).
+            first = authority.transition_action(
+                mission_id,
+                action_id,
+                revision,
+                ActionState.RESULT_RECORDED,
+                ActionState.VERIFICATION_REQUIRED,
+                ActionTransitionEvidence(
+                    requested_by="mission-runtime",
+                    reason="M27.2-P04-R4: verification required",
+                ),
+            )
+            # Step 2: VERIFICATION_REQUIRED -> VERIFIED (proof-bearing).
+            authority.transition_action(
+                mission_id,
+                action_id,
+                getattr(first, "mission_revision", None),
+                ActionState.VERIFICATION_REQUIRED,
+                ActionState.VERIFIED,
+                ActionTransitionEvidence(
+                    requested_by="mission-runtime",
+                    reason="M27.2-P04-R4: gate-verified",
+                    verification_proof=proof,
+                ),
+            )
+        except Exception:
+            # Fail closed: leave the durable action untouched rather than
+            # manufacture a proof-anchored completion.
+            return
+
+    def _durable_proof_valid(
+        self,
+        *,
+        mission_record: Any,
+        instance: "MissionRuntimeInstance",
+        node_id: str,
+        contract: Optional[ActionContract],
+        checkpoint: Optional[MissionCheckpoint],
+    ) -> bool:
+        """M27.2-P04-R4: decide whether the durable MissionRecord carries an
+        internally consistent, bound, gate-issued verification proof for
+        ``node_id``.
+
+        Store-less legacy runtimes (``mission_record is None``) have no durable
+        authority; they retain the checkpoint-evidence path only (GATE 3
+        boundary: a store-less restore is NOT independently authenticated, but
+        store-less executions are non-productive because the dispatch guard
+        requires a store). With a durable authority present, absence of a valid
+        proof yields INCONCLUSIVE — never a restored VERIFIED_SUCCESS.
+        """
+        if mission_record is None:
+            return True
+        try:
+            action = None
+            for aid, astate in (mission_record.action_states or {}).items():
+                if getattr(astate, "node_id", None) == node_id or aid == node_id:
+                    action = astate
+                    break
+            if action is None or action.state is not ActionState.VERIFIED:
+                return False
+            digest = getattr(action, "verification_proof_digest", "") or ""
+            record = action.verification_evidence
+            if not digest or not isinstance(record, dict):
+                return False
+            if _recompute_proof_digest(record) != digest:
+                return False
+            if record.get("mission_id") != instance.mission_id:
+                return False
+            if record.get("action_id") != action.action_id:
+                return False
+
+            # Request digest must equal the durable plan entry for this action.
+            request_digest = record.get("request_semantics_digest")
+            plan_match = False
+            for entry in mission_record.plan or ():
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("action_id") == action.action_id
+                    and entry.get("request_semantics_digest") == request_digest
+                ):
+                    plan_match = True
+                    break
+            if not plan_match:
+                return False
+
+            # Contract mechanism hashes must match the CURRENT node contract.
+            if contract is not None:
+                rules = getattr(contract, "semantic_rules", None)
+                has_semantic = isinstance(rules, list) and len(rules) > 0
+                vtype = getattr(contract, "verification_type", None) or "EXACT"
+                if has_semantic:
+                    from intent_kernel.runtime.semantic_verifier import (
+                        rule_set_hash,
+                    )
+
+                    if record.get("rule_set_hash") != rule_set_hash(rules):
+                        return False
+                if vtype == "STRUCTURAL":
+                    schema = getattr(contract, "verification_schema", None)
+                    if schema is None:
+                        return False
+                    if record.get("contract_hash") != (
+                        DeterministicStructuralVerifier.contract_hash(schema)
+                    ):
+                        return False
+                if vtype == "EXACT" and not has_semantic:
+                    expected = getattr(contract, "expected_output", None)
+                    if record.get("exact_contract_hash") != exact_contract_hash(
+                        expected
+                    ):
+                        return False
+
+            # The checkpoint must not claim a different durable proof.
+            if checkpoint is not None:
+                chk_entry = (checkpoint.verification_state or {}).get(node_id, {})
+                if isinstance(chk_entry, dict):
+                    claimed = chk_entry.get("verification_proof_digest")
+                    if claimed is not None and claimed != digest:
+                        return False
+            return True
+        except Exception:
+            return False
 
     def _revalidate_delegation_live(
         self, durable_data: Dict[str, Any], contract: Any, node: Any
@@ -1067,6 +1296,7 @@ class MissionRuntime:
                         node=node,
                         action=contract,
                         result=raw_result,
+                        mission_id=instance.mission_id,
                     )
                     node.verification_result = verif_status
                     instance.completion_evidence.append(evidence.to_dict())
@@ -1081,6 +1311,18 @@ class MissionRuntime:
                         # Record idempotency key execution
                         if contract.idempotency_key:
                             self.action_gate.mark_idempotency_key_executed(contract.idempotency_key)
+
+                        # M27.2-P04-R4: anchor a durable, gate-issued proof through
+                        # the canonical RESULT_RECORDED -> VERIFICATION_REQUIRED ->
+                        # VERIFIED sequence so completion survives restart
+                        # independent of any checkpoint. The helper fails closed.
+                        self._record_durable_gate_verification(
+                            instance=instance,
+                            node=node,
+                            contract=contract,
+                            evidence=evidence,
+                            ownership=ownership,
+                        )
                     else:
                         node.state = RuntimeNodeState.FAILED
                         if node.node_id in instance.pending_nodes:
@@ -1349,6 +1591,15 @@ class MissionRuntime:
         chk = await self.checkpoint_repo.get_latest_checkpoint(runtime_id) if hasattr(self, 'checkpoint_repo') and self.checkpoint_repo else None
 
         if chk and instance:
+            # M27.2-R1: A checkpoint issued for a different mission is not
+            # resumable authority for this mission. Cross-mission replay of
+            # verification evidence must fail closed.
+            if (
+                chk.mission_id
+                and instance.mission_id
+                and chk.mission_id != instance.mission_id
+            ):
+                return None
             # B5.2: Checkpoint must NOT override MissionRecord action state
             # (terminal states COMPLETED/FAILED/AMBIGUOUS_EFFECT must be preserved).
             # G6: these guards apply only when a MissionRecord is present
@@ -1414,9 +1665,17 @@ class MissionRuntime:
 
                     if (
                         claimed_status == VerificationStatus.VERIFIED_SUCCESS.value
+                        and self._durable_proof_valid(
+                            mission_record=mission_record,
+                            instance=instance,
+                            node_id=nid,
+                            contract=instance.nodes[nid].action_contract,
+                            checkpoint=chk,
+                        )
                         and self._validate_resume_evidence(
                             nid, claimed_status, chk.completion_evidence,
                             instance.nodes[nid].action_contract,
+                            instance.mission_id,
                         )
                     ):
                         # Evidence valid — restore verified state
@@ -1433,13 +1692,33 @@ class MissionRuntime:
     async def save_checkpoint(self, instance: MissionRuntimeInstance) -> MissionCheckpoint:
         """Create and persist a checkpoint for the instance."""
         # H1.4: Persist per-node verification state and evidence
+        # M27.2-P04-R4: when a durable authority exists, mirror the anchored
+        # gate proof digest so the checkpoint and MissionRecord can be
+        # cross-checked on resume.
+        durable_actions_by_node: Dict[str, Any] = {}
+        if self._mission_record_store is not None:
+            try:
+                data = self._mission_record_store.load(instance.mission_id)
+                if isinstance(data, dict):
+                    for aid, adata in (data.get("action_states") or {}).items():
+                        if isinstance(adata, dict):
+                            nid_key = str(adata.get("node_id") or aid)
+                            durable_actions_by_node[nid_key] = adata
+            except Exception:
+                durable_actions_by_node = {}
         verification_state: Dict[str, Any] = {}
         for nid, node in instance.nodes.items():
             if node.verification_result is not None:
-                verification_state[nid] = {
+                entry: Dict[str, Any] = {
                     "verification_result": node.verification_result.value,
                     "evidence_id": self._find_evidence_id(instance, nid),
                 }
+                adata = durable_actions_by_node.get(nid)
+                if isinstance(adata, dict) and adata.get("verification_proof_digest"):
+                    entry["verification_proof_digest"] = adata[
+                        "verification_proof_digest"
+                    ]
+                verification_state[nid] = entry
 
         chk = MissionCheckpoint(
             runtime_id=instance.runtime_id,
@@ -1472,6 +1751,7 @@ class MissionRuntime:
         claimed_status: str,
         evidence_list: List[Dict[str, Any]],
         current_action_contract: Any = None,
+        mission_id: Optional[str] = None,
     ) -> bool:
         """Validate that verification evidence is consistent for a node on resume.
 
@@ -1480,6 +1760,10 @@ class MissionRuntime:
         - The evidence source is VerificationGate
         - The evidence claims verified=True
         - The evidence verification_status matches the claimed status
+        - M27.2-R1: A current contract exists (contractless evidence fails closed)
+        - M27.2-R1: The evidence's verification mechanism matches the CURRENT
+          contract mechanism (a mechanism change invalidates prior evidence)
+        - M27.2-R1: Evidence mission provenance, where present, matches the mission
         - For EXACT evidence: evidence exact_contract_hash matches current expected_output
         - For STRUCTURAL evidence: evidence contract_hash matches current contract
         - For SEMANTIC evidence: evidence rule_set_hash matches current rules
@@ -1501,13 +1785,31 @@ class MissionRuntime:
             ev_status = details.get("verification_status", "")
             if ev_status != claimed_status:
                 return False
-            # M25.2.1: For STRUCTURAL evidence, contract hash must match current contract
+            # M27.2-R1: A node with no current contract has no canonical
+            # verification identity, so no evidence can be bound to it.
+            # Fail closed instead of trusting unbound evidence.
+            if current_action_contract is None:
+                return False
+            # M27.2-R1: Evidence that carries mission provenance must belong
+            # to the mission being resumed. Legacy evidence without provenance
+            # is bound by the checkpoint-level mission check in resume().
+            ev_mission = details.get("mission_id")
+            if mission_id is not None and ev_mission is not None and ev_mission != mission_id:
+                return False
+            # M27.2-R1: Evidence must be bound to the CURRENT verification
+            # mechanism. A mechanism change is a contract change and
+            # invalidates any previously-issued evidence. Dispatch on the
+            # current canonical contract, never on the evidence's declaration.
+            current_type = getattr(current_action_contract, "verification_type", None) or "EXACT"
             ev_type = details.get("verification_type", "EXACT")
-            if ev_type == "STRUCTURAL":
+            if ev_type != current_type:
+                return False
+            current_rules = getattr(current_action_contract, "semantic_rules", None)
+            has_current_semantic = isinstance(current_rules, list) and len(current_rules) > 0
+            # M25.2.1: For STRUCTURAL contracts, contract hash must match
+            if current_type == "STRUCTURAL":
                 ev_hash = details.get("contract_hash")
                 if ev_hash is None:
-                    return False
-                if current_action_contract is None:
                     return False
                 current_schema = getattr(current_action_contract, "verification_schema", None)
                 if current_schema is None:
@@ -1515,34 +1817,28 @@ class MissionRuntime:
                 current_hash = DeterministicStructuralVerifier.contract_hash(current_schema)
                 if ev_hash != current_hash:
                     return False
-            # M27.2: For EXACT evidence (no semantic rules), exact_contract_hash must match
-            if ev_type == "EXACT" and current_action_contract is not None:
-                current_rules = getattr(current_action_contract, "semantic_rules", None)
-                has_current_semantic = isinstance(current_rules, list) and len(current_rules) > 0
-                if not has_current_semantic:
-                    ev_exact_hash = details.get("exact_contract_hash")
-                    current_expected = getattr(current_action_contract, "expected_output", None)
-                    current_exact_hash = exact_contract_hash(current_expected)
-                    if ev_exact_hash is None:
-                        return False
-                    if ev_exact_hash != current_exact_hash:
-                        return False
+            # M27.2: For EXACT contracts (no semantic rules), exact_contract_hash must match
+            if current_type == "EXACT" and not has_current_semantic:
+                ev_exact_hash = details.get("exact_contract_hash")
+                current_expected = getattr(current_action_contract, "expected_output", None)
+                current_exact_hash = exact_contract_hash(current_expected)
+                if ev_exact_hash is None:
+                    return False
+                if ev_exact_hash != current_exact_hash:
+                    return False
             # M26.2: For SEMANTIC evidence, rule_set_hash must match current rules
             ev_semantic_hash = details.get("rule_set_hash")
-            if current_action_contract is not None:
-                current_rules = getattr(current_action_contract, "semantic_rules", None)
-                has_current_semantic = isinstance(current_rules, list) and len(current_rules) > 0
-                if has_current_semantic:
-                    # Current contract has semantic rules — evidence MUST have matching hash
-                    if ev_semantic_hash is None:
-                        return False
-                    from intent_kernel.runtime.semantic_verifier import rule_set_hash
-                    current_rhash = rule_set_hash(current_rules)
-                    if ev_semantic_hash != current_rhash:
-                        return False
-                elif ev_semantic_hash is not None:
-                    # Evidence has semantic hash but current contract doesn't — mismatch
+            if has_current_semantic:
+                # Current contract has semantic rules — evidence MUST have matching hash
+                if ev_semantic_hash is None:
                     return False
+                from intent_kernel.runtime.semantic_verifier import rule_set_hash
+                current_rhash = rule_set_hash(current_rules)
+                if ev_semantic_hash != current_rhash:
+                    return False
+            elif ev_semantic_hash is not None:
+                # Evidence has semantic hash but current contract doesn't — mismatch
+                return False
             # M28.2: External evidence contract hash must match current contract
             if current_action_contract is not None:
                 current_external = getattr(current_action_contract, "external_evidence", None)

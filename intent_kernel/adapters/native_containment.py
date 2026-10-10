@@ -530,3 +530,259 @@ class NativeCreateTestFileExecutor:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+# ---------------------------------------------------------------------------
+# M36-B: MINIMAL GOVERNED INTEGRATION.
+#
+# ``NativeCreateTestFileActionExecutor`` implements the EXISTING frozen port
+# ``intent_kernel.runtime.executor_port.ActionExecutorPort`` so native
+# containment can ride the CANONICAL governed mission path:
+#
+#     MissionRuntime.run_mission
+#         -> ProductiveDispatchGuard.acquire   (durable attempt authority)
+#         -> ActionExecutorPort.execute        <-- THIS adapter
+#         -> NativeCreateTestFileExecutor       (effect-time authority re-proof)
+#         -> NativeContainment                  (preventive handle-relative write)
+#         -> independent observation
+#
+# ADDITIVE ONLY. No frozen Core contract is changed, no new port is created,
+# no authority is granted: the adapter re-uses the M34 ``CreateTestFileAuthority``
+# and re-proves it at effect time exactly as the M34 adapter does. It NEVER
+# falls back to the M34 non-atomic path when native containment is required: if
+# the platform cannot provide preventive containment the adapter fails closed.
+# ---------------------------------------------------------------------------
+
+M36_CAPABILITY = "m34.create_test_file"
+M36_OPERATION = "CREATE_TEST_FILE"
+
+
+def _identity_str(identity: "FileIdentity") -> str:
+    return (
+        f"{identity.volume_serial}:{identity.file_index_high}:"
+        f"{int(identity.file_index_low) & 0xFFFFFFFF}"
+    )
+
+
+def _root_identity_str(containment: "NativeContainment") -> str:
+    rid = containment.root_identity
+    return f"{rid.volume_serial}:{rid.file_index_high}:{rid.file_index_low}"
+
+
+from intent_kernel.runtime.executor_port import ActionExecutorPort  # noqa: E402
+
+
+class NativeCreateTestFileActionExecutor(ActionExecutorPort):
+    """Frozen ``ActionExecutorPort`` driver over native preventive containment.
+
+    Routes a real ``CREATE_TEST_FILE`` effect through the canonical governed
+    dispatch path. Authority is re-proven at effect time by the bound M34
+    authority (validity window, capability, operation, size, content digest,
+    exact target, overwrite). The write is issued relative to a pinned
+    directory handle, so a concurrent replacement of any parent path component
+    cannot redirect it. There is NO fallback to the non-atomic M34 adapter: if
+    native containment is unavailable the executor refuses (fail closed).
+    """
+
+    CAPABILITY = "m34.create_test_file"
+    OPERATION = "CREATE_TEST_FILE"
+
+    def __init__(
+        self,
+        grant: Any,
+        containment: Optional[NativeContainment] = None,
+        expected_root_identity: Optional[str] = None,
+    ) -> None:
+        from intent_kernel.adapters.local_filesystem import CreateTestFileAuthority
+
+        if not isinstance(grant, CreateTestFileAuthority):
+            raise NativeEffectDenied("grant-type-invalid")
+        self._grant = grant
+        # Repeat the authority proof chain and pinned-handle effect exactly as
+        # the prototype, never a fork of it.
+        self._native = NativeCreateTestFileExecutor(grant, containment=containment)
+        self._leaf = self._native._leaf
+        self._expected_root_identity = expected_root_identity
+        self.effect_calls = 0
+        self.denials: list = []
+
+    # -- frozen port surface -------------------------------------------
+    async def can_execute(self, action: Any) -> bool:
+        return getattr(action, "capability", "") == self.CAPABILITY
+
+    async def execute(self, action: Any) -> dict:
+        from intent_kernel.adapters.local_filesystem import (
+            CAPABILITY,
+            OPERATION,
+            CreateTestFileDenied,
+            sha256_bytes,
+        )
+
+        root_identity = self._root_identity_str()
+
+        # Capability/operation escalation is a coding error, refused hard.
+        if getattr(action, "capability", None) != CAPABILITY:
+            self.denials.append("unsupported-capability")
+            raise CreateTestFileDenied("unsupported-capability", str(getattr(action, "capability", "")))
+        if getattr(action, "action_type", None) != OPERATION:
+            self.denials.append("operation-escalation")
+            raise CreateTestFileDenied("operation-escalation", str(getattr(action, "action_type", "")))
+
+        payload = dict(getattr(action, "inputs_reference", {}) or {})
+        relative = str(payload.get("path", ""))
+        content_raw = payload.get("content", "")
+        content = (
+            content_raw.encode("utf-8")
+            if isinstance(content_raw, str)
+            else bytes(content_raw or b"")
+        )
+
+        # Single-target restriction: the dispatched operation must name exactly
+        # the one leaf the authority bound. A different target never executes.
+        if relative != self._leaf:
+            return self._deny("target-substitution", relative, root_identity)
+
+        # Root-handle identity precondition, if a caller pinned one.
+        if (
+            self._expected_root_identity is not None
+            and self._expected_root_identity != root_identity
+        ):
+            return self._deny("root-identity-mismatch", relative, root_identity)
+
+        # Authority is re-proven HERE, at effect time, before any mutation.
+        try:
+            identity = self._native.execute(content)
+        except NativeEffectDenied as exc:
+            self.denials.append(exc.code)
+            return self._deny(exc.code, relative, root_identity)
+        except ContainmentViolation as exc:
+            self.denials.append("containment-violation")
+            return self._deny("containment-violation", relative, root_identity)
+
+        self.effect_calls += 1
+        return {
+            "success": True,
+            "effect_occurred": True,
+            "capability": CAPABILITY,
+            "operation": OPERATION,
+            "path": relative,
+            "digest": sha256_bytes(content),
+            "root_identity": root_identity,
+            "created_identity": self._identity_str(identity),
+        }
+
+    async def cancel(self, action_id: str) -> bool:
+        return False
+
+    async def get_status(self, action_id: str) -> str:
+        return "SUCCEEDED" if self.effect_calls else "UNKNOWN"
+
+    # -- helpers -------------------------------------------------------
+    @staticmethod
+    def _identity_str(identity: FileIdentity) -> str:
+        return f"{identity.volume_serial}:{identity.file_index_high}:{identity.file_index_low}"
+
+    def _root_identity_str(self) -> str:
+        rid = self._native.containment.root_identity
+        return f"{rid.volume_serial}:{rid.file_index_high}:{rid.file_index_low}"
+
+    def _deny(self, code: str, relative: str, root_identity: str) -> dict:
+        self.denials.append(code)
+        return {
+            "success": False,
+            "effect_occurred": False,
+            "path": relative,
+            "digest": "",
+            "reason": code,
+            "root_identity": root_identity,
+            "created_identity": None,
+        }
+
+    def close(self) -> None:
+        self._native.close()
+
+    def __enter__(self) -> "NativeCreateTestFileActionExecutor":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+class NativeFilesystemObserver:
+    """Independent observation of a native-contained effect.
+
+    Opens a FRESH pinned handle on the authorized root (independent of the
+    executor's handle), reopens the leaf relative to that handle, and reads the
+    content from the host filesystem. It never inspects the executor's return
+    value, so a forged executor report cannot influence it.
+    """
+
+    def __init__(
+        self,
+        grant: Any,
+        expected_root_identity: Optional[str] = None,
+    ) -> None:
+        self._grant = grant
+        self._expected_root_identity = expected_root_identity
+
+    def observe(self) -> dict:
+        from intent_kernel.adapters.local_filesystem import sha256_bytes
+
+        target = Path(self._grant.authorized_target)
+        leaf = target.name
+        if not PREVENTIVE_CONTAINMENT:
+            return {
+                "observed": False,
+                "exists": False,
+                "observed_sha256": "",
+                "matches_authorized": False,
+                "identity_stable": False,
+                "root_identity": None,
+                "leaf_identity": None,
+                "reason": "native-containment-unavailable",
+            }
+        try:
+            with NativeContainment(self._grant.authorized_root) as nc:
+                root_identity = (
+                    f"{nc.root_identity.volume_serial}:"
+                    f"{nc.root_identity.file_index_high}:"
+                    f"{nc.root_identity.file_index_low}"
+                )
+                leaf_identity = None
+                identity_stable = False
+                try:
+                    lid = nc.open_existing_relative(leaf)
+                    leaf_identity = f"{lid.volume_serial}:{lid.file_index_high}:{lid.file_index_low}"
+                    identity_stable = True
+                except ContainmentViolation:
+                    leaf_identity = None
+        except (NativeContainmentUnavailable, ContainmentViolation) as exc:
+            return {
+                "observed": True,
+                "exists": False,
+                "observed_sha256": "",
+                "matches_authorized": False,
+                "identity_stable": False,
+                "root_identity": None,
+                "leaf_identity": None,
+                "reason": f"root-unavailable:{exc}",
+            }
+
+        exists = target.exists()
+        observed_sha = sha256_bytes(target.read_bytes()) if exists else ""
+        matches = exists and observed_sha == self._grant.expected_content_sha256
+        root_identity_matches = (
+            self._expected_root_identity is None
+            or self._expected_root_identity == root_identity
+        )
+        return {
+            "observed": True,
+            "exists": exists,
+            "observed_sha256": observed_sha,
+            "matches_authorized": matches,
+            "identity_stable": identity_stable,
+            "root_identity": root_identity,
+            "root_identity_matches": root_identity_matches,
+            "leaf_identity": leaf_identity,
+            "reason": "verified" if matches else "effect-absent-or-mismatch",
+        }

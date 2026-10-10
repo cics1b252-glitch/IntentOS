@@ -44,6 +44,54 @@ CAPABILITY = "m34.create_test_file"
 OPERATION = "CREATE_TEST_FILE"
 
 
+# --------------------------------------------------------------------------
+# Platform containment capability (M34-F).  Honest, not aspirational.
+# --------------------------------------------------------------------------
+#: ``O_NOFOLLOW`` makes the kernel refuse to traverse a symlink at the final
+#: component. ``dir_fd`` lets the write be anchored to an already-opened
+#: directory handle so no path string is re-resolved at write time. Together
+#: they close the check->write race. Windows exposes neither.
+_HAS_O_NOFOLLOW = hasattr(os, "O_NOFOLLOW") and hasattr(os, "supports_dir_fd") \
+    and os.O_NOFOLLOW in os.supports_dir_fd
+_SUPPORTS_DIR_FD = hasattr(os, "supports_dir_fd") and os.open in os.supports_dir_fd
+
+#: What containment this platform can actually guarantee. Reported explicitly
+#: so no caller can mistake "checked" for "atomic".
+CONTAINMENT_MODE = (
+    "POSIX_ATOMIC_NOFOLLOW" if (_HAS_O_NOFOLLOW and _SUPPORTS_DIR_FD)
+    else "REVALIDATE_NO_ATOMIC_GUARANTEE"
+)
+
+
+class UnsupportedGuaranteeError(RuntimeError):
+    """Caller demanded a containment guarantee this platform cannot provide.
+
+    Fail-closed: rather than silently downgrading to a weaker posture, a
+    caller that requires atomic containment is refused outright.
+    """
+
+
+def require_atomic_containment() -> str:
+    """Fail closed unless the platform can guarantee atomic containment.
+
+    Returns the containment mode. Raises UnsupportedGuaranteeError when the
+    caller demands a guarantee the platform cannot uphold - the concurrent
+    hostile-path-mutation threat model is explicitly unsupported here and is
+    never reported as protected.
+    """
+    if CONTAINMENT_MODE != "POSIX_ATOMIC_NOFOLLOW":
+        raise UnsupportedGuaranteeError(
+            "atomic containment against concurrent hostile path mutation is "
+            "NOT available on this platform "
+            f"(mode={CONTAINMENT_MODE}); refusing to claim the guarantee"
+        )
+    return CONTAINMENT_MODE
+
+
+class ContainmentBreach(RuntimeError):
+    """A write landed outside the authorized root. Detected, not assumed."""
+
+
 class CreateTestFileDenied(RuntimeError):
     """Effect refused before any filesystem mutation. Carries a stable code."""
 
@@ -215,13 +263,42 @@ class LocalFileSystemExecutor(ActionExecutorPort):
             )
 
         self.effect_calls += 1
+        # Parent creation is itself containment-relevant: mkdir(exist_ok=True)
+        # happily traverses an existing symlinked component, so the chain is
+        # re-verified AFTER creation and the final write is re-verified AFTER.
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Exclusive create unless overwrite was separately authorized.
+        self._assert_chain_contained(target)
+
+        # Exclusive create unless overwrite was separately authorized. 'xb'
+        # maps to O_CREAT|O_EXCL, which fails if the leaf already exists AND
+        # (on POSIX) is the strongest primitive available without O_NOFOLLOW.
         if self._grant.allow_overwrite:
             target.write_bytes(content)
         else:
-            with open(target, "xb") as handle:
-                handle.write(content)
+            try:
+                with open(target, "xb") as handle:
+                    handle.write(content)
+            except FileExistsError:
+                # A concurrent racer won the exclusive create. Surface the
+                # canonical stable deny code, never a raw OS exception.
+                self.denials.append("overwrite-not-authorized")
+                return ExecutionReceipt(
+                    reported_path=str(target),
+                    reported_success=False,
+                    reported_digest="",
+                    effect_occurred=False,
+                )
+
+        # Post-write containment proof. If a concurrent hostile mutation
+        # redirected the write, this catches it instead of reporting success.
+        self._assert_chain_contained(target, stage="post-write")
+        landed = target.resolve()
+        if landed != self._grant.authorized_target.resolve():
+            raise ContainmentBreach(
+                f"write landed at {landed}, not the authorized target"
+            )
+        if sha256_bytes(target.read_bytes()) != self._grant.expected_content_sha256:
+            raise ContainmentBreach("post-write digest does not match authority")
 
         return ExecutionReceipt(
             reported_path=str(target),
@@ -229,6 +306,24 @@ class LocalFileSystemExecutor(ActionExecutorPort):
             reported_digest=sha256_bytes(content),
             effect_occurred=True,
         )
+
+    def _assert_chain_contained(self, target: Path, stage: str = "pre-write") -> None:
+        """Re-verify every component from the root down to the leaf."""
+        root = self._grant.authorized_root
+        probe = root
+        if probe.is_symlink():
+            raise ContainmentBreach(f"authorized root is a symlink ({stage})")
+        for part in target.relative_to(root).parts:
+            probe = probe / part
+            if probe.is_symlink():
+                raise ContainmentBreach(
+                    f"symlinked path component at {probe} ({stage})"
+                )
+        resolved = target.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise ContainmentBreach(
+                f"{resolved} escapes {root} ({stage})"
+            )
 
     async def cancel(self, action_id: str) -> bool:
         return False

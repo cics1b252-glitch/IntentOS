@@ -60,15 +60,30 @@ from tests.test_m32c_r2_lifecycle_proof import (  # noqa: F401
 NOW = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
 CONTENT = b"m34-real-host-effect-payload\n"
 
-# CREATE_TEST_FILE is a bounded single-target effect: it carries no quantity
-# dimension. This is a POSITIVE not-applicable proof (the registry's ``None``
-# declaration), not an authority grant - the intent ceiling below is still the
-# sole authority for the effect. Undeclared operations resolve to UNKNOWN and
-# are denied, so the declaration is required for dispatch to be reachable.
-from intent_kernel.mission.quantity import (  # noqa: E402
-    DEFAULT_QUANTITY_APPLICABILITY,
-)
-DEFAULT_QUANTITY_APPLICABILITY.declare(OPERATION, None)
+
+@pytest.fixture(autouse=True)
+def _declare_create_test_file_applicability():
+    """Scoped, restored declaration - NEVER a module-import side effect.
+
+    M34-F: the previous version called
+    ``DEFAULT_QUANTITY_APPLICABILITY.declare(...)`` at import time, which
+    permanently mutated process-global registry state for every other test
+    collected in the same session. CREATE_TEST_FILE is a bounded single-target
+    effect with no quantity dimension, so the declaration is a POSITIVE
+    not-applicable proof - not an authority grant - and it is now installed
+    only for the duration of these tests and removed afterwards.
+    """
+    from intent_kernel.mission.quantity import DEFAULT_QUANTITY_APPLICABILITY
+
+    assert not DEFAULT_QUANTITY_APPLICABILITY.is_declared(OPERATION), (
+        "global registry leaked state before this test ran"
+    )
+    DEFAULT_QUANTITY_APPLICABILITY.declare(OPERATION, None)
+    try:
+        yield
+    finally:
+        DEFAULT_QUANTITY_APPLICABILITY._by_operation.pop(OPERATION, None)
+        assert not DEFAULT_QUANTITY_APPLICABILITY.is_declared(OPERATION)
 
 
 def _iso(delta: int = 0) -> str:

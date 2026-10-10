@@ -176,11 +176,26 @@ def test_m34_08_absolute_path_denied(tmp_path):
 
 
 # --- M34-9: symlink escape --------------------------------------------------
-@pytest.mark.skipif(os_name_missing := (__import__("os").name != "nt"),
-                    reason="symlink creation requires privileges on Windows")
+def _symlinks_available(tmp_path: Path) -> bool:
+    """Probe, do not guess. M34-F: the previous skipif was inverted - it
+    skipped on POSIX (where symlinks are free) and ran on Windows (where they
+    need privilege), so the guard was untested exactly where CI usually runs.
+    """
+    probe = tmp_path / "__symlink_probe__"
+    probe.mkdir()
+    link = tmp_path / "__symlink_link__"
+    try:
+        link.symlink_to(probe, target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+    return True
+
+
 def test_m34_09_symlink_escape_denied(tmp_path):
     import os
 
+    if not _symlinks_available(tmp_path):
+        pytest.skip("symlink creation unavailable on this platform/privilege set")
     outside = tmp_path / "real_outside"
     outside.mkdir()
     grant = _grant(tmp_path)

@@ -1,0 +1,215 @@
+{
+  "manifest": "CORE_V1_FREEZE_EVIDENCE_MANIFEST",
+  "task": "CORE-V1-FR1 GOVERNANCE CORE FREEZE BASELINE",
+  "prepared": "2026-10-09",
+  "verdict": "CORE_V1_FREEZE_BASELINE_PREPARED",
+  "repository": {
+    "name": "IntentOS",
+    "remote": "https://github.com/cics1b252-glitch/IntentOS.git",
+    "toplevel": "C:/Users/Kelly Cordeiro/Documents/Projetos/Aplicativos/Intent OS"
+  },
+  "baseline": {
+    "branch": "architecture/governed-resource-activation-convergence",
+    "head": "7d8fbd766730867043af78aea0769c689ff10b76",
+    "head_parent": "66fa6219ab2af95e7747310afe5d0842d6232d31",
+    "remote_feature_ref": "7d8fbd766730867043af78aea0769c689ff10b76",
+    "main_local": "76cdd5cb39b5e0f59d8144907b30373de4e95884",
+    "main_remote": "76cdd5cb39b5e0f59d8144907b30373de4e95884",
+    "main_changed": false,
+    "tracked_worktree_clean": true,
+    "commit_message": "fix(resume): bind durable gate proof and enforce resume integrity (M27.2-P04)",
+    "commit_files": [
+      { "path": "intent_kernel/runtime/mission_runtime.py", "status": "M", "insertions": 356 },
+      { "path": "intent_kernel/runtime/verification.py", "status": "M", "insertions": 27 },
+      { "path": "tests/test_m27_2_p04_r4_gate_proof_bridge.py", "status": "A", "insertions": 550 },
+      { "path": "tests/test_m27_2_r1_resume_integrity.py", "status": "A", "insertions": 349 },
+      { "path": "tests/test_m28_2_resource_evidence.py", "status": "M", "insertions": 6, "deletions": 2 },
+      { "path": "tests/test_m29_2_production_external_evidence.py", "status": "M", "insertions": 6, "deletions": 2 }
+    ]
+  },
+  "frozen_capabilities": [
+    "authority_and_ceilings",
+    "mission_lifecycle",
+    "delegation_and_grants",
+    "execution_and_dispatch",
+    "request_binding_exact_digest",
+    "plan_and_intent",
+    "verification_and_evidence",
+    "evidence_audit",
+    "confirmation_human_decision",
+    "rrm_resource_governance",
+    "constitution_policy",
+    "identity_continuity",
+    "pkb_knowledge",
+    "idempotency_replay"
+  ],
+  "invariants": {
+    "aeac": {
+      "file": "tests/test_aeac_competitive_coverage.py",
+      "items": [
+        "AEAC-SELF-GENERATED-SKILL-AUTHORITY",
+        "AEAC-DYNAMIC-SUBAGENT-DELEGATION"
+      ]
+    },
+    "isacr": {
+      "rev01": "tests/test_isacr_rev01_observation.py",
+      "rev02": "tests/test_isacr_rev02_finality.py",
+      "rev03": "tests/test_isacr_rev03_signal_not_authority.py",
+      "items": [
+        "ISACR-REV-01 external signal is never sovereign authority",
+        "ISACR-REV-02 POST_REVOCATION_UNAUTHORIZED_EFFECTS == 0",
+        "ISACR-REV-03 AUTHENTICATED_SIGNAL != AUTHORITY"
+      ]
+    },
+    "m27_2_r1": [
+      "STALE_EVIDENCE != VERIFIED_SUCCESS",
+      "CHANGED_CONTRACT != PREVIOUS_VERIFICATION_AUTHORITY",
+      "AGENT_GENERATED_STATE != TRUSTED_RESUME_EVIDENCE",
+      "VERIFICATION_EVIDENCE != AUTHORITY_GRANT",
+      "RESUME != AUTHORIZATION_BYPASS"
+    ]
+  },
+  "authority_adversarial_totals": {
+    "collected": 266,
+    "passed": 264,
+    "skipped": 2,
+    "per_suite": {
+      "aeac_competitive_coverage": 2,
+      "isacr_rev01_observation": 8,
+      "isacr_rev02_finality": 16,
+      "isacr_rev03_signal_not_authority": 4,
+      "j14_adversarial": 4,
+      "j14_2c_r_series": 24,
+      "j143": 12,
+      "m32b2_action_authority": 70,
+      "m32b2_productive_dispatch": 21,
+      "m32b1_mission_store": 31,
+      "m32b1_restart_reconciliation": 14,
+      "m32b4r2": 15,
+      "m27_2_r1_resume_integrity": 12,
+      "m27_2_p04_r4_gate_proof_bridge": 13,
+      "m27_2_exact_evidence_binding": 20
+    }
+  },
+  "focused_gate": { "tests": 45, "passed": 45 },
+  "regression": {
+    "files": 34,
+    "failed": 65,
+    "passed": 859,
+    "skipped": 2,
+    "partition": {
+      "test_movement_14_confirmation_resume.py": 50,
+      "test_m28_2_resource_evidence.py": 13,
+      "test_m27_2_reproduction.py": 2,
+      "TEST_POLLUTION_FLAKY": 0
+    },
+    "isolation": {
+      "test_movement_14_confirmation_resume.py": { "failed": 50, "passed": 25 },
+      "test_m28_2_resource_evidence.py": { "failed": 13, "passed": 133 },
+      "test_m27_2_reproduction.py": { "failed": 2 }
+    },
+    "historical_comparison": {
+      "baseline_file": "base_all.txt",
+      "baseline_summary": { "failed": 65, "passed": 718, "skipped": 2 },
+      "current_summary": { "failed": 65, "passed": 859, "skipped": 2 },
+      "failure_set_identical": true,
+      "added": 0,
+      "removed": 0,
+      "status": "NOT_RECONCILABLE_FROM_AVAILABLE_EVIDENCE"
+    },
+    "failure_node_ids": {
+      "test_movement_14_confirmation_resume.py": [
+        "test_A_waiting_confirmation_never_executes",
+        "test_adversarial_phrase_after_completion_never_reexecutes[continue]",
+        "test_adversarial_phrase_after_completion_never_reexecutes[não]",
+        "test_adversarial_phrase_after_completion_never_reexecutes[ok]",
+        "test_adversarial_phrase_after_completion_never_reexecutes[pode executar]",
+        "test_adversarial_phrase_after_completion_never_reexecutes[sim]",
+        "test_adversarial_phrase_against_cancelled_mission_never_executes[confirmo]",
+        "test_adversarial_phrase_against_cancelled_mission_never_executes[continue]",
+        "test_adversarial_phrase_against_cancelled_mission_never_executes[ok]",
+        "test_adversarial_phrase_against_cancelled_mission_never_executes[pode]",
+        "test_adversarial_phrase_against_cancelled_mission_never_executes[sim]",
+        "test_adversarial_phrase_against_expired_confirmation_never_executes[confirmo]",
+        "test_adversarial_phrase_against_expired_confirmation_never_executes[continue]",
+        "test_adversarial_phrase_against_expired_confirmation_never_executes[ok]",
+        "test_adversarial_phrase_against_expired_confirmation_never_executes[sim, mas não agora]",
+        "test_adversarial_phrase_against_expired_confirmation_never_executes[sim]",
+        "test_adversarial_phrase_does_not_cross_sessions[cancele]",
+        "test_adversarial_phrase_does_not_cross_sessions[confirmo]",
+        "test_adversarial_phrase_does_not_cross_sessions[continue]",
+        "test_adversarial_phrase_does_not_cross_sessions[não]",
+        "test_adversarial_phrase_does_not_cross_sessions[ok]",
+        "test_adversarial_phrase_does_not_cross_sessions[pode executar]",
+        "test_adversarial_phrase_does_not_cross_sessions[sim, mas não agora]",
+        "test_adversarial_phrase_does_not_cross_sessions[sim]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[cancele]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[confirmo]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[continue]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[depois]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[não]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[ok]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[pode executar]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[pode]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[sim, mas não agora]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[sim]",
+        "test_adversarial_phrase_with_pending_mission_never_executes[talvez]",
+        "test_B_valid_confirm_resumes_same_mission",
+        "test_C_wrong_token_fails_closed_then_correct_binding_executes_once",
+        "test_D_rejection_never_executes_and_cancels_mission",
+        "test_E_ambiguous_confirmation_never_executes",
+        "test_F_wrong_mission_never_executes",
+        "test_G_replay_never_duplicates_execution",
+        "test_g8_bridge_restart_regression_durable_record_governs_resume",
+        "test_H_binding_replaced_while_waiting_never_executes",
+        "test_I_binding_removed_while_waiting_fails_closed",
+        "test_K_unhealthy_binding_on_resume_fails_closed",
+        "test_L_authorization_revoked_on_resume_never_executes",
+        "test_M_no_provider_invocation_on_resume",
+        "test_N_replaced_tool_binding_cannot_inherit",
+        "test_Q_verified_execution_completes_via_completion_gate",
+        "test_T_confirm_for_completed_mission_never_reexecutes"
+      ],
+      "test_m28_2_resource_evidence.py": [
+        "TestAuthorityPreservation::test_g1_no_evidence_for_verified_when_external_fails",
+        "TestAuthorityPreservation::test_g2_success_only_when_all_pass",
+        "TestProducerSeparation::test_c3_verification_status_still_computed_by_gate",
+        "TestVerificationGateComposition::test_d1_external_evidence_success",
+        "TestVerificationGateComposition::test_d2_external_evidence_failure_blocks",
+        "TestVerificationGateComposition::test_d3_no_external_evidence_unaffected",
+        "TestVerificationGateComposition::test_d4_all_required_multiple_success",
+        "TestVerificationGateComposition::test_d5_all_required_one_failure_blocks_all",
+        "TestVerificationGateComposition::test_d6_no_adapter_fails_closed",
+        "TestVerificationGateComposition::test_d7_invalid_requirement_contract_failure",
+        "TestVerificationGateComposition::test_d8_evidence_details_contain_external_fields",
+        "TestVerificationGateComposition::test_d9_semantic_and_external_compose",
+        "TestVerificationGateComposition::test_d10_semantic_failure_stops_before_external"
+      ],
+      "test_m27_2_reproduction.py": [
+        "TestM27_01Reproduction::test_exact_evidence_lacks_contract_hash",
+        "TestM27_01Reproduction::test_resume_accepts_changed_expected_output"
+      ]
+    }
+  },
+  "findings": {
+    "rsa": { "applicable": false, "evidence": "intent_kernel/kom.py:153 secret-detection regex; tests/test_ame_hardening.py 04-05" },
+    "aws": { "applicable": false, "evidence": "tests/test_ame_hardening.py:324 inert inference string; no cloud integration" },
+    "product_alpha_separation": "PRODUCT_ALPHA_BOUNDARY_SPEC.md",
+    "real_external_effects": false
+  },
+  "constraints": {
+    "production_code_changed": false,
+    "commit_performed": false,
+    "push_performed": false,
+    "main_untouched": true
+  },
+  "change_control": {
+    "frozen_contracts_require": [
+      "documented_security_or_compatibility_reason",
+      "focused_tests_fail_before_pass_after",
+      "independent_review"
+    ],
+    "product_alpha": "consume_never_expand",
+    "integration": "additive_fast_forward_only"
+  }
+}

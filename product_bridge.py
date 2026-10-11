@@ -47,7 +47,22 @@ from intent_kernel.runtime.models import (
     ConfirmationState,
     MissionRuntimeState,
     RuntimeNode,
+    RuntimeNodeState,
     SideEffectLevel,
+    VerificationStatus,
+)
+from intent_kernel.adapters.local_filesystem import (
+    CAPABILITY as _NATIVE_CAPABILITY,
+    OPERATION as _NATIVE_OPERATION,
+    sha256_bytes as _native_sha256_bytes,
+)
+from intent_kernel.adapters.native_containment import NativeFilesystemObserver
+from intent_kernel.adapters.preview_selection import (
+    PreviewSelectionDenied,
+    run_bound_dispatch,
+)
+from intent_kernel.mission.intent_authority import (
+    IntentAuthorityError,
 )
 from intent_kernel.tools.models import (
     PermissionDecisionState,
@@ -61,6 +76,50 @@ from intent_kernel.tools.models import (
 APP_VERSION = "0.4.4-alpha"
 BRIDGE_VERSION = "0.4.4-alpha"
 PROTOCOL_VERSION = "1.0"
+
+
+#: The bounded CREATE_TEST_FILE request may carry exactly these fields. An
+#: unknown field (for example a caller-supplied ``executor``) is DENIED: the
+#: ProductBridge never accepts an executor from a request (executor binding is
+#: construction-time on the TP-02D dedicated runtime, never caller-chosen).
+_NATIVE_BOUNDED_FIELDS = frozenset({
+    "authorized_root",
+    "target_name",
+    "content",
+    "content_digest",
+})
+
+#: Minimal STRUCTURAL verification schema (M36-C) for the native CREATE_TEST_FILE
+#: receipt. The VerificationGate verifies the executor receipt contains a real
+#: effect occurrence, a real content digest, a real path and the pinned native
+#: root identity before any durable VERIFIED_SUCCESS is issued.
+_NATIVE_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "required": ["effect_occurred", "digest", "path", "root_identity"],
+    "properties": {
+        "effect_occurred": {"type": "boolean", "const": True},
+        "digest": {"type": "string"},
+        "path": {"type": "string"},
+        "root_identity": {"type": "string"},
+    },
+}
+
+
+def _register_native_quantity_applicability() -> None:
+    """Positive NOT_APPLICABLE proof for the CREATE_TEST_FILE operation.
+
+    C2/C3/G1.1 §3: a non-quantitative operation must be DECLARED, never assumed.
+    ProductiveDispatchGuard.acquire resolves applicability from the canonical
+    operation and UNKNOWN always denies. This is a public-API data declaration on
+    the process-wide registry (the same declaration the M36-C suite uses); it is
+    Product-side registration, not a Core change, and it is idempotent.
+    """
+    from intent_kernel.mission.quantity import (
+        DEFAULT_QUANTITY_APPLICABILITY as _registry,
+    )
+
+    if not _registry.is_declared(_NATIVE_OPERATION):
+        _registry.declare(_NATIVE_OPERATION, None)
 
 
 _FINANCIAL_CUES = (
@@ -452,6 +511,17 @@ class ProductBridge:
         capability_decision = conversation_turn.capability_decision
         self.last_capability_analysis = capability_decision.to_dict()
         context["capability_analysis"] = self.last_capability_analysis
+
+        # TP-03: governed native real-effect route. An EXPLICIT bounded
+        # ``create_test_file`` request plus an explicit intent authority grant
+        # selects the native CREATE_TEST_FILE executor and runs ONE governed
+        # dispatch on a TP-02D dedicated runtime. It never infers the effect
+        # from the message text and never accepts an executor from the caller.
+        bounded_native = request.get("create_test_file")
+        if isinstance(bounded_native, dict) and bounded_native:
+            return await self._run_native_governed_effect(
+                message, bounded_native, context
+            )
 
         def persist_turn(record: dict[str, Any]) -> None:
             record = dict(record)
@@ -1358,6 +1428,354 @@ Estratégia completa registrada no histórico para execução."""
             "expires_at": bound.expires_at,
             "state": bound.state.value,
         }
+
+    async def _run_native_governed_effect(
+        self,
+        message: str,
+        bounded: dict[str, Any],
+        context: dict[str, Any],
+    ) -> CanonicalTurnResult:
+        """TP-03: one governed native CREATE_TEST_FILE effect from a real entry.
+
+        Flow (only real, pre-existing mechanisms):
+            create_started -> constitution(mission.plan)
+            -> J1.4 grant -> establish_intent_authority_from_grant
+            -> scope pre-checks (selector narrows; never approves)
+            -> preview_selection.run_bound_dispatch
+                (authenticated authority -> dedicated TP-02D MissionRuntime
+                 bound at construction with NativeCreateTestFileActionExecutor)
+            -> MissionRuntime.run_mission
+                (ActionGate -> ProductiveDispatchGuard.acquire
+                 -> NativeCreateTestFileActionExecutor.execute
+                 -> VerificationGate.evaluate_node (STRUCTURAL))
+            -> NativeFilesystemObserver.observe (independent host read)
+
+        PRODUCT_BRIDGE != AUTHORIZER: authority is only ever ESTABLISHED from an
+        explicit approved grant. The selector cannot approve and cannot expand a
+        ceiling. Any denial happens before any host effect (effect_calls==0).
+
+        The shared application runtime is NEVER mutated: its ``executor`` stays
+        the frozen ``InMemoryActionExecutor`` default for every non-native flow.
+        """
+        from pathlib import Path
+
+        mission = await self.components.mission_service.create_started(
+            message,
+            context=MissionContext(
+                session_id=context["session_id"],
+                correlation_id=context["correlation_id"],
+            ),
+        )
+        planning_verdict = await self.components.constitution_engine.evaluate(
+            "mission.plan", {"objective": message},
+            {"project_id": context["project_id"]},
+        )
+        if not planning_verdict.allowed:
+            await self.components.mission_service.block_planning(mission)
+            return CanonicalTurnResult.blocked(
+                "A criação real do arquivo de teste foi bloqueada pela "
+                "Constitution durante o planejamento.",
+                reason=planning_verdict.reason,
+                mission_id=str(mission.id),
+                metadata={"domain": "native-governed-create-test-file"},
+            )
+
+        unknown = set(bounded) - _NATIVE_BOUNDED_FIELDS
+        if unknown:
+            return self._native_denied_result(
+                mission,
+                "unknown-native-field",
+                f"o pedido traz campos não suportados: {sorted(unknown)}",
+            )
+        root = str(bounded.get("authorized_root") or "").strip()
+        target_name = str(bounded.get("target_name") or "").strip()
+        content_text = bounded.get("content")
+        content_digest = str(bounded.get("content_digest") or "").strip()
+        if not root or not target_name or content_text is None or not content_digest:
+            return self._native_denied_result(
+                mission,
+                "bounded-request-incomplete",
+                "authorized_root, target_name, content e content_digest são "
+                "obrigatórios.",
+            )
+        if "/" in target_name or "\\" in target_name:
+            return self._native_denied_result(
+                mission,
+                "target-name-invalid",
+                "target_name não pode conter separadores de caminho.",
+            )
+        if not isinstance(content_text, str):
+            return self._native_denied_result(
+                mission,
+                "content-type-invalid",
+                "content deve ser texto UTF-8.",
+            )
+        content_bytes = content_text.encode("utf-8")
+        expected_digest = _native_sha256_bytes(content_bytes)
+        if content_digest != expected_digest:
+            return self._native_denied_result(
+                mission,
+                "content-substitution",
+                "o content_digest não corresponde ao conteúdo solicitado.",
+            )
+
+        _grant_raw = context.get("intent_authority_grant")
+        if not _grant_raw:
+            return self._native_denied_result(
+                mission,
+                "missing_explicit_intent_authority_grant",
+                "a criação em efeito real exige concessão explícita de "
+                "autoridade de intenção (intent_authority_grant).",
+            )
+        from intent_kernel.mission.intent_grant import (
+            IntentAuthorityGrant,
+            establish_intent_authority_from_grant,
+        )
+        try:
+            _grant = (
+                _grant_raw if isinstance(_grant_raw, IntentAuthorityGrant)
+                else IntentAuthorityGrant.from_dict(_grant_raw)
+            )
+            _authority = establish_intent_authority_from_grant(
+                _grant, now_iso=utc_iso()
+            )
+        except Exception as exc:
+            return self._native_denied_result(
+                mission,
+                "invalid_intent_authority_grant",
+                str(exc),
+            )
+
+        scope_error = self._native_verify_scope(_authority, root, target_name)
+        if scope_error is not None:
+            return self._native_denied_result(mission, *scope_error)
+
+        # The single positive NOT_APPLICABLE quantity declaration is registered
+        # lazily at the moment a native dispatch is actually attempted (never at
+        # import time), so importing product_bridge has no global side effect.
+        _register_native_quantity_applicability()
+
+        node = self._native_node(root, target_name, content_text, content_digest)
+        try:
+            payload = await run_bound_dispatch(
+                mission_runtime=self.components.mission_runtime,
+                authority=_authority,
+                authorized_root=root,
+                target_name=target_name,
+                content=content_bytes,
+                run=lambda runtime: self._native_run_on(
+                    runtime, mission, node, _authority, context["project_id"],
+                ),
+            )
+        except PreviewSelectionDenied as exc:
+            return self._native_denied_result(mission, exc.code, exc.detail)
+        except IntentAuthorityError as exc:
+            return self._native_denied_result(
+                mission, "authority-proof-denied", str(exc)
+            )
+        except Exception as exc:
+            return self._native_denied_result(
+                mission, "native-dispatch-failed", str(exc)
+            )
+
+        outcome = payload.get("outcome") or {}
+        instance = outcome.get("instance")
+        executed_node = outcome.get("node")
+        effect_calls = int(payload.get("effect_calls") or 0)
+        denials = list(payload.get("denials") or [])
+        root_identity = payload.get("root_identity")
+
+        verified = bool(
+            instance is not None
+            and executed_node is not None
+            and executed_node.state == RuntimeNodeState.SUCCEEDED
+            and executed_node.verification_result == VerificationStatus.VERIFIED_SUCCESS
+            and effect_calls == 1
+            and not denials
+        )
+        if not verified:
+            return self._native_denied_result(
+                mission,
+                "effect-not-verified",
+                "o efeito não foi verificado (estado do nó, chamadas de efeito "
+                "ou verificação divergentes do esperado).",
+                effect_calls=effect_calls,
+                denials=denials,
+            )
+
+        from intent_kernel.adapters.local_filesystem import (
+            CreateTestFileAuthority,
+        )
+        grant = CreateTestFileAuthority(
+            authorized_root=Path(root),
+            authorized_target=Path(root) / target_name,
+            expected_content_sha256=expected_digest,
+            authority=_authority,
+        )
+        observation = NativeFilesystemObserver(grant).observe()
+
+        completion_evidence = tuple(
+            getattr(instance, "completion_evidence", ()) or ()
+        )
+        return CanonicalTurnResult.mission(
+            "O arquivo de teste foi criado em efeito real, verificado pela "
+            "VerificationGate e confirmado por observação independente do "
+            "sistema de arquivos.",
+            kind=CanonicalResultKind.MISSION_COMPLETED,
+            mission_id=str(mission.id),
+            verification_evidence=completion_evidence,
+            metadata={
+                "runtime_id": instance.runtime_id,
+                "runtime_status": instance.status.value,
+                "verification_status": instance.verification_status.value,
+                "completion_authority": instance.completion_authority,
+                "executor_effect_calls": effect_calls,
+                "executor_denials": denials,
+                "native_root_identity": root_identity,
+                "host_verified_state": {
+                    "observed": bool(observation.get("observed")),
+                    "exists": bool(observation.get("exists")),
+                    "matches_authorized": bool(
+                        observation.get("matches_authorized")
+                    ),
+                    "identity_stable": bool(observation.get("identity_stable")),
+                    "observed_sha256": observation.get("observed_sha256"),
+                    "root_identity": observation.get("root_identity"),
+                    "path": str(Path(root) / target_name),
+                },
+                "mission_authority": {
+                    "identity_owner": "MissionEngine",
+                    "lifecycle_owner": "MissionEngine",
+                    "execution_runtime": "MissionRuntime(dedicated)",
+                    "transition_authority": "MissionEngine",
+                    "completion_authority": "MissionCompletionGate",
+                    "runtime_entered": True,
+                    "authorization_state": "intent_authority_established",
+                    "confirmation_state": "not_required_authority_is_approval",
+                    "execution_evidence_present": True,
+                    "verification_evidence_present": bool(completion_evidence),
+                    "canonical_state": instance.lifecycle_status,
+                },
+                "domain": "native-governed-create-test-file",
+            },
+        )
+
+    def _native_node(
+        self,
+        root: str,
+        target_name: str,
+        content_text: str,
+        content_digest: str,
+    ) -> RuntimeNode:
+        """Canonical regulate node for ONE bounded CREATE_TEST_FILE effect."""
+        contract = ActionContract(
+            capability=_NATIVE_CAPABILITY,
+            action_type=_NATIVE_OPERATION,
+            inputs_reference={
+                "authorized_root": root,
+                "path": target_name,
+                "content": content_text,
+                "content_sha256": content_digest,
+            },
+            side_effect_level=SideEffectLevel.LOCAL_REVERSIBLE,
+            risk_level="low",
+            confirmation_required=False,
+            verification_required=True,
+            verification_type="STRUCTURAL",
+            verification_schema=_NATIVE_VERIFICATION_SCHEMA,
+        )
+        node = RuntimeNode(capability=_NATIVE_CAPABILITY, action_contract=contract)
+        # G8: canonical durable identity — contract action id == node id.
+        contract.action_id = node.node_id
+        return node
+
+    async def _native_run_on(
+        self,
+        runtime: Any,
+        mission: Any,
+        node: RuntimeNode,
+        authority: Any,
+        project_id: str,
+    ) -> dict[str, Any]:
+        """Create + run one governed mission on the DEDICATED runtime."""
+        instance = runtime.create_instance(
+            str(mission.id),
+            "native-governed-create-test-file",
+            [node],
+            project_id=project_id,
+            intent_authority=authority,
+        )
+        instance = await runtime.run_mission(instance.runtime_id)
+        return {"instance": instance, "node": node}
+
+    def _native_verify_scope(
+        self,
+        authority: Any,
+        root: str,
+        target_name: str,
+    ) -> tuple[str, str] | None:
+        """Fail-closed scope narrowing the SELECTOR applies before any constrution.
+
+        Returns ``(code, detail)`` when the approved scope cannot carry this
+        exact request. The selector never approves and never expands.
+        """
+        from pathlib import Path
+
+        ceiling = authority.ceiling
+        if ceiling.allow_capabilities and _NATIVE_CAPABILITY not in ceiling.allow_capabilities:
+            return ("capability-escalation",
+                    "m34.create_test_file não está entre as capacidades aprovadas.")
+        if ceiling.allowed_operations and _NATIVE_OPERATION not in ceiling.allowed_operations:
+            return ("operation-escalation",
+                    "CREATE_TEST_FILE não está entre as operações aprovadas.")
+        if ceiling.max_side_effect and ceiling.max_side_effect == "NONE":
+            return ("side-effect-escalation",
+                    "LOCAL_REVERSIBLE excede o teto de efeito aprovado.")
+        if _NATIVE_CAPABILITY not in ceiling.target_scope:
+            return ("capability-not-in-target-scope",
+                    "o rótulo de alvo do plano (m34.create_test_file) precisa "
+                    "constar do target_scope aprovado.")
+        ok = False
+        try:
+            resolved_root = Path(root).resolve()
+        except (OSError, RuntimeError):
+            resolved_root = None
+        if resolved_root is not None:
+            for entry in ceiling.target_scope:
+                try:
+                    if Path(entry).resolve() == resolved_root:
+                        ok = True
+                        break
+                except (OSError, RuntimeError):
+                    continue
+        if not ok:
+            return ("root-not-in-approved-scope",
+                    "a raiz autorizada do pedido não está no target_scope aprovado.")
+        return None
+
+    def _native_denied_result(
+        self,
+        mission: Any,
+        code: str,
+        detail: str = "",
+        *,
+        effect_calls: int = 0,
+        denials: list[str] | tuple[str, ...] = (),
+    ) -> CanonicalTurnResult:
+        """Canonical fail-closed denial. No host effect happens (defense in depth)."""
+        return CanonicalTurnResult.failed(
+            "A solicitação de criação real de arquivo de teste foi negada sem "
+            "qualquer efeito não autorizado na máquina.",
+            mission_id=str(mission.id),
+            metadata={
+                "domain": "native-governed-create-test-file",
+                "native_denied": True,
+                "reason_code": code,
+                "detail": detail,
+                "executor_effect_calls": effect_calls,
+                "executor_denials": list(denials),
+            },
+        )
 
     async def _confirm_mission(self, request: dict[str, Any]) -> CanonicalTurnResult:
         """Handle the typed ``confirm`` action bound to Mission identity.

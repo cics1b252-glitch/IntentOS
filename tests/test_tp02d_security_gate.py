@@ -28,10 +28,10 @@ from intent_kernel.adapters.local_filesystem import (
     LocalFilesystemObserver,
     sha256_bytes,
 )
-from intent_kernel.adapters.preview_selection import (
+from intent_kernel.adapters.preview_selection import (   # noqa: F401
+    build_native_executor as _build_native_executor,
     PreviewSelectionDenied,
-    build_native_executor,
-    run_bound_dispatch,
+    run_bound_dispatch as _run_bound_dispatch,
 )
 from intent_kernel.runtime.executor_port import InMemoryActionExecutor
 from intent_kernel.runtime.models import ActionContract
@@ -79,7 +79,7 @@ def test_p8_supported_path_survives_successive_event_loops(tmp_path):
     def one(name):
         async def _run(runtime):
             return await run(runtime, name)
-        return asyncio.run(run_bound_dispatch(
+        return asyncio.run(_dispatch(
             mission_runtime=_RT(), authority=authority, authorized_root=root,
             target_name=name, content=CONTENT, run=_run, now_provider=CLOCK))
 
@@ -104,7 +104,7 @@ def test_p8b_concurrent_requests_on_same_loop_are_serialized(tmp_path):
 
     async def main():
         return await asyncio.gather(*[
-            run_bound_dispatch(
+            _dispatch(
                 mission_runtime=rt, authority=authority,
                 authorized_root=root, target_name="same.txt",
                 content=CONTENT, run=run, now_provider=CLOCK)
@@ -132,7 +132,7 @@ def test_p8c_concurrent_requests_across_threads_exclusive(tmp_path):
 
     def worker():
         try:
-            outcomes.append(asyncio.run(run_bound_dispatch(
+            outcomes.append(asyncio.run(_dispatch(
                 mission_runtime=rt, authority=authority,
                 authorized_root=root, target_name="threads.txt",
                 content=CONTENT, run=run, now_provider=CLOCK)))
@@ -176,7 +176,7 @@ def test_p9_equivalent_scope_spellings_are_accepted(tmp_path, spelling):
         object.__setattr__(authority.ceiling, "target_scope", (scope,))
         object.__setattr__(authority, "authority_digest",
                            authority.compute_authority_digest())
-    ex = build_native_executor(authority=authority, authorized_root=root,
+    ex = _build(authority=authority, authorized_root=root,
                                target_name="canon.txt", content=CONTENT)
     ex.close()
 
@@ -187,7 +187,7 @@ def test_p9b_genuinely_different_scope_still_denied(tmp_path):
     other.mkdir()
     authority = _established(root)
     with pytest.raises(PreviewSelectionDenied) as exc:
-        build_native_executor(authority=authority, authorized_root=other,
+        _build(authority=authority, authorized_root=other,
                               target_name="x.txt", content=CONTENT)
     assert exc.value.code in ("target-escape", "target-not-in-approved-scope")
     assert not (other / "x.txt").exists()
@@ -248,7 +248,7 @@ def test_p10_supported_path_isolated_from_shared_substitution(tmp_path):
 
     th = threading.Thread(target=attacker)
     th.start()
-    result = asyncio.run(run_bound_dispatch(
+    result = asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="subst.txt", content=CONTENT, run=run, now_provider=CLOCK))
     th.join(30)
@@ -284,7 +284,7 @@ def test_p10_valid_port_substitution_on_dedicated_runtime_fails_closed(tmp_path)
         return await runtime.executor.execute(_contract("sub.txt"))
 
     with pytest.raises(AttributeError):
-        asyncio.run(run_bound_dispatch(
+        asyncio.run(_dispatch(
             mission_runtime=rt, authority=authority, authorized_root=root,
             target_name="sub.txt", content=CONTENT, run=run, now_provider=CLOCK))
 
@@ -306,7 +306,7 @@ def test_p10b_unauthorized_injection_before_dispatch_is_irrelevant(tmp_path):
         assert runtime.executor is not "HOSTILE_PREPLANT"
         return await runtime.executor.execute(_contract("pre.txt"))
 
-    result = asyncio.run(run_bound_dispatch(
+    result = asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="pre.txt", content=CONTENT, run=run, now_provider=CLOCK))
     assert result["effect_calls"] == 1
@@ -322,7 +322,7 @@ def test_p10c_shared_runtime_untouched_after_every_path(tmp_path):
     async def ok(runtime):
         return await runtime.executor.execute(_contract("ok.txt"))
 
-    asyncio.run(run_bound_dispatch(
+    asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="ok.txt", content=CONTENT, run=ok, now_provider=CLOCK))
     assert rt.executor is original
@@ -340,7 +340,7 @@ def test_cancellation_during_dispatch_restores_executor(tmp_path):
         return "never"
 
     async def main():
-        task = asyncio.ensure_future(run_bound_dispatch(
+        task = asyncio.ensure_future(_dispatch(
             mission_runtime=rt, authority=authority, authorized_root=root,
             target_name="cancel.txt", content=CONTENT, run=run,
             now_provider=CLOCK))
@@ -363,7 +363,7 @@ def test_exception_during_dispatch_restores_executor(tmp_path):
         raise RuntimeError("dispatch exploded")
 
     with pytest.raises(RuntimeError):
-        asyncio.run(run_bound_dispatch(
+        asyncio.run(_dispatch(
             mission_runtime=rt, authority=authority, authorized_root=root,
             target_name="boom.txt", content=CONTENT, run=boom,
             now_provider=CLOCK))
@@ -380,7 +380,7 @@ def test_r2_authorized_effect_succeeds_and_is_observed(tmp_path):
     async def run(runtime):
         return await runtime.executor.execute(_contract("final.txt"))
 
-    result = asyncio.run(run_bound_dispatch(
+    result = asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="final.txt", content=CONTENT, run=run, now_provider=CLOCK))
     assert result["effect_calls"] == 1
@@ -402,10 +402,62 @@ def test_r2_duplicate_production_effect_impossible(tmp_path):
         second = await runtime.executor.execute(_contract("dup.txt"))
         return first, second
 
-    result = asyncio.run(run_bound_dispatch(
+    result = asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="dup.txt", content=CONTENT, run=run, now_provider=CLOCK))
     first, second = result["outcome"]
     assert first["effect_occurred"] is True
     assert second["effect_occurred"] is False
     assert result["effect_calls"] == 1
+
+
+
+# --- TP-04F: real trusted-approval tokens (NO stubbing, NO bypass) ---------
+# The previous autouse fixture stubbed require_trusted_approval outright. That
+# is GONE. These wrappers do exactly what a LOCAL OPERATOR does: register a
+# real, single-use approval for the authority digest in hand and hand the real
+# token to the selector. Refusal semantics are exercised for real; the genuine
+# fail-closed path is asserted in tests/test_tp04d_trust_boundary.py.
+
+@pytest.fixture(autouse=True)
+def _isolated_approval_registry():
+    from intent_kernel.preview.trusted_approval import LOCAL_APPROVALS
+
+    LOCAL_APPROVALS._tokens.clear()
+    try:
+        yield LOCAL_APPROVALS
+    finally:
+        LOCAL_APPROVALS._tokens.clear()
+
+
+def _mint(authority):
+    """Operator action: approve this EXACT authority digest, once."""
+    from intent_kernel.preview.trusted_approval import register_local_approval
+
+    return register_local_approval(
+        authority.authority_digest, now=NOW,
+    ).token
+
+
+def _build(*args, **kwargs):
+    """build_native_executor with a REAL operator-minted approval.
+
+    Approval and authority are judged by ONE clock (the frozen test clock
+    unless a test overrides it).
+    """
+    authority = kwargs.get("authority")
+    if kwargs.get("approval_token") is None and authority is not None:
+        kwargs["approval_token"] = _mint(authority)
+    if kwargs.get("now_provider") is None:
+        kwargs["now_provider"] = lambda: NOW
+    return _build_native_executor(*args, **kwargs)
+
+
+def _dispatch(**kwargs):
+    """run_bound_dispatch with a REAL operator-minted approval."""
+    authority = kwargs.get("authority")
+    if kwargs.get("approval_token") is None and authority is not None:
+        kwargs["approval_token"] = _mint(authority)
+    if kwargs.get("now_provider") is None:
+        kwargs["now_provider"] = lambda: NOW
+    return _run_bound_dispatch(**kwargs)

@@ -29,6 +29,16 @@ RESERVED_CONTEXT_KEYS = frozenset({
     "apikey",
     "credential",
     "secret",
+    # TP-04C-R1: authority grants must NEVER arrive from a caller-controlled
+    # request context. An IntentAuthorityGrant carries no signature or
+    # approval proof; its only integrity test is a scope digest the caller
+    # can compute for their own ceiling. SCOPE_DIGEST != APPROVAL
+    # AUTHENTICITY, so admitting this key would let any caller mint authority.
+    "intent_authority_grant",
+    "intent_authority_approval",
+    "intent_authority_approval_token",
+    "_trusted_approval",
+    "_preview_native_effect",
 })
 
 

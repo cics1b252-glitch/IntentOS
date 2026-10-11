@@ -204,6 +204,7 @@ def build_native_executor(
     content: bytes,
     expected_root_identity: Optional[str] = None,
     now_provider: Any = None,
+    approval_token: Optional[str] = None,
 ) -> NativeCreateTestFileActionExecutor:
     """Validate and construct the native executor for ONE authorized request.
 
@@ -211,6 +212,29 @@ def build_native_executor(
     They grant nothing: the ceiling decides whether that request is allowed.
     """
     established = validate_established(authority)
+
+    # TP-04C-R1: TRUSTED APPROVAL PROVENANCE IS MANDATORY for a real effect.
+    # An IntentAuthorityGrant proves only self-consistency; this proves a local
+    # operator approved THIS EXACT authority digest, once. A caller-supplied
+    # grant, identity string, boolean or context flag cannot satisfy it,
+    # because the token is only ever minted by a direct operator call into a
+    # registry that is never populated from a request.
+    from intent_kernel.preview.trusted_approval import (
+        TrustedApprovalError,
+        require_trusted_approval,
+    )
+    try:
+        # Use the SAME time source as the authority check, so an approval and
+        # the authority it approves are evaluated against one clock.
+        approval_now = now_provider() if now_provider is not None else None
+        require_trusted_approval(
+            approval_token, established.authority_digest, now=approval_now,
+        )
+    except TrustedApprovalError as exc:
+        raise PreviewSelectionDenied(
+            f"trusted-approval-refused:{exc.code}"
+        ) from exc
+
     root = Path(authorized_root)
     if not root.is_dir():
         raise PreviewSelectionDenied("authorized-root-missing")
@@ -318,6 +342,7 @@ async def run_bound_dispatch(
     run: Any,
     expected_root_identity: Optional[str] = None,
     now_provider: Any = None,
+    approval_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Serialize, construct a dedicated runtime, run one dispatch, discard it.
 
@@ -341,6 +366,7 @@ async def run_bound_dispatch(
             content=content,
             expected_root_identity=expected_root_identity,
             now_provider=now_provider,
+            approval_token=approval_token,
         )
         acquired = runtime_lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS)
         if not acquired:

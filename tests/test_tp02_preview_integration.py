@@ -20,10 +20,10 @@ from intent_kernel.adapters.local_filesystem import (
     LocalFilesystemObserver,
     sha256_bytes,
 )
-from intent_kernel.adapters.preview_selection import (
+from intent_kernel.adapters.preview_selection import (   # noqa: F401
+    build_native_executor as _build_native_executor,
     PreviewSelectionDenied,
-    build_native_executor,
-    run_bound_dispatch,
+    run_bound_dispatch as _run_bound_dispatch,
     validate_established,
 )
 from intent_kernel.mission.intent_authority import IntentAuthorityError
@@ -142,7 +142,7 @@ def test_b02_mutation_binder_is_retired_and_shared_runtime_untouched(tmp_path):
         assert runtime.executor is not original
         return await runtime.executor.execute(_contract())
 
-    asyncio.run(run_bound_dispatch(
+    asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="effect.txt", content=CONTENT, run=run, now_provider=CLOCK))
     assert rt.executor is original
@@ -159,7 +159,7 @@ def test_b02b_shared_runtime_untouched_even_on_failure(tmp_path):
         raise RuntimeError("dispatch exploded")
 
     with pytest.raises(RuntimeError):
-        asyncio.run(run_bound_dispatch(
+        asyncio.run(_dispatch(
             mission_runtime=rt, authority=authority, authorized_root=root,
             target_name="boom.txt", content=CONTENT, run=boom, now_provider=CLOCK))
     assert rt.executor is original
@@ -169,7 +169,7 @@ def test_b02b_shared_runtime_untouched_even_on_failure(tmp_path):
 def test_b03_missing_authority_denied(tmp_path):
     root = _root(tmp_path)
     with pytest.raises(PreviewSelectionDenied) as exc:
-        build_native_executor(authority=None, authorized_root=root,
+        _build(authority=None, authorized_root=root,
                               target_name="effect.txt", content=CONTENT)
     assert exc.value.code == "authority-type-invalid"
     assert not (root / "effect.txt").exists()
@@ -186,7 +186,7 @@ def test_b04_forged_authority_object_denied(tmp_path):
             return "1" * 64
 
     with pytest.raises(PreviewSelectionDenied) as exc:
-        build_native_executor(authority=Forged(), authorized_root=root,
+        _build(authority=Forged(), authorized_root=root,
                               target_name="effect.txt", content=CONTENT)
     assert exc.value.code == "authority-type-invalid"
     assert not (root / "effect.txt").exists()
@@ -208,7 +208,7 @@ def test_b06_capability_not_in_ceiling_denied(tmp_path):
         _grant(_propose(root, capabilities=("some.other.capability",))),
         now_iso=NOW.isoformat())
     with pytest.raises(PreviewSelectionDenied) as exc:
-        build_native_executor(authority=authority, authorized_root=root,
+        _build(authority=authority, authorized_root=root,
                               target_name="effect.txt", content=CONTENT)
     assert exc.value.code == "capability-escalation"
     assert not (root / "effect.txt").exists()
@@ -219,7 +219,7 @@ def test_b07_operation_not_in_ceiling_denied(tmp_path):
     authority = establish_intent_authority_from_grant(
         _grant(_propose(root, operations=("READ",))), now_iso=NOW.isoformat())
     with pytest.raises(PreviewSelectionDenied) as exc:
-        build_native_executor(authority=authority, authorized_root=root,
+        _build(authority=authority, authorized_root=root,
                               target_name="effect.txt", content=CONTENT)
     assert exc.value.code == "operation-escalation"
     assert not (root / "effect.txt").exists()
@@ -231,7 +231,7 @@ def test_b08_target_outside_approved_scope_denied(tmp_path):
     outside.mkdir()
     authority = _established(root)
     with pytest.raises(PreviewSelectionDenied) as exc:
-        build_native_executor(authority=authority, authorized_root=outside,
+        _build(authority=authority, authorized_root=outside,
                               target_name="escape.txt", content=CONTENT)
     assert exc.value.code in ("target-escape", "target-not-in-approved-scope")
     assert not (outside / "escape.txt").exists()
@@ -242,7 +242,7 @@ def test_b09_ambiguous_target_name_denied(tmp_path):
     authority = _established(root)
     for bad in ("../escape.txt", "sub/child.txt", "", "a\\b.txt"):
         with pytest.raises(PreviewSelectionDenied) as exc:
-            build_native_executor(authority=authority, authorized_root=root,
+            _build(authority=authority, authorized_root=root,
                                   target_name=bad, content=CONTENT)
         assert exc.value.code == "target-name-invalid"
     assert list(root.iterdir()) == []
@@ -255,7 +255,7 @@ def test_b10_unsupported_platform_denied_no_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(sel, "platform_capabilities",
                         lambda: {"platform": "fake", "preventive": False})
     with pytest.raises(PreviewSelectionDenied) as exc:
-        build_native_executor(authority=authority, authorized_root=root,
+        _build(authority=authority, authorized_root=root,
                               target_name="effect.txt", content=CONTENT)
     assert exc.value.code == "native-containment-unsupported"
     assert not (root / "effect.txt").exists()
@@ -273,7 +273,7 @@ def test_b11_expired_authority_refused_at_establishment(tmp_path):
 def test_b12_revoked_authority_denied(tmp_path):
     root = _root(tmp_path)
     authority = _established(root)
-    ex = build_native_executor(authority=authority, authorized_root=root,
+    ex = _build(authority=authority, authorized_root=root,
                                target_name="effect.txt", content=CONTENT)
     ex._native._grant.revoked = True
     # Revocation is re-proven at EFFECT time inside the authority chain. The
@@ -293,7 +293,7 @@ def test_c01_authorized_dispatch_performs_real_effect_and_is_observed(tmp_path):
     async def run(runtime):
         return await runtime.executor.execute(_contract())
 
-    envelope = asyncio.run(run_bound_dispatch(
+    envelope = asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="effect.txt", content=CONTENT, run=run,
         now_provider=CLOCK))
@@ -319,7 +319,7 @@ def test_c02_duplicate_execution_denied(tmp_path):
         second = await runtime.executor.execute(_contract())
         return first, second
 
-    envelope = asyncio.run(run_bound_dispatch(
+    envelope = asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="effect.txt", content=CONTENT, run=run,
         now_provider=CLOCK))
@@ -338,7 +338,7 @@ def test_c03_changed_content_denied(tmp_path):
     async def run(runtime):
         return await runtime.executor.execute(_contract(content=b"tampered"))
 
-    envelope = asyncio.run(run_bound_dispatch(
+    envelope = asyncio.run(_dispatch(
         mission_runtime=rt, authority=authority, authorized_root=root,
         target_name="effect.txt", content=CONTENT, run=run,
         now_provider=CLOCK))
@@ -356,9 +356,61 @@ def test_c04_wrong_operation_denied(tmp_path):
         return await runtime.executor.execute(_contract(op="DELETE_ALL"))
 
     with pytest.raises(CreateTestFileDenied):
-        asyncio.run(run_bound_dispatch(
+        asyncio.run(_dispatch(
             mission_runtime=rt, authority=authority, authorized_root=root,
             target_name="effect.txt", content=CONTENT, run=run,
             now_provider=CLOCK))
     assert not (root / "effect.txt").exists()
     assert isinstance(rt.executor, InMemoryActionExecutor)
+
+
+
+# --- TP-04F: real trusted-approval tokens (NO stubbing, NO bypass) ---------
+# The previous autouse fixture stubbed require_trusted_approval outright. That
+# is GONE. These wrappers do exactly what a LOCAL OPERATOR does: register a
+# real, single-use approval for the authority digest in hand and hand the real
+# token to the selector. Refusal semantics are exercised for real; the genuine
+# fail-closed path is asserted in tests/test_tp04d_trust_boundary.py.
+
+@pytest.fixture(autouse=True)
+def _isolated_approval_registry():
+    from intent_kernel.preview.trusted_approval import LOCAL_APPROVALS
+
+    LOCAL_APPROVALS._tokens.clear()
+    try:
+        yield LOCAL_APPROVALS
+    finally:
+        LOCAL_APPROVALS._tokens.clear()
+
+
+def _mint(authority):
+    """Operator action: approve this EXACT authority digest, once."""
+    from intent_kernel.preview.trusted_approval import register_local_approval
+
+    return register_local_approval(
+        authority.authority_digest, now=NOW,
+    ).token
+
+
+def _build(*args, **kwargs):
+    """build_native_executor with a REAL operator-minted approval.
+
+    Approval and authority MUST be judged by the same clock, so the frozen
+    test clock is the default unless a test explicitly overrides it.
+    """
+    authority = kwargs.get("authority")
+    if kwargs.get("approval_token") is None and authority is not None:
+        kwargs["approval_token"] = _mint(authority)
+    if kwargs.get("now_provider") is None:
+        kwargs["now_provider"] = lambda: NOW
+    return _build_native_executor(*args, **kwargs)
+
+
+def _dispatch(**kwargs):
+    """run_bound_dispatch with a REAL operator-minted approval."""
+    authority = kwargs.get("authority")
+    if kwargs.get("approval_token") is None and authority is not None:
+        kwargs["approval_token"] = _mint(authority)
+    if kwargs.get("now_provider") is None:
+        kwargs["now_provider"] = lambda: NOW
+    return _run_bound_dispatch(**kwargs)

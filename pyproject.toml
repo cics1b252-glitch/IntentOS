@@ -7,7 +7,11 @@ name = "intent-kernel"
 version = "0.1.0"
 description = "Intent OS — Cognitive Operating System Kernel"
 readme = "README.md"
-requires-python = ">=3.11"
+# TP-07E: narrowed to >=3.13 because ONLY 3.13 and 3.14 interpreters are
+# available in this environment. Compatibility on 3.11/3.12 is NOT verified
+# and must NOT be claimed. The preview CLI itself uses only the stdlib and
+# would work on 3.11+, but the declaration must match executable evidence.
+requires-python = ">=3.13"
 license = {text = "MIT"}
 authors = [
     {name = "Celso Santos"}
@@ -42,6 +46,12 @@ all = [
 [project.scripts]
 intent-os = "intent_kernel.__main__:main"
 intent-os-server = "intent_kernel.server.app:run"
+# TP-07B: local governed Technical Preview CLI.
+# Verified by import-graph audit: importing intent_kernel.preview.__main__ pulls
+# in NO third-party package, so this entry point runs on the standard library
+# alone. The package's `dependencies` above remain because the WIDER
+# application needs them; they are not removed and not claimed unnecessary.
+intentos-preview = "intent_kernel.preview.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["intent_kernel*"]

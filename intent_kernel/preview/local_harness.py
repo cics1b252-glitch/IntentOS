@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import stat
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -67,6 +69,10 @@ from intent_kernel.runtime.models import ActionContract
 
 OPERATION_NAME = OPERATION
 DEFAULT_CONTENT = b"intent-os governed technical preview\n"
+
+#: Windows-only platform predicates used by the safe disposer.
+IS_WINDOWS = sys.platform == "win32"
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 
 class PreviewDenied(RuntimeError):
@@ -148,11 +154,67 @@ class PreviewReport:
         return "\n".join(lines)
 
 
+#: Prefixes of disposable roots this module creates. Cleanup refuses to touch
+#: anything outside them, so an attacker-supplied path can never be deleted.
+DISPOSABLE_PREFIX = "intentos-preview-"
+
+
 def prepare_disposable_root(parent: Optional[Path] = None) -> Path:
     """Create an isolated, disposable directory for one preview run."""
-    root = Path(tempfile.mkdtemp(prefix="intentos-preview-",
+    root = Path(tempfile.mkdtemp(prefix=DISPOSABLE_PREFIX,
                                  dir=str(parent) if parent else None))
     return root
+
+
+def owns_disposable_root(root: Path) -> bool:
+    """True only for a directory this module created."""
+    try:
+        return Path(root).name.startswith(DISPOSABLE_PREFIX)
+    except Exception:
+        return False
+
+
+def safe_dispose(root: Path) -> Dict[str, Any]:
+    """Remove a disposable root SAFELY, or report why it was retained.
+
+    TP-06C guarantees, deliberately narrow:
+      * only paths carrying the disposable prefix are ever deleted;
+      * the root itself is refused if it is a symlink or a Windows reparse
+        point, so a substituted link cannot redirect deletion elsewhere;
+      * no directory sweep is ever performed - exactly one known path is
+        removed;
+      * on any refusal the path is RETAINED and reported, never guessed at.
+    """
+    path = Path(root)
+    result: Dict[str, Any] = {"removed": False, "reason": "", "path": str(path)}
+    if not owns_disposable_root(path):
+        result["reason"] = "refused-not-a-disposable-root"
+        return result
+    if not path.exists() and not path.is_symlink():
+        result["reason"] = "already-absent"
+        result["removed"] = True
+        return result
+    # Never follow a substituted link out of the disposable root.
+    try:
+        if path.is_symlink():
+            result["reason"] = "refused-root-is-symlink"
+            return result
+        if IS_WINDOWS and (path.stat().st_file_attributes
+                           & FILE_ATTRIBUTE_REPARSE_POINT):
+            result["reason"] = "refused-root-is-reparse-point"
+            return result
+        if not path.is_dir():
+            result["reason"] = "refused-not-a-directory"
+            return result
+    except OSError as exc:
+        result["reason"] = f"refused-stat-failed:{exc.__class__.__name__}"
+        return result
+    try:
+        shutil.rmtree(path)
+        result["removed"] = True
+    except OSError as exc:
+        result["reason"] = f"retained-remove-failed:{exc.__class__.__name__}"
+    return result
 
 
 def propose_preview(

@@ -265,10 +265,16 @@ def build_native_executor(
         **({"now_provider": now_provider} if now_provider is not None else {}),
     )
     try:
-        return NativeCreateTestFileActionExecutor(
+        executor = NativeCreateTestFileActionExecutor(
             grant, containment=containment,
             expected_root_identity=expected_root_identity,
         )
+        # Record that THIS selector created the pinned handle, so the caller
+        # can release it. The executor does not own it (it was injected) and
+        # therefore would never close it, leaking a Windows directory handle
+        # that blocks deletion of the authorized root.
+        setattr(executor, "_created_containment", containment)
+        return executor
     except Exception as exc:
         containment.close()
         raise PreviewSelectionDenied("executor-construction-failed", str(exc)) from exc
@@ -379,10 +385,21 @@ async def run_bound_dispatch(
             outcome = await run(dedicated_runtime)
         finally:
             runtime_lock.release()
-            try:
-                executor.close()
-            except Exception:
-                pass
+            # Close the pinned native directory handle too. The executor was
+            # handed a pre-built containment and therefore does NOT own it,
+            # so without this the handle leaked and, on Windows, kept the
+            # authorized root locked so it could never be deleted.
+            for closer in (
+                getattr(getattr(executor, "_created_containment", None),
+                        "close", None),
+                getattr(executor, "close", None),
+            ):
+                if closer is None:
+                    continue
+                try:
+                    closer()
+                except Exception:
+                    pass
         return {
             "outcome": outcome,
             "effect_calls": executor.effect_calls,

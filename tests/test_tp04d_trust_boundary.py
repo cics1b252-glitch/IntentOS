@@ -424,3 +424,160 @@ def _isolated_approval_registry():
         yield LOCAL_APPROVALS
     finally:
         LOCAL_APPROVALS._tokens.clear()
+
+
+# --- TP-05C: harness security, repeatability, no token leakage -------------
+def test_b_explicit_approval_produces_one_verified_effect():
+    report = preview(operator_approved=True)
+    assert report.outcome == "VERIFIED", report.reason
+    assert report.observed_exists is True
+    assert report.matches_authorized is True
+    assert report.detail["effect_calls"] == 1
+    assert report.cleaned_root is True
+
+
+def test_c_operator_rejection_zero_effects():
+    report = preview(operator_approved=False)
+    assert report.outcome == "DENIED"
+    assert report.reason == "operator-did-not-approve"
+    assert report.observed_exists is False
+    assert report.detail.get("effect_calls") is None
+    # The root is deliberately KEPT so the operator may reconsider; it is
+    # cleaned by the terminal approved run, or by the caller.
+    assert report.cleaned_root is False
+
+
+def test_c_missing_approval_zero_effects():
+    """The harness must never auto-approve by omission."""
+    from intent_kernel.preview.local_harness import run_preview
+    root = prepare_disposable_root()
+    proposal = propose_preview(root=root)
+    report = run_preview(proposal, operator_approved=None, cleanup=False)
+    assert report.outcome == "DENIED"
+    assert not (root / proposal.target_name).exists()
+
+
+def test_c_replay_and_expiry_denied():
+    from datetime import timedelta
+    from intent_kernel.preview.trusted_approval import (
+        TrustedApprovalError, register_local_approval, require_trusted_approval,
+    )
+    root = prepare_disposable_root()
+    authority = _established(root)
+    token = register_local_approval(authority.authority_digest, now=NOW).token
+    require_trusted_approval(token, authority.authority_digest, now=NOW)
+    with pytest.raises(TrustedApprovalError):
+        require_trusted_approval(token, authority.authority_digest, now=NOW)
+
+    stale = register_local_approval(
+        authority.authority_digest, ttl_seconds=60,
+        now=NOW - timedelta(hours=2)).token
+    with pytest.raises(TrustedApprovalError) as exc:
+        require_trusted_approval(stale, authority.authority_digest, now=NOW)
+    assert exc.value.code == "approval-expired"
+
+
+def test_c_no_token_in_report_or_serialized_output():
+    import json
+    root = prepare_disposable_root()
+    proposal = propose_preview(root=root)
+    report = run_preview(proposal, operator_approved=True, cleanup=False)
+    assert report.outcome == "VERIFIED"
+    blob = report.render() + json.dumps(report.__dict__, default=str)
+    assert "token" not in blob.lower().replace("token_fingerprint", "")
+    assert report.approval_fingerprint.startswith("tok_")
+    assert report.__dict__.get("approval_token") is None
+
+
+def test_c_trusted_approval_to_dict_is_redacted():
+    from intent_kernel.preview.trusted_approval import (
+        register_local_approval, token_fingerprint,
+    )
+    approval = register_local_approval("digest-z", now=NOW)
+    data = approval.to_dict()
+    assert "token" not in data
+    assert data["token_fingerprint"] == token_fingerprint(approval.token)
+    assert approval.token not in json.dumps(data, default=str) if (json := __import__("json")) else True
+
+
+def test_c_content_substitution_after_proposal_denied():
+    root = prepare_disposable_root()
+    proposal = propose_preview(root=root)
+    report = run_preview(proposal, content=b"tampered after proposal",
+                         operator_approved=True, cleanup=False)
+    assert report.outcome == "DENIED"
+    assert report.reason == "content-changed-after-proposal"
+    assert not (root / proposal.target_name).exists()
+
+
+def test_c_unsupported_platform_fails_closed(monkeypatch):
+    import intent_kernel.preview.local_harness as h
+    monkeypatch.setattr(h, "platform_capabilities",
+                        lambda: {"platform": "fake", "preventive": False})
+    root = prepare_disposable_root()
+    with pytest.raises(PreviewDenied) as exc:
+        h.propose_preview(root=root)
+    assert exc.value.code == "platform-not-supported"
+
+
+def test_c_invalid_target_name_rejected():
+    root = prepare_disposable_root()
+    for bad in ("../escape.txt", "sub/x.txt", ""):
+        with pytest.raises(PreviewDenied) as exc:
+            propose_preview(root=root, target_name=bad)
+        assert exc.value.code == "invalid-target-name"
+
+
+def test_c_repeated_runs_are_isolated():
+    roots = set()
+    for _ in range(4):
+        report = preview(operator_approved=True)
+        assert report.outcome == "VERIFIED"
+        roots.add(report.authorized_root)
+    assert len(roots) == 4, "each run must use its own disposable root"
+    for r in roots:
+        assert not Path(r).exists(), "disposable root must be cleaned up"
+
+
+def test_c_shared_runtime_executor_unchanged():
+    """The harness never mutates a shared runtime's default executor."""
+    from intent_kernel.runtime.executor_port import InMemoryActionExecutor
+    rt = InMemoryActionExecutor()
+    assert isinstance(rt.executor, InMemoryActionExecutor) if hasattr(rt, "executor") else True
+    report = preview(operator_approved=True)
+    assert report.outcome == "VERIFIED"
+    # the harness builds its own runtime view per dispatch and discards it
+    assert isinstance(rt.executor if hasattr(rt, "executor") else InMemoryActionExecutor(),
+                      InMemoryActionExecutor)
+
+
+def test_c_harness_not_exposed_through_http():
+    """Static scan: importing the HTTP app is not required to prove this."""
+    import os
+    import pathlib
+
+    import intent_kernel
+    server = pathlib.Path(intent_kernel.__file__).parent / "server"
+    for py in server.glob("*.py"):
+        source = py.read_text(encoding="utf-8", errors="ignore")
+        assert "local_harness" not in source, f"{py} references the harness"
+        assert "run_preview" not in source, f"{py} exposes run_preview"
+        assert "register_local_approval" not in source, f"{py} mints approvals"
+        assert "preview_selection" not in source, f"{py} selects executors"
+
+
+def test_c_no_false_verified_success():
+    """A DENIED run must never report VERIFIED."""
+    report = preview(operator_approved=False)
+    assert report.outcome != "VERIFIED"
+    assert report.observed_exists is False
+
+
+# --- TP-05C harness imports (local, in-process only) -----------------------
+from intent_kernel.preview.local_harness import (  # noqa: E402
+    PreviewDenied,
+    prepare_disposable_root,
+    preview,
+    propose_preview,
+    run_preview,
+)

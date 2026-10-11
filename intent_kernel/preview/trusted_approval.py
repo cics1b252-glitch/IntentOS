@@ -65,8 +65,16 @@ class TrustedApproval:
     expires_at: str
 
     def to_dict(self) -> Dict[str, str]:
+        """REDACTED (TP-05B). The raw token is NEVER serialized.
+
+        This method previously returned the token verbatim. It had no callers,
+        so redacting it broke no contract while removing a latent leak: any
+        future caller that logged or JSON-serialized an approval object would
+        have leaked a live bearer capability. ``token_fingerprint`` is enough
+        to correlate an approval for audit without disclosing it.
+        """
         return {
-            "token": self.token,
+            "token_fingerprint": token_fingerprint(self.token),
             "authority_digest": self.authority_digest,
             "approved_at": self.approved_at,
             "expires_at": self.expires_at,
@@ -122,6 +130,15 @@ class _Registry:
 
 #: Process-local registry. Populated ONLY by direct operator call.
 LOCAL_APPROVALS = _Registry()
+
+
+def token_fingerprint(token: str) -> str:
+    """Non-reversible correlation id for audit. NOT the token."""
+    if not isinstance(token, str) or not token:
+        return ""
+    return "tok_" + hmac.new(
+        b"intentos-preview-fingerprint", token.encode("utf-8"), "sha256"
+    ).hexdigest()[:16]
 
 
 def register_local_approval(authority_digest: str,

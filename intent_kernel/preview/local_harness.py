@@ -157,12 +157,139 @@ class PreviewReport:
 #: Prefixes of disposable roots this module creates. Cleanup refuses to touch
 #: anything outside them, so an attacker-supplied path can never be deleted.
 DISPOSABLE_PREFIX = "intentos-preview-"
+LOCK_NAME = "intentos-preview.lock"
+
+
+def _try_open_exclusive(path: Path) -> bool:
+    """True if THIS process can exclusively open the lock file.
+
+    On Windows, opening with dwShareMode=0 means no other process that
+    already holds the file can share it. If another live preview holds the
+    lock, this open fails with a sharing violation -> the root is ACTIVE.
+    If it succeeds, no live process holds it -> the owning process is dead.
+    """
+    import ctypes
+    import ctypes.wintypes as w
+    if sys.platform != "win32":
+        import os
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_EXCL)
+            os.close(fd)
+            return True
+        except OSError:
+            return False
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong,
+                                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+                                ctypes.c_void_p]
+    k32.CreateFileW.restype = ctypes.c_void_p
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    GENERIC_READ_WRITE = 0xC0000000
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    handle = k32.CreateFileW(str(path), GENERIC_READ_WRITE, 0, None,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
+    invalid = ctypes.c_void_p(-1).value
+    if handle is None or handle == invalid:
+        return False
+    k32.CloseHandle(handle)
+    return True
+
+
+def acquire_lock(root: Path) -> bool:
+    """Create and hold the preview lock. Returns True on success.
+
+    Called as the FIRST action after root creation. The handle stays open
+    for the process lifetime; the OS releases it on exit or crash.
+    """
+    lock = Path(root) / LOCK_NAME
+    try:
+        lock.write_bytes(b"")
+    except OSError:
+        return False
+    return _try_open_exclusive(lock)
+
+
+def is_root_active(root: Path) -> bool:
+    """True if a live process holds this root's lock.
+
+    A missing lock file means insufficient ownership evidence: the root is
+    NOT deleted, only reported.
+    """
+    lock = Path(root) / LOCK_NAME
+    if not lock.exists():
+        return False          # no lock -> cannot prove abandonment
+    return not _try_open_exclusive(lock)   # open fails -> someone holds it
+
+
+def recover_abandoned_roots(
+    parent: Optional[Path] = None,
+    *,
+    delete: bool = False,
+    max_age_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Find and optionally remove abandoned disposable roots.
+
+    Ownership proof (TP-08B):
+      * the path must carry the disposable prefix (necessary, NOT sufficient)
+      * a lock file must exist (necessary)
+      * that lock must be exclusively openable, i.e. no live process holds it
+    A directory matching the prefix but lacking a lock is REPORTED, never
+    deleted: prefix alone is not authorization.
+
+    delete=False gives report-only discovery.
+    """
+    parent = Path(parent) if parent is not None else Path(
+        tempfile.gettempdir())
+    results: Dict[str, Any] = {"scanned": 0, "active": [], "abandoned": [],
+                               "no_lock": [], "removed": [], "failed": []}
+    try:
+        candidates = sorted(parent.glob(DISPOSABLE_PREFIX + "*"))
+    except OSError as exc:
+        results["error"] = str(exc)
+        return results
+    for path in candidates:
+        if not path.is_dir() or path.is_symlink():
+            continue
+        results["scanned"] += 1
+        if is_root_active(path):
+            results["active"].append(str(path))
+            continue
+        lock = path / LOCK_NAME
+        if not lock.exists():
+            results["no_lock"].append(str(path))
+            continue
+        if max_age_seconds is not None:
+            try:
+                age = (datetime.now().timestamp()
+                       - lock.stat().st_mtime)
+                if age < max_age_seconds:
+                    results["active"].append(str(path))
+                    continue
+            except OSError:
+                results["failed"].append(str(path))
+                continue
+        if not delete:
+            results["abandoned"].append(str(path))
+            continue
+        outcome = safe_dispose(path)
+        if outcome["removed"]:
+            results["removed"].append(str(path))
+        else:
+            results["failed"].append(str(path))
+    return results
 
 
 def prepare_disposable_root(parent: Optional[Path] = None) -> Path:
-    """Create an isolated, disposable directory for one preview run."""
+    """Create an isolated, disposable directory for one preview run.
+
+    Also acquires the ownership lock as the FIRST action. If the lock cannot
+    be acquired, the root is still returned but has no lock — recovery will
+    then treat it as unowned and never delete it.
+    """
     root = Path(tempfile.mkdtemp(prefix=DISPOSABLE_PREFIX,
                                  dir=str(parent) if parent else None))
+    acquire_lock(root)
     return root
 
 
@@ -199,6 +326,18 @@ def safe_dispose(root: Path) -> Dict[str, Any]:
         if path.is_symlink():
             result["reason"] = "refused-root-is-symlink"
             return result
+        # Refuse if ANY child is a symlink or reparse point.
+        for child in path.rglob("*"):
+            try:
+                if child.is_symlink():
+                    result["reason"] = "refused-symlink-child"
+                    return result
+                if IS_WINDOWS and (child.stat().st_file_attributes
+                                   & FILE_ATTRIBUTE_REPARSE_POINT):
+                    result["reason"] = "refused-reparse-child"
+                    return result
+            except OSError:
+                continue
         if IS_WINDOWS and (path.stat().st_file_attributes
                            & FILE_ATTRIBUTE_REPARSE_POINT):
             result["reason"] = "refused-root-is-reparse-point"

@@ -22,6 +22,7 @@ import sys
 from typing import List, Optional, Sequence
 
 from intent_kernel.preview.local_harness import (
+    DEFAULT_CONTENT,
     PreviewDenied,
     prepare_disposable_root,
     propose_preview,
@@ -138,7 +139,7 @@ def run_cli(argv: Optional[Sequence[str]] = None,
     content = (
         args.message.encode("utf-8")
         if args.message is not None
-        else None
+        else DEFAULT_CONTENT
     )
     try:
         proposal = propose_preview(

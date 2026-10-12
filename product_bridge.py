@@ -1684,6 +1684,13 @@ Estratégia completa registrada no histórico para execução."""
         completion_evidence = tuple(
             getattr(instance, "completion_evidence", ()) or ()
         )
+
+        # TP-09W: additive grounded observation bound to the SAME trusted
+        # runtime context (mission, action, authorized target, durable proof).
+        # It does not replace the existing observation or VerificationGate.
+        grounded_metadata = self._grounded_observation_metadata(
+            grant, mission, executed_node, node, completion_evidence,
+        )
         return CanonicalTurnResult.mission(
             "O arquivo de teste foi criado em efeito real, verificado pela "
             "VerificationGate e confirmado por observação independente do "
@@ -1724,8 +1731,119 @@ Estratégia completa registrada no histórico para execução."""
                     "canonical_state": instance.lifecycle_status,
                 },
                 "domain": "native-governed-create-test-file",
+                "grounded_observation": grounded_metadata,
             },
         )
+
+    def _grounded_observation_metadata(
+        self,
+        grant: Any,
+        mission: Any,
+        executed_node: Any,
+        node: Any,
+        completion_evidence: tuple,
+    ) -> dict[str, Any]:
+        """TP-09W: bind a GroundedFilesystemObserver to trusted runtime context.
+
+        Returns descriptive metadata ONLY. It never authorizes, never replaces
+        the VerificationGate, and never claims cryptographic origin
+        authentication. If the durable proof is absent or observation fails,
+        it reports the gap rather than fabricating evidence.
+        """
+        node_id = (
+            str(getattr(executed_node, "node_id", "") or "")
+            or str(getattr(node, "node_id", "") or "")
+        )
+        # TP-09Z: the proof reference MUST be the genuine, gate-issued,
+        # mission/action-bound ActionVerificationProof digest read from the
+        # durable MissionRecord. No fallback is synthesized from arbitrary
+        # completion evidence.
+        durable_proof_digest, action_id = self._durable_gate_proof_digest(
+            str(mission.id), node_id,
+        )
+        if not durable_proof_digest:
+            return {"available": False,
+                    "reason": "gate-proof-unavailable-or-unverified"}
+        from intent_kernel.adapters.grounded_observation import (
+            GroundedFilesystemObserver,
+            GroundingError,
+        )
+        try:
+            grounded = GroundedFilesystemObserver(
+                grant, str(mission.id), action_id, durable_proof_digest,
+            ).observe()
+        except GroundingError as exc:
+            return {"available": False, "reason": f"grounding-denied:{exc.code}"}
+
+        return {
+            "available": True,
+            "binding": "mission+action+authorized-target+durable-proof",
+            "mission_id": grounded.mission_id,
+            "action_id": grounded.action_id,
+            "authorized_target": grounded.authorized_target,
+            "observed_sha256": grounded.observed_sha256,
+            "content_matches": grounded.content_matches,
+            "observed_at": grounded.observed_at,
+            "record_digest": grounded.record_digest,
+            "scope": (
+                "observer-origin content integrity + target/identity binding; "
+                "NOT unique execution identity; NOT cryptographic origin "
+                "authentication"
+            ),
+        }
+
+    def _durable_gate_proof_digest(
+        self, mission_id: str, node_id: str,
+    ) -> tuple[str, str]:
+        """TP-09Z: read the GENUINE gate-issued ActionVerificationProof digest.
+
+        The digest is read from the durable MissionRecord action state where
+        ``_record_durable_gate_verification`` anchored it. It is accepted ONLY
+        when it is internally consistent (``proof_digest`` recomputes over the
+        stored evidence record) AND bound to the same mission and node. Missing,
+        malformed or mismatched proof -> ("", "") (fail closed). Returns the
+        validated ``(proof_digest, proof_action_id)``.
+        """
+        if not mission_id or not node_id:
+            return "", ""
+        runtime = getattr(self.components, "mission_runtime", None)
+        store = getattr(runtime, "_mission_record_store", None)
+        if store is None:
+            return "", ""
+        try:
+            data = store.load(mission_id)
+        except Exception:
+            return "", ""
+        if not isinstance(data, dict):
+            return "", ""
+        states = data.get("action_states") or {}
+        if not isinstance(states, dict):
+            return "", ""
+        from intent_kernel.runtime.mission_runtime import (
+            _recompute_proof_digest,
+        )
+        for aid, astate in states.items():
+            if not isinstance(astate, dict):
+                continue
+            if not (
+                astate.get("node_id") == node_id
+                or astate.get("action_id") == node_id
+                or aid == node_id
+            ):
+                continue
+            digest = str(astate.get("verification_proof_digest") or "")
+            record = astate.get("verification_evidence")
+            if not digest or not isinstance(record, dict):
+                continue
+            if record.get("mission_id") != mission_id:
+                continue
+            proof_action_id = str(record.get("action_id") or "")
+            if not proof_action_id:
+                continue
+            if _recompute_proof_digest(record) != digest:
+                continue
+            return digest, proof_action_id
+        return "", ""
 
     def _native_node(
         self,

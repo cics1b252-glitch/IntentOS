@@ -12,7 +12,7 @@ import traceback
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from uuid import uuid4
 
 from intent_kernel.application import ApplicationFactory, KernelBuilder
@@ -253,7 +253,12 @@ class ProductBridge:
         self.last_pending_dialogue_match: dict[str, Any] | None = None
         self.last_conversation_authority: dict[str, Any] | None = None
 
-    async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def dispatch(
+        self,
+        request: dict[str, Any],
+        *,
+        operator_approval_token: Optional[str] = None,
+    ) -> dict[str, Any]:
         # M33.2C: isolate trusted caller provenance (set only by ingress
         # authenticator) from client-controlled context. Raw credential
         # material never enters mission authority or evidence.
@@ -405,7 +410,9 @@ class ProductBridge:
         if action == "intent" or action == "chat":
             if "text" in request and "message" not in request:
                 request["message"] = request["text"]
-            response = await self._chat(request)
+            response = await self._chat(
+                request, operator_approval_token=operator_approval_token
+            )
             return await self._govern_response(response, request)
         if action == "diagnostics" or action == "flow_diagnostics":
             return {
@@ -431,7 +438,63 @@ class ProductBridge:
             return {"ok": True, "session": self._load_session(session_id)}
         return {"ok": False, "error": "Ação interna desconhecida."}
 
-    async def _chat(self, request: dict[str, Any]) -> CanonicalTurnResult:
+    def propose_native_authority(self, request: dict[str, Any]) -> str:
+        """TP-08F-R1: read-only proposal of the EXACT native authority digest.
+
+        Returns the authority digest a native dispatch for ``request`` would
+        bind to, so a trusted local operator can approve THAT EXACT authority.
+        It performs no effect, builds no executor and mints no approval. Raises
+        ``ValueError`` when the request carries no explicit authority grant.
+        """
+        grant_raw = request.get("intent_authority_grant")
+        if grant_raw is None:
+            context_raw = request.get("context")
+            if isinstance(context_raw, dict):
+                grant_raw = context_raw.get("intent_authority_grant")
+        if not grant_raw:
+            raise ValueError("request carries no intent_authority_grant")
+        from intent_kernel.mission.intent_grant import (
+            IntentAuthorityGrant,
+            establish_intent_authority_from_grant,
+        )
+        grant = (
+            grant_raw if isinstance(grant_raw, IntentAuthorityGrant)
+            else IntentAuthorityGrant.from_dict(grant_raw)
+        )
+        authority = establish_intent_authority_from_grant(
+            grant, now_iso=utc_iso()
+        )
+        return authority.authority_digest
+
+    async def dispatch_operator_approved(
+        self,
+        request: dict[str, Any],
+        *,
+        approval_token: str,
+    ) -> dict[str, Any]:
+        """TP-08F-R1: trusted LOCAL OPERATOR entry (never reachable via HTTP).
+
+        ``approval_token`` MUST have been minted by a trusted local operator
+        through ``intent_kernel.preview.trusted_approval.register_local_approval``
+        for the EXACT authority digest returned by :meth:`propose_native_authority`.
+        The token is supplied directly by the in-process local caller and is
+        NEVER read from the request body, ``context``, environment, planner or
+        provider output, or any agent-controlled input. The plain HTTP entry
+        :meth:`dispatch` never supplies a token, so the native route fails
+        closed there. This method mints nothing: approval must pre-exist.
+        """
+        if not isinstance(approval_token, str) or not approval_token.strip():
+            raise ValueError("operator approval token required")
+        return await self.dispatch(
+            request, operator_approval_token=approval_token
+        )
+
+    async def _chat(
+        self,
+        request: dict[str, Any],
+        *,
+        operator_approval_token: Optional[str] = None,
+    ) -> CanonicalTurnResult:
         correlation_id = str(request.get("correlation_id") or uuid4())
         started = time.perf_counter()
         self.last_pending_dialogue_match = None
@@ -520,7 +583,8 @@ class ProductBridge:
         bounded_native = request.get("create_test_file")
         if isinstance(bounded_native, dict) and bounded_native:
             return await self._run_native_governed_effect(
-                message, bounded_native, context
+                message, bounded_native, context,
+                operator_approval_token=operator_approval_token,
             )
 
         def persist_turn(record: dict[str, Any]) -> None:
@@ -1434,6 +1498,8 @@ Estratégia completa registrada no histórico para execução."""
         message: str,
         bounded: dict[str, Any],
         context: dict[str, Any],
+        *,
+        operator_approval_token: Optional[str] = None,
     ) -> CanonicalTurnResult:
         """TP-03: one governed native CREATE_TEST_FILE effect from a real entry.
 
@@ -1566,6 +1632,7 @@ Estratégia completa registrada no histórico para execução."""
                 run=lambda runtime: self._native_run_on(
                     runtime, mission, node, _authority, context["project_id"],
                 ),
+                approval_token=operator_approval_token,
             )
         except PreviewSelectionDenied as exc:
             return self._native_denied_result(mission, exc.code, exc.detail)

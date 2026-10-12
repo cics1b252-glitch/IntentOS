@@ -41,6 +41,7 @@ from intent_kernel.mission.intent_grant import (
     approve_intent_authority,
     propose_intent_authority,
 )
+from intent_kernel.preview.trusted_approval import register_local_approval
 from intent_kernel.runtime.executor_port import InMemoryActionExecutor
 
 NOW = "2026-10-03T00:00:00+00:00"
@@ -131,6 +132,20 @@ def _request(root, *, grant, target_name="tp03_effect.txt", content=CONTENT,
     return request
 
 
+async def _operator_dispatch(bridge, request, *, token=None):
+    """TP-08F-R1: drive the native route through the trusted OPERATOR entry.
+
+    A trusted local operator approves the EXACT authority digest and passes the
+    single-use token directly to ``dispatch_operator_approved``. The token is
+    never placed in the request/context, so the plain HTTP ``dispatch`` path
+    cannot reach the native executor.
+    """
+    if token is None:
+        digest = bridge.propose_native_authority(request)
+        token = register_local_approval(digest).token
+    return await bridge.dispatch_operator_approved(request, approval_token=token)
+
+
 def _assert_denied_zero_effect(response, root, *, code=None, files=()):
     assert response["execution_mode"] == "FAILED"
     assert response["ok"] is False
@@ -160,7 +175,8 @@ async def test_tp03_b_positive_native_governed_effect(tmp_path, monkeypatch):
     original_executor = shared.executor
     assert isinstance(original_executor, InMemoryActionExecutor)
 
-    response = await bridge.dispatch(_request(root, grant=_grant(root)))
+    response = await _operator_dispatch(
+        bridge, _request(root, grant=_grant(root)))
 
     # --- canonical product outcome ---
     assert response["execution_mode"] == "MISSION"
@@ -375,11 +391,11 @@ async def test_tp03_c_duplicate_execution_denied(tmp_path, monkeypatch):
     bridge = _bridge(tmp_path, monkeypatch)
     grant = _grant(root)
 
-    first = await bridge.dispatch(_request(root, grant=grant))
+    first = await _operator_dispatch(bridge, _request(root, grant=grant))
     assert first["execution_mode"] == "MISSION"
     assert first["executor_effect_calls"] == 1
 
-    second = await bridge.dispatch(_request(root, grant=grant))
+    second = await _operator_dispatch(bridge, _request(root, grant=grant))
     assert second["native_denied"] is True
     assert second["reason_code"] == "effect-not-verified"
     # Exactly one file exists and its content is the original authorized one.

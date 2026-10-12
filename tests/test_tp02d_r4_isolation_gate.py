@@ -38,6 +38,7 @@ from intent_kernel.adapters.preview_selection import (
 from intent_kernel.runtime.checkpoints import InMemoryCheckpointRepository
 from intent_kernel.runtime.executor_port import InMemoryActionExecutor
 from intent_kernel.runtime.models import ActionContract, MissionCheckpoint
+from intent_kernel.preview.trusted_approval import register_local_approval
 
 from tests.test_tp02_preview_integration import (
     CONTENT,
@@ -48,6 +49,16 @@ from tests.test_tp02_preview_integration import (
 )
 
 CLOCK = lambda: NOW  # noqa: E731
+
+
+def _tok(authority):
+    """TP-08F-R1: a REAL operator approval for the EXACT authority digest.
+
+    Approval and authority are judged by the same frozen clock. Single use:
+    each dispatch needs its own token, exactly as a trusted operator would mint
+    one per approved effect.
+    """
+    return register_local_approval(authority.authority_digest, now=NOW).token
 
 
 class _SharedRuntime:
@@ -100,7 +111,8 @@ def test_r4_dedicated_runtime_binds_executor_and_shares_durable_services(tmp_pat
     root = _root(tmp_path)
     authority = _established(root)
     ex = build_native_executor(authority=authority, authorized_root=root,
-                               target_name="a.txt", content=CONTENT)
+                               target_name="a.txt", content=CONTENT,
+                               now_provider=CLOCK, approval_token=_tok(authority))
     try:
         dedicated = build_dedicated_runtime(shared, ex)
         assert dedicated is not shared
@@ -140,7 +152,8 @@ def test_r4_zero_post_construction_executor_writes(tmp_path):
 
     res = asyncio.run(run_bound_dispatch(
         mission_runtime=shared, authority=authority, authorized_root=root,
-        target_name="z.txt", content=CONTENT, run=run, now_provider=CLOCK))
+        target_name="z.txt", content=CONTENT, run=run, now_provider=CLOCK,
+        approval_token=_tok(authority)))
     assert res["effect_calls"] == 1
     assert isinstance(captured["at_entry"], NativeCreateTestFileActionExecutor)
     assert captured["after"] is captured["at_entry"]  # never reassigned
@@ -163,7 +176,8 @@ def test_r5_dedicated_runtime_is_unpublished(tmp_path):
 
     asyncio.run(run_bound_dispatch(
         mission_runtime=shared, authority=authority, authorized_root=root,
-        target_name="u.txt", content=CONTENT, run=run, now_provider=CLOCK))
+            target_name="u.txt", content=CONTENT, run=run, now_provider=CLOCK,
+            approval_token=_tok(authority)))
 
     dedicated = captured["d"]
     assert dedicated is not shared
@@ -191,7 +205,8 @@ def test_r5_real_effect_observed_exact_target(tmp_path):
 
     res = asyncio.run(run_bound_dispatch(
         mission_runtime=shared, authority=authority, authorized_root=root,
-        target_name="exact.txt", content=CONTENT, run=run, now_provider=CLOCK))
+        target_name="exact.txt", content=CONTENT, run=run, now_provider=CLOCK,
+        approval_token=_tok(authority)))
     assert res["effect_calls"] == 1
     assert res["denials"] == []
     assert (root / "exact.txt").read_bytes() == CONTENT
@@ -220,7 +235,7 @@ def test_r5_checkpoint_continuity_across_dedicated_instances(tmp_path):
         asyncio.run(run_bound_dispatch(
             mission_runtime=shared, authority=authority, authorized_root=root,
             target_name=f"c{len(captured) + 1}.txt", content=CONTENT,
-            run=run, now_provider=CLOCK))
+            run=run, now_provider=CLOCK, approval_token=_tok(authority)))
 
     d1, d2 = captured[0], captured[1]
     assert d1 is not d2
@@ -252,7 +267,8 @@ def test_r5_authority_identity_preserved(tmp_path):
 
     asyncio.run(run_bound_dispatch(
         mission_runtime=shared, authority=authority, authorized_root=root,
-        target_name="id.txt", content=CONTENT, run=run, now_provider=CLOCK))
+        target_name="id.txt", content=CONTENT, run=run, now_provider=CLOCK,
+        approval_token=_tok(authority)))
 
     dedicated = captured["d"]
     # Constitution identity is the same live object (no shadow authority).
@@ -279,7 +295,8 @@ def test_r5_denials_revocation_target_content_duplicate(tmp_path):
 
     res = asyncio.run(run_bound_dispatch(
         mission_runtime=shared, authority=authority, authorized_root=root,
-        target_name="dup.txt", content=CONTENT, run=dup, now_provider=CLOCK))
+        target_name="dup.txt", content=CONTENT, run=dup, now_provider=CLOCK,
+        approval_token=_tok(authority)))
     first, second = res["outcome"]
     assert first["effect_occurred"] is True
     assert second["effect_occurred"] is False
@@ -292,7 +309,8 @@ def test_r5_denials_revocation_target_content_duplicate(tmp_path):
 
     res = asyncio.run(run_bound_dispatch(
         mission_runtime=shared, authority=authority, authorized_root=root,
-        target_name="cs.txt", content=CONTENT, run=bad_content, now_provider=CLOCK))
+        target_name="cs.txt", content=CONTENT, run=bad_content, now_provider=CLOCK,
+        approval_token=_tok(authority)))
     assert res["outcome"]["effect_occurred"] is False
     assert res["effect_calls"] == 0
     assert not (root / "cs.txt").exists()
@@ -303,14 +321,16 @@ def test_r5_denials_revocation_target_content_duplicate(tmp_path):
 
     res = asyncio.run(run_bound_dispatch(
         mission_runtime=shared, authority=authority, authorized_root=root,
-        target_name="ts.txt", content=CONTENT, run=bad_target, now_provider=CLOCK))
+        target_name="ts.txt", content=CONTENT, run=bad_target, now_provider=CLOCK,
+        approval_token=_tok(authority)))
     assert res["effect_calls"] == 0
     assert not (root / "other.txt").exists()
     assert not (root / "ts.txt").exists()
 
     # revocation (re-proven at effect time)
     ex = build_native_executor(authority=authority, authorized_root=root,
-                               target_name="rev.txt", content=CONTENT)
+                               target_name="rev.txt", content=CONTENT,
+                               now_provider=CLOCK, approval_token=_tok(authority))
     ex._native._grant.revoked = True
     receipt = asyncio.run(ex.execute(_contract_named("rev.txt")))
     ex.close()
@@ -335,7 +355,8 @@ def test_r5_unsupported_containment_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(PreviewSelectionDenied) as exc:
         asyncio.run(run_bound_dispatch(
             mission_runtime=shared, authority=authority, authorized_root=root,
-            target_name="u.txt", content=CONTENT, run=run, now_provider=CLOCK))
+        target_name="u.txt", content=CONTENT, run=run, now_provider=CLOCK,
+        approval_token=_tok(authority)))
     assert exc.value.code == "native-containment-unsupported"
     assert not (root / "u.txt").exists()
     assert shared.executor is original
@@ -358,7 +379,8 @@ def test_r5_concurrent_threads_single_effect(tmp_path):
         try:
             outcomes.append(asyncio.run(run_bound_dispatch(
                 mission_runtime=shared, authority=authority, authorized_root=root,
-                target_name="thr.txt", content=CONTENT, run=run, now_provider=CLOCK)))
+                target_name="thr.txt", content=CONTENT, run=run, now_provider=CLOCK,
+                approval_token=_tok(authority))))
         except Exception as exc:  # pragma: no cover
             outcomes.append(exc)
 
@@ -387,7 +409,8 @@ def test_r5_cancellation_leaves_shared_runtime_untouched(tmp_path):
     async def main():
         task = asyncio.ensure_future(run_bound_dispatch(
             mission_runtime=shared, authority=authority, authorized_root=root,
-            target_name="cancel.txt", content=CONTENT, run=run, now_provider=CLOCK))
+            target_name="cancel.txt", content=CONTENT, run=run, now_provider=CLOCK,
+            approval_token=_tok(authority)))
         await asyncio.sleep(0.05)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -410,7 +433,8 @@ def test_r5_exception_leaves_shared_runtime_untouched(tmp_path):
     with pytest.raises(RuntimeError):
         asyncio.run(run_bound_dispatch(
             mission_runtime=shared, authority=authority, authorized_root=root,
-            target_name="boom.txt", content=CONTENT, run=boom, now_provider=CLOCK))
+            target_name="boom.txt", content=CONTENT, run=boom, now_provider=CLOCK,
+            approval_token=_tok(authority)))
     assert shared.executor is original
     assert not (root / "boom.txt").exists()
 

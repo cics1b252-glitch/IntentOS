@@ -296,12 +296,21 @@ def test_c_cleanup_refuses_symlink_root():
 
 
 def test_c_cleanup_is_not_a_directory_sweep():
-    """Cleanup targets exactly one known path; it never enumerates."""
+    """safe_dispose deletes exactly one known path; it never sweeps.
+
+    TP-08C added rglob for symlink/reparse-child refusal checks, but rmtree is
+    still called on exactly one path - the one passed to safe_dispose.
+    """
     import intent_kernel.preview.local_harness as h
     source = open(h.__file__, encoding="utf-8").read()
-    assert "glob" not in source
-    assert "iterdir" not in source
-    assert "rmtree(" in source
+    start = source.index("def safe_dispose")
+    end = source.index("\ndef ", start + 1) if "\ndef " in source[start:] else len(source)
+    dispose_body = source[start:end]
+    # rmtree is called exactly once, on the path argument
+    assert dispose_body.count("shutil.rmtree(") == 1
+    assert "rglob" in dispose_body  # used only for refusal, not deletion
+    # recover_abandoned_roots may use glob but only with disposable prefix
+    assert "DISPOSABLE_PREFIX" in source
 
 
 def test_c_cli_cleans_root_on_every_terminal_decline():

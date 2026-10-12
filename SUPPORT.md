@@ -95,6 +95,35 @@ refusal, execution exception). Cleanup is bounded: only paths carrying the
 refused; no directory sweep is performed. If removal fails, the path is
 retained and reported, never guessed at.
 
+## Recovery of abandoned roots
+
+If the CLI crashes or is terminated before cleanup, its disposable root remains on disk. A recovery function can find and remove such roots, but **only** with the following guarantees:
+
+- The path must carry the `intentos-preview-` prefix (necessary, not sufficient).
+- A lock file `intentos-preview.lock` must exist inside it.
+- That lock must be **exclusively openable**, meaning no live process holds it.
+
+A directory matching the prefix but lacking a lock is **reported, never deleted**. A locked root means a live process holds it: retained.
+
+**TOCTOU limitation (explicit):** the exclusive-lock test proves a root is not actively held. It does **not** prove immunity to a same-user process replacing the directory with a symlink between the lock check and the delete. That window is not eliminated by this design. Destructive recovery is therefore exposed only to trusted local invocation and is **not** run automatically.
+
+`recover_abandoned_roots()` defaults to report-only (`delete=False`). Destructive recovery requires an explicit trusted local call with `delete=True`.
+
+## Trusted local operator approval boundary
+
+Native preview effects require a **trusted local operator approval**. The approval:
+
+- Is minted only by a direct in-process call to `register_local_approval(authority_digest)`.
+- Is never read from HTTP request body, `context`, environment variables, CLI arguments, planner or agent output.
+- Binds to the **exact** authority digest returned by `propose_native_authority(request)`.
+- Is **single-use**: consumed once, then burned.
+- Expires after a bounded TTL (default 300 seconds).
+- Uses constant-time comparison (`hmac.compare_digest`).
+
+The plain HTTP entry (`dispatch`) never supplies a token, so the native route fails closed there. The trusted local entry (`dispatch_operator_approved`) requires a pre-existing token minted by the operator.
+
+**`CALLER_ASSERTED_GRANT != APPROVED_AUTHORITY`**: an `IntentAuthorityGrant` proves only self-consistency, not approval. `SCOPE_DIGEST != APPROVAL_AUTHENTICITY`: the scope digest is computable by any caller. `AUTHENTICATED_CALLER != AUTHORIZED_APPROVER`: a valid API key authenticates the caller but cannot approve authority.
+
 ## What this is NOT
 
 - Not a network service.
@@ -102,3 +131,4 @@ retained and reported, never guessed at.
 - Not a general filesystem utility.
 - Not a supported-API guarantee for `NtCreateFile`.
 - Not a defence against in-process code execution.
+- Not automatic destructive cleanup.

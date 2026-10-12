@@ -86,6 +86,7 @@ class _Registry:
 
     def __init__(self) -> None:
         self._tokens: Dict[str, TrustedApproval] = {}
+        self._semantic_tokens: Dict[str, SemanticApproval] = {}
         self._lock = threading.Lock()
 
     def issue(self, authority_digest: str, ttl_seconds: float,
@@ -127,6 +128,29 @@ class _Registry:
         with self._lock:
             return len(self._tokens)
 
+    def consume_semantic(self, token: str, contract_digest: str,
+                         mission_id: str, evaluation_version: str,
+                         now: Optional[datetime] = None) -> "SemanticApproval":
+        """Verify then BURN a semantic approval under the registry lock."""
+        if not isinstance(token, str) or not token:
+            raise TrustedApprovalError("approval-token-missing")
+        now = now or datetime.now(timezone.utc)
+        with self._lock:
+            approval = self._semantic_tokens.get(token)
+            if approval is None:
+                raise TrustedApprovalError("approval-token-unknown")
+            if not hmac.compare_digest(approval.contract_digest, contract_digest):
+                raise TrustedApprovalError("approval-contract-mismatch")
+            if approval.mission_id != mission_id:
+                raise TrustedApprovalError("approval-mission-mismatch")
+            if approval.evaluation_version != evaluation_version:
+                raise TrustedApprovalError("approval-version-mismatch")
+            if now >= datetime.fromisoformat(approval.expires_at):
+                self._semantic_tokens.pop(token, None)
+                raise TrustedApprovalError("approval-expired")
+            self._semantic_tokens.pop(token, None)
+            return approval
+
 
 #: Process-local registry. Populated ONLY by direct operator call.
 LOCAL_APPROVALS = _Registry()
@@ -156,3 +180,73 @@ def require_trusted_approval(token: str, authority_digest: str,
                              now: Optional[datetime] = None) -> TrustedApproval:
     """Fail closed unless a valid, unconsumed, matching approval exists."""
     return LOCAL_APPROVALS.consume(token, authority_digest, now=now)
+
+
+# ---------------------------------------------------------------------------
+# TP-09J: semantic contract approval
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SemanticApproval:
+    """Trusted approval for one exact semantic contract evaluation."""
+
+    token: str
+    contract_digest: str
+    mission_id: str
+    evaluation_version: str
+    approved_at: str
+    expires_at: str
+
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            "token_fingerprint": token_fingerprint(self.token),
+            "contract_digest": self.contract_digest,
+            "mission_id": self.mission_id,
+            "evaluation_version": self.evaluation_version,
+            "approved_at": self.approved_at,
+            "expires_at": self.expires_at,
+        }
+
+
+def register_semantic_approval(
+    contract_digest: str,
+    mission_id: str,
+    evaluation_version: str,
+    ttl_seconds: float = DEFAULT_TTL_SECONDS,
+    now: Optional[datetime] = None,
+) -> SemanticApproval:
+    """Operator action: approve ONE exact semantic contract for ONE mission.
+
+    Binds to: contract digest + mission identity + evaluation version.
+    Single-use, expiring, in-process only.
+    """
+    if not contract_digest or not mission_id or not evaluation_version:
+        raise TrustedApprovalError("semantic approval requires all bindings")
+    now = now or datetime.now(timezone.utc)
+    approval = SemanticApproval(
+        token=secrets.token_urlsafe(TOKEN_BYTES),
+        contract_digest=contract_digest,
+        mission_id=mission_id,
+        evaluation_version=evaluation_version,
+        approved_at=now.isoformat(),
+        expires_at=(now + timedelta(seconds=ttl_seconds)).isoformat(),
+    )
+    LOCAL_APPROVALS._semantic_tokens[approval.token] = approval
+    return approval
+
+
+def require_semantic_approval(
+    token: str,
+    contract_digest: str,
+    mission_id: str,
+    evaluation_version: str,
+    now: Optional[datetime] = None,
+) -> SemanticApproval:
+    """Verify then BURN a semantic approval. Fails closed on any mismatch.
+
+    Delegates to the registry so get-and-burn is atomic under the registry
+    lock; two concurrent callers cannot both consume the same token.
+    """
+    return LOCAL_APPROVALS.consume_semantic(
+        token, contract_digest, mission_id, evaluation_version, now=now
+    )
